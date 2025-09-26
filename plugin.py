@@ -343,7 +343,7 @@ class BaseDrawCommand(BaseCommand, ABC):
 
         # 3. 回退到发送者自己的头像
         logger.info("未找到图片、Emoji或@提及，回退到发送者头像。")
-        user_id = self.message.message_info.user_info.user_info.user_id
+        user_id = self.message.message_info.user_info.user_id
         return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640", proxy)
 
     @abstractmethod
