@@ -1,0 +1,5 @@
+# 插件配置文件，不应纳入版本控制
+config.toml
+
+# Python 编译缓存
+__pycache__/
