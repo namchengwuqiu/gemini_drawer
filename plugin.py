@@ -30,26 +30,35 @@ KEYS_FILE = PLUGIN_DATA_DIR / "keys.json"
 
 # --- [新] 健壮的JSON解析函数 ---
 def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
-    """Safely extracts image data from the Gemini API response."""
+    """通过遍历所有部分来安全地从Gemini API响应中提取图像数据。"""
     try:
         candidates = response_data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
             return None
-        
+
         content = candidates[0].get("content")
         if not isinstance(content, dict):
             return None
-            
+
         parts = content.get("parts")
         if not isinstance(parts, list) or not parts:
             return None
-            
-        # 同时检查 inlineData 和 inline_data 以获得更好的兼容性
-        inline_data = parts[0].get("inlineData") or parts[0].get("inline_data")
-        if not isinstance(inline_data, dict):
-            return None
-            
-        return inline_data.get("data")
+
+        # 遍历所有部分以查找图像数据
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+
+            # 检查 inlineData (以及兼容的 inline_data 写法)
+            inline_data = part.get("inlineData") or part.get("inline_data")
+            if isinstance(inline_data, dict):
+                image_b64 = inline_data.get("data")
+                if isinstance(image_b64, str):
+                    return image_b64  # 找到了，立即返回
+
+        # 如果循环完成仍未找到图像
+        return None
+
     except Exception:
         return None
 
