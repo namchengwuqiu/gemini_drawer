@@ -73,7 +73,7 @@
 
 ### `[prompts]` - 核心：动态指令配置
 
-**这是插件最核心的配置部分。** 你在这里定义的每一个键值对，都会自动成为一个新的绘图指令，仓库中prompts.text文件已经定义了一些常用的指令，你可以根据需要自行复制过来添加。
+**这是插件最核心的配置部分。** 你在这里定义的每一个键值对，都会自动成为一个新的绘图指令，仓库中prompts.text文件已经定义了一些常用的指令，你可以根据需要自行复制添加。
 
 - **键（Key）**: 将作为机器人的指令名。例如，键为 `手办化`，对应的指令就是 `/手办化`。
 - **值（Value）**: 调用该指令时，发送给 Gemini API 的 prompt 文本。
@@ -98,3 +98,22 @@ cos化 = "Generate a highly detailed photo of a girl cosplaying this illustratio
     ```
 3.  重启机器人。
 4.  现在你就可以使用 `/水彩画` 指令了！
+
+---
+
+## API Key 获取
+
+本插件支持两种类型的 API Key，并会自动识别：
+
+1.  **Google 官方 Key**:
+    -   **获取地址**: [https://aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)
+    -   **特点**: Google 官方提供，需要有相应的 Google 账号和访问权限。
+
+2.  **第三方兼容 Key**:
+    -   **特点**: 通常以 `sk-` 开头，由第三方服务商提供，可能在国内网络环境下有更好的访问性。
+    -   **一些已知的服务商地址**:
+        -   Bailili API: [https://api.bailili.top/console/token](https://api.bailili.top/console/token)
+        -   VC-AI: [https://newapi.sisuo.de/console/token](https://newapi.sisuo.de/console/token)
+        -   *(请注意，第三方服务可能随时变更)*
+
+获取 Key 后，请使用管理员指令 `/手办化添加key {您的KEY}` 将其添加至插件。
