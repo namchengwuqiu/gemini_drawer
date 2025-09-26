@@ -495,6 +495,7 @@ class CustomDrawCommand(BaseDrawCommand):
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
+    plugin_version: str = "1.0.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow"]
