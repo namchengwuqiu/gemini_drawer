@@ -56,6 +56,13 @@ def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                 if isinstance(image_b64, str):
                     return image_b64  # 找到了，立即返回
 
+            # 新增：检查 text 字段中的Markdown格式图片
+            text_content = part.get("text")
+            if isinstance(text_content, str):
+                match = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", text_content)
+                if match:
+                    return match.group(1)
+
         # 如果循环完成仍未找到图像
         return None
 
