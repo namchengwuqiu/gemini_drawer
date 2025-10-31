@@ -1,14 +1,15 @@
 # Gemini 绘图插件
 
-> **Version:** 1.0.0
+> **Version:** 1.1.0
 
-本插件基于 gemini-2.5-flash-image-preview 模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片。
+本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片。
 
 ## 主要特性
 
 - **动态指令**：无需修改代码，仅通过修改配置文件即可轻松添加新的绘图风格和对应指令。
 - **多样化图片源**：支持多种方式获取原始图片，极大提升了使用的便利性。
 - **多 API Key 管理**：自动轮换并管理多个 API Key，保证服务稳定。
+- **多后端支持**：支持 Google 官方、第三方兼容 API (如 Bailili) 以及自部署的 LMArena 后端。
 - **自定义指令**：支持使用 `/bnn` 指令进行完全自定义的 prompt 绘图。
 - **代理支持**：可为 API 请求配置 HTTP 代理。
 
@@ -71,8 +72,13 @@ pip install -r requirements.txt
 
 ### `[api]` - API 端点设置
 
+此部分用于配置插件可以使用的不同后端 API。
+
 - `api_url` (字符串): Google 官方的 Gemini API 端点。
-- `bailili_api_url` (字符串): 第三方兼容 API 端点。插件会自动根据 Key 的格式（是否以 `sk-` 开头）选择合适的端点。
+- `bailili_api_url` (字符串): 第三方兼容 API 端点 (如 Bailili, VC-AI 等)。插件会自动根据 Key 的格式（是否以 `sk-` 开头）选择合适的端点。
+- `lmarena_api_url` (字符串, 默认 `http://host.docker.internal:5102`): **[新增]** LMArena API 的基础 URL。如果你在 Docker 中运行，并且 LMArena 也在 Docker 网络中，这个地址通常是正确的。
+- `lmarena_api_key` (字符串, 默认 `""`): **[新增]** LMArena API 的密钥 (可选, 使用 Bearer Token)。
+- `lmarena_model_name` (字符串, 默认 `gemini-2.5-flash-image-preview (nano-banana)`): **[新增]** LMArena 使用的模型名称。
 
 ### `[prompts]` - 核心：动态指令配置
 
@@ -104,19 +110,23 @@ cos化 = "Generate a highly detailed photo of a girl cosplaying this illustratio
 
 ---
 
-## API Key 获取
+## API Key 及后端说明
 
-本插件支持两种类型的 API Key，并会自动识别：
+本插件支持三种类型的后端，并会自动轮询尝试：
 
-1.  **Google 官方 Key**:
-    -   **获取地址**: [https://aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)
-    -   **特点**: Google 官方提供，需要有相应的 Google 账号和访问权限。
+1.  **LMArena (本地/自部署)**
+    - **特点**: 速度最快，无审查，推荐首选。需要在本地或服务器上自行部署 [LMArena Bridge](https://github.com/lunamidori5/LMArena)。
+    - **配置**: 在 `config.toml` 的 `[api]` 部分填入 `lmarena_api_url`。
 
-2.  **第三方兼容 Key**:
-    -   **特点**: 通常以 `sk-` 开头，由第三方服务商提供，可能在国内网络环境下有更好的访问性。
-    -   **一些已知的服务商地址**:
+2.  **Google 官方 Key**
+    - **获取地址**: [https://aistudio.google.com/api-keys](https://aistudio.google.com/api-keys)
+    - **特点**: Google 官方提供，但可能需要代理才能访问。
+
+3.  **第三方兼容 Key**
+    - **特点**: 通常以 `sk-` 开头，由第三方服务商提供，可能在国内网络环境下有更好的访问性。
+    - **一些已知的服务商地址**:
         -   Bailili API: [https://api.bailili.top/console/token](https://api.bailili.top/console/token)
         -   VC-AI: [https://newapi.sisuo.de/console/token](https://newapi.sisuo.de/console/token)
         -   *(请注意，第三方服务可能随时变更)*
 
-获取 Key 后，请使用管理员指令 `/手办化添加key {您的KEY}` 将其添加至插件。
+获取 Key 后，请使用管理员指令 `/手办化添加key {您的KEY}` 将其添加至插件。插件会根据 Key 的格式自动判断其类型 (Google or 第三方)。

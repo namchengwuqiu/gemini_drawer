@@ -29,9 +29,26 @@ PLUGIN_DATA_DIR = Path(f"data/gemini_drawer")
 KEYS_FILE = PLUGIN_DATA_DIR / "keys.json"
 
 # --- [新] 健壮的JSON解析函数 ---
-def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
-    """通过遍历所有部分来安全地从Gemini API响应中提取图像数据。"""
+async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
+    """通过遍历所有部分来安全地从Gemini API响应中提取图像数据，并兼容LMArena的响应格式。"""
     try:
+        # 尝试解析LMArena (OpenAI-like) 响应格式
+        if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
+            message = response_data["choices"][0].get("message")
+            if message and "content" in message and isinstance(message["content"], str):
+                # 检查 content 字段中的Markdown格式图片 (URL)
+                match_url = re.search(r"!\[.*?\]\((.*?)\)", message["content"])
+                if match_url:
+                    image_url = match_url.group(1)
+                    logger.info(f"从LMArena响应中提取到图片URL: {image_url}")
+                    return image_url
+
+                # 检查 content 字段中的Markdown格式图片 (Base64)
+                match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", message["content"])
+                if match_b64:
+                    return match_b64.group(1)
+
+        # 原始的Gemini API响应解析逻辑
         candidates = response_data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
             return None
@@ -382,56 +399,140 @@ class BaseDrawCommand(BaseCommand, ABC):
         payload = {"contents": [{"parts": parts}]}
 
         await self.send_text("🤖 已提交至API…")
-        max_retries = len(key_manager.get_all_keys())
-        if max_retries == 0:
-            await self.send_text("❌ 未配置任何API密钥。" )
-            return True, "无可用密钥", True
+
+        # 1. 准备要尝试的API端点列表
+        endpoints_to_try = []
+        lmarena_url = self.get_config("api.lmarena_api_url")
+        lmarena_key = self.get_config("api.lmarena_api_key")
+
+        # 首先添加特殊的 lmarena 端点
+        if lmarena_url:
+            endpoints_to_try.append({
+                "type": "lmarena",
+                "url": lmarena_url,
+                "key": lmarena_key
+            })
+
+        # 然后添加所有从 key_manager 获取的常规密钥
+        for key_info in key_manager.get_all_keys():
+            if key_info.get('status') == 'active':
+                key_type = key_info.get('type', 'bailili' if key_info['value'].startswith('sk-') else 'google')
+                if key_type == 'google':
+                    api_url = self.get_config("api.api_url")
+                else: # bailili
+                    api_url = self.get_config("api.bailili_api_url")
+                
+                endpoints_to_try.append({
+                    "type": key_type,
+                    "url": api_url,
+                    "key": key_info['value']
+                })
+
+        if not endpoints_to_try:
+            await self.send_text("❌ 未配置任何API密钥或端点。" )
+            return True, "无可用密钥或端点", True
 
         last_error = ""
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
-        for attempt in range(max_retries):
-            key_info = key_manager.get_next_api_key()
-            if not key_info:
-                await self.send_text("❌ 所有API密钥均不可用。" )
-                return True, "无可用密钥", True
-            
-            api_key = key_info['value']
-            key_type = key_info['type']
 
-            if key_type == 'google':
-                api_url = self.get_config("api.api_url")
-            else: # bailili
-                api_url = self.get_config("api.bailili_api_url")
+        # 2. 轮询所有端点
+        for i, endpoint in enumerate(endpoints_to_try):
+            api_url = endpoint["url"]
+            api_key = endpoint["key"]
+            endpoint_type = endpoint["type"]
+            
+            logger.info(f"尝试第 {i+1}/{len(endpoints_to_try)} 个端点: {endpoint_type} ({api_url})")
+
+            headers = {"Content-Type": "application/json"}
+            request_url = api_url
 
             try:
-                async with httpx.AsyncClient(proxy=proxy, timeout=120.0) as client:
-                    response = await client.post(f"{api_url}?key={api_key}", json=payload)
+                # 3. 根据端点类型准备请求
+                current_payload = payload # Default payload
+                client_proxy = proxy # Use global proxy by default
+
+                if endpoint_type == 'lmarena':
+                    request_url = f"{api_url}/v1/chat/completions"
+                    if api_key: # 只有存在key时才添加Authorization头
+                        headers["Authorization"] = f"Bearer {api_key}"
+                    headers["Content-Type"] = "application/json" # 确保Content-Type为application/json
+                    
+                    # 构造LMArena特定的payload
+                    lmarena_messages = []
+                    for part in parts:
+                        if "inline_data" in part:
+                            lmarena_messages.append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"data:{part["inline_data"]["mime_type"]};base64,{part["inline_data"]["data"]}"}}]})
+                        elif "text" in part:
+                            lmarena_messages.append({"role": "user", "content": part["text"]})
+                    
+                    lmarena_payload = {
+                        "model": self.get_config("api.lmarena_model_name", "gemini-2.5-flash-image-preview (nano-banana)"),
+                        "messages": lmarena_messages,
+                        "n": 1
+                    }
+                    current_payload = lmarena_payload
+                    client_proxy = None # Disable proxy for local lmarena connection
+                else: # 对于 google 和 bailili，将key作为查询参数
+                    request_url = f"{api_url}?key={api_key}"
+
+                # logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {json.dumps(current_payload, ensure_ascii=False)}")
+
+                try:
+                    async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
+                        response = await client.post(request_url, json=current_payload, headers=headers)
+                except httpx.RequestError as e:
+                    logger.error(f"httpx.RequestError for endpoint {endpoint_type} ({request_url}): {e}")
+                    raise # Re-raise to be caught by the outer except block
+
                 if response.status_code == 200:
                     data = response.json()
-                    img_data_b64 = extract_image_data(data)
+                    img_data = await extract_image_data(data)
                     
-                    if img_data_b64:
-                        key_manager.record_key_usage(api_key, True)
+                    if img_data:
+                        if endpoint_type != 'lmarena':
+                            key_manager.record_key_usage(api_key, True)
+                        
                         elapsed = (datetime.now() - start_time).total_seconds()
+                        logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
                         
                         try:
                             from src.plugin_system.apis import send_api, chat_api
-
                             stream_id = None
-                            # 检查 self.message 是否包含 chat_stream 属性
                             if hasattr(self.message, 'chat_stream') and self.message.chat_stream:
-                                # 使用 chat_api.get_stream_info 获取聊天流的详细信息
                                 stream_info = chat_api.get_stream_info(self.message.chat_stream)
                                 stream_id = stream_info.get('stream_id')
 
                             if stream_id:
-                                # 使用文档中指定的正确API
-                                await send_api.image_to_stream(
-                                    image_base64=img_data_b64,
-                                    stream_id=stream_id,
-                                    storage_message=False
-                                )
-                                await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
+                                image_to_send_b64 = None
+                                if img_data.startswith(('http://', 'https')):
+                                    logger.info("开始下载图片...")
+                                    download_start_time = datetime.now()
+                                    image_bytes = await download_image(img_data, proxy)
+                                    download_elapsed = (datetime.now() - download_start_time).total_seconds()
+                                    logger.info(f"图片下载完成，耗时 {download_elapsed:.2f}s")
+
+                                    if image_bytes:
+                                        logger.info("开始进行Base64编码...")
+                                        encode_start_time = datetime.now()
+                                        image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                        encode_elapsed = (datetime.now() - encode_start_time).total_seconds()
+                                        logger.info(f"Base64编码完成，耗时 {encode_elapsed:.2f}s")
+                                else:
+                                    image_to_send_b64 = img_data
+                                
+                                if image_to_send_b64:
+                                    logger.info("开始发送图片...")
+                                    send_start_time = datetime.now()
+                                    await send_api.image_to_stream(
+                                        image_base64=image_to_send_b64,
+                                        stream_id=stream_id,
+                                        storage_message=False
+                                    )
+                                    send_elapsed = (datetime.now() - send_start_time).total_seconds()
+                                    logger.info(f"图片发送完成，耗时 {send_elapsed:.2f}s")
+                                    await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
+                                else:
+                                    raise Exception("图片下载或转换失败")
                             else:
                                 raise Exception("无法从当前消息中确定stream_id")
                         except Exception as e:
@@ -440,21 +541,23 @@ class BaseDrawCommand(BaseCommand, ABC):
 
                         return True, "绘图成功", True
                     else:
-                        response_file = PLUGIN_DATA_DIR / "bailili_response.json"
+                        response_file = PLUGIN_DATA_DIR / f"{endpoint_type}_response.json"
                         with open(response_file, 'w', encoding='utf-8') as f:
                             json.dump(data, f, indent=4, ensure_ascii=False)
                         logger.info(f"API响应内容已保存至: {response_file}")
                         raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
                 else:
                     raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+
             except Exception as e:
-                logger.warning(f"第{attempt+1}次尝试失败: {e}")
-                key_manager.record_key_usage(api_key, False)
+                logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
+                if endpoint_type != 'lmarena':
+                    key_manager.record_key_usage(api_key, False)
                 last_error = str(e)
                 await asyncio.sleep(1)
 
         elapsed = (datetime.now() - start_time).total_seconds()
-        await self.send_text(f"❌ 生成失败 ({elapsed:.2f}s, {max_retries}次尝试)\n最终错误: {last_error}")
+        await self.send_text(f"❌ 生成失败 ({elapsed:.2f}s, {len(endpoints_to_try)}次尝试)\n最终错误: {last_error}")
         return True, "所有尝试均失败", True
     
 # --- [新] 具体的绘图命令 ---
@@ -511,7 +614,7 @@ class CustomDrawCommand(BaseDrawCommand):
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.0.0"
+    plugin_version: str = "1.1.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow"]
@@ -528,7 +631,10 @@ class GeminiDrawerPlugin(BasePlugin):
         },
         "api": {
             "api_url": ConfigField(type=str, default="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image-preview:generateContent", description="Google官方的Gemini API 端点"),
-            "bailili_api_url": ConfigField(type=str, default="https://newapi.sisuo.de/v1beta/models/gemini-2.5-flash-image-preview-free:generateContent", description="Bailili等第三方兼容API端点")
+            "bailili_api_url": ConfigField(type=str, default="https://newapi.sisuo.de/v1beta/models/gemini-2.5-flash-image-preview-free:generateContent", description="Bailili等第三方兼容API端点"),
+            "lmarena_api_url": ConfigField(type=str, default="http://host.docker.internal:5102", description="LMArena API的基础URL (例如: http://host.docker.internal:5102, 如果在Docker中运行)"),
+            "lmarena_api_key": ConfigField(type=str, default="", description="[新增]特殊的LMArena API密钥 (可选, 使用Bearer Token)"),
+            "lmarena_model_name": ConfigField(type=str, default="gemini-2.5-flash-image-preview (nano-banana)", description="LMArena 使用的模型名称")
         },
         "prompts": {
             "手办化": ConfigField(type=str, default="Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue...", description="默认的手办化prompt"),
@@ -542,6 +648,59 @@ class GeminiDrawerPlugin(BasePlugin):
             "自拍": ConfigField(type=str, default="selfie, best quality, from front", description="自拍 prompt"),
         }
     }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Manually trigger config migration on plugin initialization
+        self._migrate_config()
+
+    def _migrate_config(self):
+        """
+        Compares the config.toml with the schema and adds missing fields 
+        without overwriting existing user values.
+        """
+        try:
+            import toml
+        except ImportError:
+            logger.error("Config Migration Failed: `toml` library not found. Please install it via `pip install toml` to enable automatic config updates.")
+            return
+
+        config_path = Path(__file__).parent / self.config_file_name
+        
+        if not config_path.exists():
+            # If the file doesn't exist, the framework will create it with defaults.
+            # No migration needed.
+            return
+
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+
+            # Flag to track if changes were made
+            original_config_str = toml.dumps(config_data)
+
+            # Helper function to recursively check and update
+            def check_and_update(schema_level, config_level):
+                for key, field in schema_level.items():
+                    if isinstance(field, ConfigField):
+                        if key not in config_level:
+                            config_level[key] = field.default
+                    elif isinstance(field, dict):
+                        if key not in config_level:
+                            config_level[key] = {}
+                        check_and_update(field, config_level[key])
+
+            check_and_update(self.config_schema, config_data)
+
+            new_config_str = toml.dumps(config_data)
+
+            if original_config_str != new_config_str:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    toml.dump(config_data, f)
+                logger.info("Config migration successful: config.toml has been updated with new fields.")
+
+        except Exception as e:
+            logger.error(f"Error during config migration: {e}")
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """动态注册所有命令组件"""
