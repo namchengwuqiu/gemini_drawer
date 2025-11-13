@@ -618,7 +618,7 @@ class GeminiDrawerPlugin(BasePlugin):
     plugin_version: str = "1.1.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
-    python_dependencies: List[str] = ["httpx", "Pillow"]
+    python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
     config_file_name: str = "config.toml"
 
     config_schema: dict = {
