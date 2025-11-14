@@ -305,6 +305,102 @@ class ResetKeysCommand(BaseAdminCommand):
             await self.send_text("ℹ️ 没有检测到状态为“禁用”的密钥，无需重置。")
         return True, "重置成功", True
 
+# --- [新] 管理命令 (Prompt管理) ---
+class AddPromptCommand(BaseAdminCommand):
+    command_name: str = "gemini_add_prompt"
+    command_description: str = "添加一个新的绘图提示词预设"
+    command_pattern: str = "/添加提示词"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/添加提示词"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        
+        if ":" not in content and "：" not in content:
+            await self.send_text("❌ 格式错误！\n\n正确格式：`/添加提示词 功能名称:具体提示词`")
+            return True, "格式错误", True
+
+        # 同时处理中英文冒号
+        parts = re.split(r"[:：]", content, 1)
+        name, prompt = parts[0].strip(), parts[1].strip()
+
+        if not name or not prompt:
+            await self.send_text("❌ 功能名称和提示词内容都不能为空！")
+            return True, "参数不全", True
+
+        try:
+            import toml
+            config_path = Path(__file__).parent / "config.toml"
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+            
+            if "prompts" not in config_data:
+                config_data["prompts"] = {}
+            
+            if name in config_data["prompts"]:
+                await self.send_text(f"❌ 添加失败：功能名称 `{name}` 已存在，请使用其他名称。")
+                return True, "名称重复", True
+
+            config_data["prompts"][name] = prompt
+            
+            with open(config_path, 'w', encoding='utf-8') as f:
+                toml.dump(config_data, f)
+            
+            await self.send_text(f"✅ 提示词 `{name}` 添加成功！\n请手动重启程序以应用更改。")
+            return True, "添加成功", True
+
+        except ImportError:
+            await self.send_text("❌ 错误：`toml` 库未安装，无法修改配置文件。")
+            return False, "缺少toml库", True
+        except Exception as e:
+            logger.error(f"添加提示词失败: {e}")
+            await self.send_text(f"❌ 操作失败，发生内部错误：{e}")
+            return False, str(e), True
+
+class DeletePromptCommand(BaseAdminCommand):
+    command_name: str = "gemini_delete_prompt"
+    command_description: str = "删除一个绘图提示词预设"
+    command_pattern: str = "/删除提示词"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/删除提示词"
+        name = self.message.raw_message.replace(command_prefix, "", 1).strip()
+
+        if not name:
+            await self.send_text("❌ 请提供要删除的功能名称！\n\n正确格式：`/删除提示词 功能名称`")
+            return True, "缺少参数", True
+
+        try:
+            import toml
+            config_path = Path(__file__).parent / "config.toml"
+
+            if not config_path.exists():
+                await self.send_text("❌ 配置文件 `config.toml` 不存在。")
+                return True, "配置文件不存在", True
+
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+
+            if "prompts" in config_data and name in config_data["prompts"]:
+                del config_data["prompts"][name]
+                
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    toml.dump(config_data, f)
+                
+                await self.send_text(f"✅ 提示词 `{name}` 删除成功！\n请手动重启程序以应用更改。")
+                return True, "删除成功", True
+            else:
+                await self.send_text(f"❌ 未在配置文件中找到名为 `{name}` 的提示词。")
+                return True, "提示词不存在", True
+
+        except ImportError:
+            await self.send_text("❌ 错误：`toml` 库未安装，无法修改配置文件。")
+            return False, "缺少toml库", True
+        except Exception as e:
+            logger.error(f"删除提示词失败: {e}")
+            await self.send_text(f"❌ 操作失败，发生内部错误：{e}")
+            return False, str(e), True
+
 # --- [新] 绘图命令基类 (代码已修改) ---
 class BaseDrawCommand(BaseCommand, ABC):
     """
@@ -594,6 +690,8 @@ class HelpCommand(BaseCommand):
         reply_lines.append("  - `/手办化添加key`: 添加API Key")
         reply_lines.append("  - `/手办化key列表`: 查看所有Key的状态")
         reply_lines.append("  - `/手办化手动重置key`: 重置所有失效的Key")
+        reply_lines.append("  - `/添加提示词`: 添加自定义绘图风格")
+        reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
         
         await self.send_text("\n".join(reply_lines))
         return True, "帮助信息已发送", True
@@ -713,6 +811,8 @@ class GeminiDrawerPlugin(BasePlugin):
             (AddKeysCommand.get_command_info(), AddKeysCommand),
             (ListKeysCommand.get_command_info(), ListKeysCommand),
             (ResetKeysCommand.get_command_info(), ResetKeysCommand),
+            (AddPromptCommand.get_command_info(), AddPromptCommand),
+            (DeletePromptCommand.get_command_info(), DeletePromptCommand),
             # 自定义绘图命令
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
         ]
