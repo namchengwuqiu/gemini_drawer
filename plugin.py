@@ -731,7 +731,7 @@ class GeminiDrawerPlugin(BasePlugin):
         "api": {
             "api_url": ConfigField(type=str, default="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent", description="Google官方的Gemini API 端点"),
             "bailili_api_url": ConfigField(type=str, default="https://newapi.sisuo.de/v1beta/models/gemini-2.5-flash-image-preview-free:generateContent", description="Bailili等第三方兼容API端点"),
-            "enable_lmarena": ConfigField(type=bool, default=True, description="是否启用LMArena API"),
+            "enable_lmarena": ConfigField(type=bool, default=False, description="是否启用LMArena API"),
             "lmarena_api_url": ConfigField(type=str, default="http://host.docker.internal:5102", description="LMArena API的基础URL (例如: http://host.docker.internal:5102, 如果在Docker中运行)"),
             "lmarena_api_key": ConfigField(type=str, default="", description="[新增]特殊的LMArena API密钥 (可选, 使用Bearer Token)"),
             "lmarena_model_name": ConfigField(type=str, default="gemini-2.5-flash-image-preview (nano-banana)", description="LMArena 使用的模型名称")
