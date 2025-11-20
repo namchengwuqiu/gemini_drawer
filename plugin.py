@@ -149,7 +149,7 @@ class KeyManager:
                 return {"value": key_obj['value'], "type": key_type}
         return None
 
-    def record_key_usage(self, key_value: str, success: bool):
+    def record_key_usage(self, key_value: str, success: bool, force_disable: bool = False):
         keys = self.config.get('keys', [])
         for key_obj in keys:
             if key_obj['value'] == key_value:
@@ -157,9 +157,11 @@ class KeyManager:
                     key_obj['error_count'] = 0
                 else:
                     key_obj['error_count'] = key_obj.get('error_count', 0) + 1
-                    if key_obj['error_count'] >= 5:
-                        key_obj['status'] = 'disabled'
-                        logger.warning(f"API Key {key_value[:8]}... 已被自动禁用")
+                    if force_disable or key_obj['error_count'] >= 5:
+                        if key_obj['status'] == 'active':
+                            key_obj['status'] = 'disabled'
+                            reason = "配额耗尽" if force_disable else "错误次数过多"
+                            logger.warning(f"API Key {key_value[:8]}... 已因“{reason}”被自动禁用。")
                 self.save_config(self.config)
                 return
 
@@ -649,7 +651,8 @@ class BaseDrawCommand(BaseCommand, ABC):
             except Exception as e:
                 logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
                 if endpoint_type != 'lmarena':
-                    key_manager.record_key_usage(api_key, False)
+                    is_quota_error = "429" in str(e)
+                    key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
                 last_error = str(e)
                 await asyncio.sleep(1)
 
