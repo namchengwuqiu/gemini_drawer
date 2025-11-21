@@ -166,7 +166,7 @@ cos化 = "Generate a highly detailed photo of a girl cosplaying this illustratio
 3.  **第三方兼容 Key**
     - **特点**: 通常以 `sk-` 开头，由第三方服务商提供，可能在国内网络环境下有更好的访问性。
     - **一些已知的服务商地址**:
-        -   Bailili API: [https://api.bailili.top/console/token](https://api.bailili.top/console/token)
+        -   Bailili API: [https://api.bailili.top/register?aff=oPYw](https://api.bailili.top/register?aff=oPYw)
         -   VC-AI: [https://newapi.sisuo.de/register?aff=ugef](https://newapi.sisuo.de/register?aff=ugef)
         -   *(请注意，第三方服务可能随时变更)*
 
