@@ -1,3 +1,6 @@
 # Ignore data directory contents
 data/*
 !data/.gitkeep
+
+# Ignore configuration file with sensitive keys
+config.toml
