@@ -112,7 +112,7 @@ class KeyManager:
         except IOError as e:
             logger.error(f"保存密钥配置失败: {e}")
 
-    def add_keys(self, new_keys: List[str]) -> Tuple[int, int]:
+    def add_keys(self, new_keys: List[str], key_type: str) -> Tuple[int, int]:
         existing_keys = {key['value'] for key in self.config.get('keys', [])}
         added_count = 0
         duplicate_count = 0
@@ -120,7 +120,7 @@ class KeyManager:
             if key_value in existing_keys:
                 duplicate_count += 1
             else:
-                key_type = 'bailili' if key_value.startswith('sk-') else 'google'
+                # key_type 由外部传入
                 key_obj = {"value": key_value, "type": key_type, "status": "active", "error_count": 0, "last_used": None}
                 self.config['keys'].append(key_obj)
                 added_count += 1
@@ -131,6 +131,7 @@ class KeyManager:
         return self.config.get('keys', [])
 
     def get_next_api_key(self) -> Optional[Dict[str, str]]:
+        # 注意：这个方法主要用于旧逻辑或默认逻辑，新的 BaseDrawCommand 可能会自己筛选 Key
         keys = self.config.get('keys', [])
         active_keys = [key for key in keys if key.get('status') == 'active']
         if not active_keys:
@@ -145,8 +146,7 @@ class KeyManager:
                 self.config['current_index'] = (next_index + 1) % len(keys)
                 key_obj['last_used'] = datetime.now().isoformat()
                 self.save_config(self.config)
-                key_type = key_obj.get('type', 'bailili' if key_obj['value'].startswith('sk-') else 'google')
-                return {"value": key_obj['value'], "type": key_type}
+                return {"value": key_obj['value'], "type": key_obj.get('type', 'google')}
         return None
 
     def record_key_usage(self, key_value: str, success: bool, force_disable: bool = False):
@@ -165,10 +165,14 @@ class KeyManager:
                 self.save_config(self.config)
                 return
 
-    def manual_reset_keys(self) -> int:
+    def manual_reset_keys(self, key_type: Optional[str] = None) -> int:
         keys = self.config.get('keys', [])
         reset_count = 0
         for key_obj in keys:
+            # 如果指定了 key_type，则只重置该类型的 key
+            if key_type and key_obj.get('type') != key_type:
+                continue
+                
             if key_obj.get('status') == 'disabled':
                 key_obj['status'] = 'active'
                 key_obj['error_count'] = 0
@@ -247,64 +251,101 @@ class BaseAdminCommand(BaseCommand, ABC):
         raise NotImplementedError
 
 # --- 命令组件 (Key管理部分) ---
-class AddKeysCommand(BaseAdminCommand):
-    command_name: str = "gemini_add_keys"
-    command_description: str = "添加一个或多个Gemini API Key"
-    command_pattern: str = "/手办化添加key"
+class ChannelAddKeyCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_add_key"
+    command_description: str = "添加渠道API Key (格式: /渠道添加key <渠道名称> <key1> [key2] ...)"
+    command_pattern: str = r"^/渠道添加key"
 
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
-        command_prefix = "/手办化添加key"
-        raw_keys = self.message.raw_message.replace(command_prefix, "", 1)
+        command_prefix = "/渠道添加key"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        
+        # 使用正则分割，支持空格、逗号、换行等
+        import re
+        parts = re.split(r"[\s,;，；\n\r]+", content)
+        # 过滤空字符串
+        parts = [p for p in parts if p.strip()]
 
-        raw_keys = raw_keys.strip()
-        if not raw_keys:
-            await self.send_text("❌ 请提供API密钥\n\n📝 使用方法：\n/手办化添加key <密钥1> [密钥2]...")
-            return True, "缺少参数", True
+        if len(parts) < 2:
+            await self.send_text("❌ 参数错误！\n格式：`/渠道添加key <渠道名称> <key1> [key2] ...`\n例如：`/渠道添加key google AIzaSy...` 或 `/渠道添加key PockGo sk-...`")
+            return True, "参数不足", True
 
-        keys = re.split(r"[\s,;，；\n\r]+", raw_keys)
-        valid_keys = [k for k in keys if k and k.strip()]
+        channel_name = parts[0]
+        new_keys = parts[1:]
 
-        if not valid_keys:
-            await self.send_text("❌ 未检测到有效的API密钥。")
-            return True, "无效参数", True
+        # 验证渠道名称
+        valid_channels = ['google', 'bailili']
+        custom_channels = self.get_config("channels", {})
+        valid_channels.extend(custom_channels.keys())
+        
+        if channel_name not in valid_channels:
+             await self.send_text(f"❌ 未知的渠道名称：`{channel_name}`\n可用渠道：{', '.join(valid_channels)}")
+             return True, "未知渠道", True
 
-        added, duplicate = key_manager.add_keys(valid_keys)
-        reply = f"✅ 操作完成:\n- 成功添加 {added} 个新密钥。\n- 跳过 {duplicate} 个重复密钥。"
-        await self.send_text(reply)
-        return True, "添加密钥成功", True
+        added, duplicates = key_manager.add_keys(new_keys, channel_name)
+        
+        msg = f"✅ 操作完成 (渠道: {channel_name})：\n"
+        msg += f"- 成功添加: {added} 个\n"
+        if duplicates > 0:
+            msg += f"- 重复忽略: {duplicates} 个"
+        
+        await self.send_text(msg)
+        return True, "添加成功", True
 
-class ListKeysCommand(BaseAdminCommand):
-    command_name: str = "gemini_list_keys"
-    command_description: str = "查看已添加的API Key列表"
-    command_pattern: str = "/手办化key列表"
+class ChannelListKeysCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_list_keys"
+    command_description: str = "查看各渠道Key状态"
+    command_pattern: str = r"^/渠道key列表"
 
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         all_keys = key_manager.get_all_keys()
         if not all_keys:
-            await self.send_text("📝 当前没有配置任何API密钥。")
-            return True, "列表为空", True
+            await self.send_text("ℹ️ 当前未配置任何 API Key。")
+            return True, "无Key", True
 
-        reply_lines = ["📝 API密钥列表:"]
-        for i, key in enumerate(all_keys):
-            key_type = key.get('type', 'bailili' if key['value'].startswith('sk-') else 'google')
-            masked_key = key['value'][:8] + '...' 
-            status_icon = '✅' if key['status'] == 'active' else '❌'
-            reply_lines.append(f"{i+1}. {masked_key} ({key_type}) | 状态: {status_icon} | 连续错误: {key['error_count']}")
+        # 按渠道分组
+        grouped_keys = {}
+        for k in all_keys:
+            ctype = k.get('type', 'unknown')
+            if ctype not in grouped_keys:
+                grouped_keys[ctype] = []
+            grouped_keys[ctype].append(k)
+
+        msg_lines = ["📋 **渠道 Key 状态列表**", "--------------------"]
         
-        await self.send_text("\n".join(reply_lines))
-        return True, "获取列表成功", True
+        for channel, keys in grouped_keys.items():
+            active_count = sum(1 for k in keys if k['status'] == 'active')
+            msg_lines.append(f"🔷 **{channel}** (可用: {active_count}/{len(keys)})")
+            
+            for i, k in enumerate(keys):
+                status_icon = "✅" if k['status'] == 'active' else "❌"
+                masked_key = k['value'][:8] + "..." + k['value'][-4:]
+                err_info = f"(错误: {k.get('error_count', 0)})" if k.get('error_count', 0) > 0 else ""
+                msg_lines.append(f"  {i+1}. {status_icon} `{masked_key}` {err_info}")
+            msg_lines.append("") # 空行分隔
 
-class ResetKeysCommand(BaseAdminCommand):
-    command_name: str = "gemini_reset_keys"
-    command_description: str = "手动重置所有失效的API Key"
-    command_pattern: str = "/手办化手动重置key"
+        await self.send_text("\n".join(msg_lines))
+        return True, "查询成功", True
+
+class ChannelResetKeysCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_reset_keys"
+    command_description: str = "重置渠道Key状态 (格式: /渠道手动重置key [渠道名称])"
+    command_pattern: str = r"^/渠道手动重置key"
 
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
-        reset_count = key_manager.manual_reset_keys()
-        if reset_count > 0:
-            await self.send_text(f"✅ 操作完成：已手动重置 {reset_count} 个失效的密钥。")
+        command_prefix = "/渠道手动重置key"
+        channel_name = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        
+        if not channel_name:
+            channel_name = None # 重置所有
+        
+        count = key_manager.manual_reset_keys(channel_name)
+        
+        target = f"渠道 `{channel_name}`" if channel_name else "所有渠道"
+        if count > 0:
+            await self.send_text(f"✅ 已成功重置 {target} 的 {count} 个失效 Key。")
         else:
-            await self.send_text("ℹ️ 没有检测到状态为“禁用”的密钥，无需重置。")
+            await self.send_text(f"ℹ️ {target} 没有需要重置的 Key。")
         return True, "重置成功", True
 
 # --- [新] 管理命令 (Prompt管理) ---
@@ -772,29 +813,58 @@ class BaseDrawCommand(BaseCommand, ABC):
                     "model": c_model
                 })
 
-        # 然后添加所有从 key_manager 获取的常规密钥 (如果启用)
+        # 然后添加所有从 key_manager 获取的密钥 (包括内置和自定义渠道的)
         enable_google = self.get_config("api.enable_google", True)
         enable_bailili = self.get_config("api.enable_bailili", True)
 
         for key_info in key_manager.get_all_keys():
-            if key_info.get('status') == 'active':
-                key_type = key_info.get('type', 'bailili' if key_info['value'].startswith('sk-') else 'google')
-                
-                if key_type == 'google' and not enable_google:
-                    continue
-                if key_type != 'google' and not enable_bailili: # bailili
-                    continue
+            if key_info.get('status') != 'active':
+                continue
+            
+            key_type = key_info.get('type')
+            # 兼容旧数据：如果没有 type，根据 value 前缀判断
+            if not key_type:
+                key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
 
-                if key_type == 'google':
-                    api_url = self.get_config("api.api_url")
-                else: # bailili
-                    api_url = self.get_config("api.bailili_api_url")
+            # 1. Google 官方渠道
+            if key_type == 'google':
+                if enable_google:
+                    endpoints_to_try.append({
+                        "type": "google",
+                        "url": self.get_config("api.api_url"),
+                        "key": key_info['value']
+                    })
+            
+            # 2. Bailili 中转渠道
+            elif key_type == 'bailili':
+                if enable_bailili:
+                    endpoints_to_try.append({
+                        "type": "bailili",
+                        "url": self.get_config("api.bailili_api_url"),
+                        "key": key_info['value']
+                    })
+            
+            # 3. 自定义渠道 (key_type == 渠道名称)
+            elif key_type in custom_channels:
+                channel_info = custom_channels[key_type]
+                c_enabled = True
+                c_url = ""
+                c_model = None
                 
-                endpoints_to_try.append({
-                    "type": key_type,
-                    "url": api_url,
-                    "key": key_info['value']
-                })
+                if isinstance(channel_info, dict):
+                    c_url = channel_info.get("url")
+                    c_model = channel_info.get("model")
+                    c_enabled = channel_info.get("enabled", True)
+                elif isinstance(channel_info, str) and ":" in channel_info:
+                    c_url, _ = channel_info.rsplit(":", 1) # 旧格式只取URL，Key用key_manager里的
+                
+                if c_enabled and c_url:
+                    endpoints_to_try.append({
+                        "type": f"custom_{key_type}",
+                        "url": c_url,
+                        "key": key_info['value'],
+                        "model": c_model
+                    })
 
         if not endpoints_to_try:
             await self.send_text("❌ 未配置任何API密钥或端点。" )
@@ -983,9 +1053,9 @@ class HelpCommand(BaseCommand):
         if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
             reply_lines.append("\n--------------------")
             reply_lines.append("🔑 管理员指令 🔑")
-            reply_lines.append("  - `/手办化添加key`: 添加API Key")
-            reply_lines.append("  - `/手办化key列表`: 查看所有Key的状态")
-            reply_lines.append("  - `/手办化手动重置key`: 重置所有失效的Key")
+            reply_lines.append("  - `/渠道添加key`: 添加渠道API Key")
+            reply_lines.append("  - `/渠道key列表`: 查看各渠道Key状态")
+            reply_lines.append("  - `/渠道手动重置key`: 重置渠道Key状态")
             reply_lines.append("  - `/添加提示词`: 添加自定义绘图风格")
             reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
             reply_lines.append("  - `/添加渠道`: 添加自定义API渠道")
@@ -1110,9 +1180,10 @@ class GeminiDrawerPlugin(BasePlugin):
             # 帮助命令
             (HelpCommand.get_command_info(), HelpCommand),
             # Key管理命令
-            (AddKeysCommand.get_command_info(), AddKeysCommand),
-            (ListKeysCommand.get_command_info(), ListKeysCommand),
-            (ResetKeysCommand.get_command_info(), ResetKeysCommand),
+            (ChannelAddKeyCommand.get_command_info(), ChannelAddKeyCommand),
+            (ChannelListKeysCommand.get_command_info(), ChannelListKeysCommand),
+            (ChannelResetKeysCommand.get_command_info(), ChannelResetKeysCommand),
+            # Prompt管理命令
             (AddPromptCommand.get_command_info(), AddPromptCommand),
             (DeletePromptCommand.get_command_info(), DeletePromptCommand),
             # 渠道管理命令
