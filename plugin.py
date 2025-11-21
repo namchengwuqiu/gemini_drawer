@@ -405,7 +405,7 @@ class DeletePromptCommand(BaseAdminCommand):
 
 class AddChannelCommand(BaseAdminCommand):
     command_name: str = "gemini_add_channel"
-    command_description: str = "添加自定义API渠道 (格式: 名称:API地址:密钥)"
+    command_description: str = "添加自定义API渠道 (格式: 名称:API地址:密钥[:模型])"
     command_pattern: str = "/添加渠道"
 
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
@@ -413,19 +413,39 @@ class AddChannelCommand(BaseAdminCommand):
         content = self.message.raw_message.replace(command_prefix, "", 1).strip()
         
         if ":" not in content:
-             await self.send_text("❌ 格式错误！\n正确格式：`/添加渠道 名称:API地址:密钥`")
+             await self.send_text("❌ 格式错误！\n正确格式：`/添加渠道 名称:API地址:密钥[:模型]`")
              return True, "格式错误", True
 
         try:
             # 分割名称和剩余部分
             name, rest = content.split(':', 1)
             if ":" not in rest:
-                 await self.send_text("❌ 格式错误！无法解析API地址和密钥。\n正确格式：`/添加渠道 名称:API地址:密钥`")
+                 await self.send_text("❌ 格式错误！无法解析API地址和密钥。\n正确格式：`/添加渠道 名称:API地址:密钥[:模型]`")
                  return True, "格式错误", True
             
-            # 从右侧分割，确保API地址中的冒号不被误切
-            url, key = rest.rsplit(':', 1)
+            # 尝试分割出 model (可选)
+            # 格式: 名称:API地址:密钥[:模型]
+            parts = rest.split(':')
+            url = ""
+            key = ""
+            model = None
             
+            # 让我们用 rsplit
+            temp_parts = rest.rsplit(':', 2)
+            if len(temp_parts) == 3:
+                # 检查是否误切了协议 (例如 https://...)
+                # 如果第一部分是 http 或 https，说明我们把协议冒号切开了，这实际上是 url:key 格式
+                if temp_parts[0].lower() in ['http', 'https']:
+                    # 误切了协议，回退到 url:key 处理
+                    url, key = rest.rsplit(':', 1)
+                else:
+                    url = temp_parts[0].strip()
+                    key = temp_parts[1].strip()
+                    model = temp_parts[2].strip()
+            else:
+                # 可能是 url:key 格式
+                url, key = rest.rsplit(':', 1)
+
             name = name.strip()
             url = url.strip()
             key = key.strip()
@@ -448,12 +468,20 @@ class AddChannelCommand(BaseAdminCommand):
                 return True, "名称重复", True
 
             # 保存为字典格式
-            config_data["channels"][name] = {"url": url, "key": key}
+            channel_data = {"url": url, "key": key}
+            if model:
+                channel_data["model"] = model
+
+            config_data["channels"][name] = channel_data
             
             with open(config_path, 'w', encoding='utf-8') as f:
                 toml.dump(config_data, f)
             
-            await self.send_text(f"✅ 渠道 `{name}` 添加成功！\n请手动重启程序以应用更改。")
+            msg = f"✅ 渠道 `{name}` 添加成功！\n"
+            if model:
+                msg += f"指定模型: {model}\n"
+            msg += "请手动重启程序以应用更改。"
+            await self.send_text(msg)
             return True, "添加成功", True
 
         except Exception as e:
@@ -494,6 +522,121 @@ class DeleteChannelCommand(BaseAdminCommand):
         except Exception as e:
             logger.error(f"删除渠道失败: {e}")
             await self.send_text(f"❌ 操作失败：{e}")
+            return False, str(e), True
+
+class ToggleChannelCommand(BaseAdminCommand):
+    command_name: str = "gemini_toggle_channel"
+    command_description: str = "启用或禁用指定渠道"
+    command_pattern: str = r"^/(启用|禁用)渠道"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        msg = self.message.raw_message.strip()
+        is_enable = msg.startswith("/启用渠道")
+        name = msg.replace("/启用渠道" if is_enable else "/禁用渠道", "", 1).strip()
+
+        if not name:
+            await self.send_text("❌ 请指定要操作的渠道名称！\n例如：`/启用渠道 google` 或 `/禁用渠道 PockGo`")
+            return True, "缺少参数", True
+
+        try:
+            import toml
+            config_path = Path(__file__).parent / "config.toml"
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+
+            # 确保 api 和 channels 节存在
+            if "api" not in config_data: config_data["api"] = {}
+            if "channels" not in config_data: config_data["channels"] = {}
+
+            target_found = False
+            
+            # 处理内置渠道
+            if name.lower() == 'google':
+                config_data["api"]["enable_google"] = is_enable
+                target_found = True
+            elif name.lower() == 'bailili':
+                config_data["api"]["enable_bailili"] = is_enable
+                target_found = True
+            elif name.lower() == 'lmarena':
+                config_data["api"]["enable_lmarena"] = is_enable
+                target_found = True
+            # 处理自定义渠道
+            elif name in config_data["channels"]:
+                channel_info = config_data["channels"][name]
+                # 如果是旧格式字符串，转为字典
+                if isinstance(channel_info, str):
+                    url, key = channel_info.rsplit(":", 1)
+                    channel_info = {"url": url, "key": key}
+                
+                channel_info["enabled"] = is_enable
+                config_data["channels"][name] = channel_info
+                target_found = True
+            else:
+                await self.send_text(f"❌ 未找到名为 `{name}` 的渠道。")
+                return True, "渠道不存在", True
+
+            if target_found:
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    toml.dump(config_data, f)
+                
+                action = "启用" if is_enable else "禁用"
+                await self.send_text(f"✅ 渠道 `{name}` 已{action}！\n请手动重启程序以应用更改。")
+                return True, "操作成功", True
+
+        except Exception as e:
+            logger.error(f"切换渠道状态失败: {e}")
+            await self.send_text(f"❌ 操作失败：{e}")
+            return False, str(e), True
+
+class ListChannelsCommand(BaseAdminCommand):
+    command_name: str = "gemini_list_channels"
+    command_description: str = "查看所有渠道状态"
+    command_pattern: str = "/渠道列表"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        try:
+            import toml
+            config_path = Path(__file__).parent / "config.toml"
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+
+            api_config = config_data.get("api", {})
+            channels_config = config_data.get("channels", {})
+
+            msg_lines = ["📋 **当前渠道状态列表**", "--------------------"]
+
+            # 内置渠道
+            def get_status_icon(key, default=True):
+                return "✅" if api_config.get(key, default) else "❌"
+
+            msg_lines.append(f"{get_status_icon('enable_google')} **Google** (官方Key)")
+            msg_lines.append(f"{get_status_icon('enable_bailili')} **Bailili** (中转Key)")
+            msg_lines.append(f"{get_status_icon('enable_lmarena')} **LMArena** (免费接口)")
+
+            # 自定义渠道
+            if channels_config:
+                msg_lines.append("--------------------")
+                for name, info in channels_config.items():
+                    enabled = True
+                    if isinstance(info, dict):
+                        enabled = info.get("enabled", True)
+                    # 字符串格式默认为启用
+                    
+                    icon = "✅" if enabled else "❌"
+                    model_info = ""
+                    if isinstance(info, dict) and info.get("model"):
+                        model_info = f" ({info['model']})"
+                    
+                    msg_lines.append(f"{icon} **{name}**{model_info}")
+            
+            await self.send_text("\n".join(msg_lines))
+            return True, "查询成功", True
+
+        except Exception as e:
+            logger.error(f"查询渠道列表失败: {e}")
+            await self.send_text(f"❌ 查询失败：{e}")
             return False, str(e), True
 
 # --- [新] 绘图命令基类 (代码已修改) ---
@@ -593,41 +736,55 @@ class BaseDrawCommand(BaseCommand, ABC):
 
         # 1. 准备要尝试的API端点列表
         endpoints_to_try = []
-        enable_lmarena = self.get_config("api.enable_lmarena", True)
-        lmarena_url = self.get_config("api.lmarena_api_url")
-        lmarena_key = self.get_config("api.lmarena_api_key")
 
-        # 首先添加特殊的 lmarena 端点
-        if enable_lmarena and lmarena_url:
+        # 首先添加 LMArena (如果启用)
+        if self.get_config("api.enable_lmarena", True):
+            lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
+            lmarena_key = "lmarena" # Placeholder
             endpoints_to_try.append({
                 "type": "lmarena",
                 "url": lmarena_url,
                 "key": lmarena_key
             })
 
-        # 添加自定义渠道
+        # 添加自定义渠道 (如果启用)
         custom_channels = self.get_config("channels", {})
         for name, channel_info in custom_channels.items():
             c_url = ""
             c_key = ""
+            c_model = None
+            c_enabled = True
+            
             if isinstance(channel_info, dict):
                 c_url = channel_info.get("url")
                 c_key = channel_info.get("key")
+                c_model = channel_info.get("model")
+                c_enabled = channel_info.get("enabled", True)
             elif isinstance(channel_info, str) and ":" in channel_info:
                 # 兼容 "url:key" 字符串格式
                 c_url, c_key = channel_info.rsplit(":", 1)
             
-            if c_url and c_key:
+            if c_url and c_key and c_enabled:
                 endpoints_to_try.append({
                     "type": f"custom_{name}",
                     "url": c_url,
-                    "key": c_key
+                    "key": c_key,
+                    "model": c_model
                 })
 
-        # 然后添加所有从 key_manager 获取的常规密钥
+        # 然后添加所有从 key_manager 获取的常规密钥 (如果启用)
+        enable_google = self.get_config("api.enable_google", True)
+        enable_bailili = self.get_config("api.enable_bailili", True)
+
         for key_info in key_manager.get_all_keys():
             if key_info.get('status') == 'active':
                 key_type = key_info.get('type', 'bailili' if key_info['value'].startswith('sk-') else 'google')
+                
+                if key_type == 'google' and not enable_google:
+                    continue
+                if key_type != 'google' and not enable_bailili: # bailili
+                    continue
+
                 if key_type == 'google':
                     api_url = self.get_config("api.api_url")
                 else: # bailili
@@ -661,28 +818,46 @@ class BaseDrawCommand(BaseCommand, ABC):
                 # 3. 根据端点类型准备请求
                 current_payload = payload # Default payload
                 client_proxy = proxy # Use global proxy by default
+                
+                # 判断是否为 OpenAI 兼容格式
+                # 1. 显式指定了 model
+                # 2. URL 包含 /chat/completions
+                # 3. 类型是 lmarena
+                is_openai_compatible = endpoint_type == 'lmarena' or \
+                                     endpoint.get("model") is not None or \
+                                     "/chat/completions" in api_url
 
-                if endpoint_type == 'lmarena':
-                    request_url = f"{api_url}/v1/chat/completions"
+                if is_openai_compatible:
+                    # 确定请求 URL
+                    if endpoint_type == 'lmarena':
+                        request_url = f"{api_url}/v1/chat/completions"
+                        client_proxy = None # Disable proxy for local lmarena connection
+                    else:
+                        request_url = api_url
+
                     if api_key: # 只有存在key时才添加Authorization头
                         headers["Authorization"] = f"Bearer {api_key}"
                     headers["Content-Type"] = "application/json" # 确保Content-Type为application/json
                     
-                    # 构造LMArena特定的payload
-                    lmarena_messages = []
+                    # 构造 OpenAI/LMArena 特定的 payload
+                    openai_messages = []
                     for part in parts:
                         if "inline_data" in part:
-                            lmarena_messages.append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"data:{part["inline_data"]["mime_type"]};base64,{part["inline_data"]["data"]}"}}]})
+                            openai_messages.append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"data:{part['inline_data']['mime_type']};base64,{part['inline_data']['data']}"}}]})
                         elif "text" in part:
-                            lmarena_messages.append({"role": "user", "content": part["text"]})
+                            openai_messages.append({"role": "user", "content": part["text"]})
                     
-                    lmarena_payload = {
-                        "model": self.get_config("api.lmarena_model_name", "gemini-2.5-flash-image-preview (nano-banana)"),
-                        "messages": lmarena_messages,
+                    # 确定模型名称
+                    model_name = endpoint.get("model")
+                    if not model_name:
+                        model_name = self.get_config("api.lmarena_model_name", "gemini-2.5-flash-image-preview (nano-banana)")
+                    
+                    openai_payload = {
+                        "model": model_name,
+                        "messages": openai_messages,
                         "n": 1
                     }
-                    current_payload = lmarena_payload
-                    client_proxy = None # Disable proxy for local lmarena connection
+                    current_payload = openai_payload
                 else: # 对于 google 和 bailili，将key作为查询参数
                     request_url = f"{api_url}?key={api_key}"
 
@@ -815,7 +990,10 @@ class HelpCommand(BaseCommand):
             reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
             reply_lines.append("  - `/添加渠道`: 添加自定义API渠道")
             reply_lines.append("  - `/删除渠道`: 删除自定义API渠道")
-        
+            reply_lines.append("  - `/启用渠道`: 启用指定渠道")
+            reply_lines.append("  - `/禁用渠道`: 禁用指定渠道")
+            reply_lines.append("  - `/渠道列表`: 查看所有渠道状态")
+            
         await self.send_text("\n".join(reply_lines))
         return True, "帮助信息已发送", True
 
@@ -940,6 +1118,8 @@ class GeminiDrawerPlugin(BasePlugin):
             # 渠道管理命令
             (AddChannelCommand.get_command_info(), AddChannelCommand),
             (DeleteChannelCommand.get_command_info(), DeleteChannelCommand),
+            (ToggleChannelCommand.get_command_info(), ToggleChannelCommand),
+            (ListChannelsCommand.get_command_info(), ListChannelsCommand),
             # 自定义绘图命令
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
         ]
