@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.1.1
+> **Version:** 1.1.2
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片。
 
@@ -54,6 +54,10 @@ pip install -r requirements.txt
 | `/手办化手动重置key`               | 将所有因失败次数过多而被禁用的 Key 重新激活。      |
 | `/添加提示词 {名称}:{prompt}`      | **[新]** 动态添加一个绘图指令，加载需重启。        |
 | `/删除提示词 {名称}`               | **[新]** 动态删除一个绘图指令，加载需重启。        |
+| `/添加渠道 {名称}:{API地址}:{密钥}` | **[新]** 动态添加一个自定义 API 渠道。             |
+| `/删除渠道 {名称}`                 | **[新]** 动态删除一个自定义 API 渠道。             |
+
+**注**：管理员指令在 `/基咪绘图帮助` 中仅对管理员可见。
 
 ---
 
@@ -81,6 +85,12 @@ pip install -r requirements.txt
 - `lmarena_api_url` (字符串, 默认 `http://host.docker.internal:5102`): **[新增]** LMArena API 的基础 URL。如果你在 Docker 中运行，并且 LMArena 也在 Docker 网络中，这个地址通常是正确的。
 - `lmarena_api_key` (字符串, 默认 `""`): **[新增]** LMArena API 的密钥 (可选, 使用 Bearer Token)。
 - `lmarena_model_name` (字符串, 默认 `gemini-2.5-flash-image-preview (nano-banana)`): **[新增]** LMArena 使用的模型名称。
+
+### `[channels]` - 自定义渠道配置
+
+此部分用于存储通过 `/添加渠道` 指令添加的自定义 API 渠道。通常不需要手动修改，建议使用指令进行管理。
+
+- 格式: `名称 = { url = "API地址", key = "密钥" }`
 
 ### `[prompts]` - 核心：动态指令配置
 

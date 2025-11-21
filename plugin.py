@@ -403,6 +403,99 @@ class DeletePromptCommand(BaseAdminCommand):
             await self.send_text(f"❌ 操作失败，发生内部错误：{e}")
             return False, str(e), True
 
+class AddChannelCommand(BaseAdminCommand):
+    command_name: str = "gemini_add_channel"
+    command_description: str = "添加自定义API渠道 (格式: 名称:API地址:密钥)"
+    command_pattern: str = "/添加渠道"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/添加渠道"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        
+        if ":" not in content:
+             await self.send_text("❌ 格式错误！\n正确格式：`/添加渠道 名称:API地址:密钥`")
+             return True, "格式错误", True
+
+        try:
+            # 分割名称和剩余部分
+            name, rest = content.split(':', 1)
+            if ":" not in rest:
+                 await self.send_text("❌ 格式错误！无法解析API地址和密钥。\n正确格式：`/添加渠道 名称:API地址:密钥`")
+                 return True, "格式错误", True
+            
+            # 从右侧分割，确保API地址中的冒号不被误切
+            url, key = rest.rsplit(':', 1)
+            
+            name = name.strip()
+            url = url.strip()
+            key = key.strip()
+
+            if not name or not url or not key:
+                await self.send_text("❌ 名称、API地址和密钥都不能为空！")
+                return True, "参数不全", True
+
+            import toml
+            config_path = Path(__file__).parent / "config.toml"
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+            
+            if "channels" not in config_data:
+                config_data["channels"] = {}
+            
+            if name in config_data["channels"]:
+                await self.send_text(f"❌ 添加失败：渠道名称 `{name}` 已存在。")
+                return True, "名称重复", True
+
+            # 保存为字典格式
+            config_data["channels"][name] = {"url": url, "key": key}
+            
+            with open(config_path, 'w', encoding='utf-8') as f:
+                toml.dump(config_data, f)
+            
+            await self.send_text(f"✅ 渠道 `{name}` 添加成功！\n请手动重启程序以应用更改。")
+            return True, "添加成功", True
+
+        except Exception as e:
+            logger.error(f"添加渠道失败: {e}")
+            await self.send_text(f"❌ 操作失败：{e}")
+            return False, str(e), True
+
+class DeleteChannelCommand(BaseAdminCommand):
+    command_name: str = "gemini_delete_channel"
+    command_description: str = "删除自定义API渠道"
+    command_pattern: str = "/删除渠道"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/删除渠道"
+        name = self.message.raw_message.replace(command_prefix, "", 1).strip()
+
+        if not name:
+            await self.send_text("❌ 请提供要删除的渠道名称！")
+            return True, "缺少参数", True
+
+        try:
+            import toml
+            config_path = Path(__file__).parent / "config.toml"
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+
+            if "channels" in config_data and name in config_data["channels"]:
+                del config_data["channels"][name]
+                with open(config_path, 'w', encoding='utf-8') as f:
+                    toml.dump(config_data, f)
+                await self.send_text(f"✅ 渠道 `{name}` 删除成功！\n请手动重启程序以应用更改。")
+                return True, "删除成功", True
+            else:
+                await self.send_text(f"❌ 未找到名为 `{name}` 的渠道。")
+                return True, "渠道不存在", True
+
+        except Exception as e:
+            logger.error(f"删除渠道失败: {e}")
+            await self.send_text(f"❌ 操作失败：{e}")
+            return False, str(e), True
+
 # --- [新] 绘图命令基类 (代码已修改) ---
 class BaseDrawCommand(BaseCommand, ABC):
     """
@@ -511,6 +604,25 @@ class BaseDrawCommand(BaseCommand, ABC):
                 "url": lmarena_url,
                 "key": lmarena_key
             })
+
+        # 添加自定义渠道
+        custom_channels = self.get_config("channels", {})
+        for name, channel_info in custom_channels.items():
+            c_url = ""
+            c_key = ""
+            if isinstance(channel_info, dict):
+                c_url = channel_info.get("url")
+                c_key = channel_info.get("key")
+            elif isinstance(channel_info, str) and ":" in channel_info:
+                # 兼容 "url:key" 字符串格式
+                c_url, c_key = channel_info.rsplit(":", 1)
+            
+            if c_url and c_key:
+                endpoints_to_try.append({
+                    "type": f"custom_{name}",
+                    "url": c_url,
+                    "key": c_key
+                })
 
         # 然后添加所有从 key_manager 获取的常规密钥
         for key_info in key_manager.get_all_keys():
@@ -688,13 +800,21 @@ class HelpCommand(BaseCommand):
         reply_lines.append("  - 发送图片 + 指令")
         reply_lines.append("  - 直接发送指令 (使用自己头像)")
 
-        reply_lines.append("\n--------------------")
-        reply_lines.append("🔑 管理员指令 🔑")
-        reply_lines.append("  - `/手办化添加key`: 添加API Key")
-        reply_lines.append("  - `/手办化key列表`: 查看所有Key的状态")
-        reply_lines.append("  - `/手办化手动重置key`: 重置所有失效的Key")
-        reply_lines.append("  - `/添加提示词`: 添加自定义绘图风格")
-        reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
+        # Check for admin permission
+        user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
+        admin_list = self.get_config("general.admins", [])
+        str_admin_list = [str(admin) for admin in admin_list]
+
+        if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
+            reply_lines.append("\n--------------------")
+            reply_lines.append("🔑 管理员指令 🔑")
+            reply_lines.append("  - `/手办化添加key`: 添加API Key")
+            reply_lines.append("  - `/手办化key列表`: 查看所有Key的状态")
+            reply_lines.append("  - `/手办化手动重置key`: 重置所有失效的Key")
+            reply_lines.append("  - `/添加提示词`: 添加自定义绘图风格")
+            reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
+            reply_lines.append("  - `/添加渠道`: 添加自定义API渠道")
+            reply_lines.append("  - `/删除渠道`: 删除自定义API渠道")
         
         await self.send_text("\n".join(reply_lines))
         return True, "帮助信息已发送", True
@@ -739,6 +859,7 @@ class GeminiDrawerPlugin(BasePlugin):
             "lmarena_api_key": ConfigField(type=str, default="", description="[新增]特殊的LMArena API密钥 (可选, 使用Bearer Token)"),
             "lmarena_model_name": ConfigField(type=str, default="gemini-2.5-flash-image-preview (nano-banana)", description="LMArena 使用的模型名称")
         },
+        "channels": {},
         "prompts": {
             "手办化": ConfigField(type=str, default="Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue...", description="默认的手办化prompt"),
             "手办化2": ConfigField(type=str, default="Use the nano-banana model to create a 1/7 scale commercialized figure...", description="手办化prompt版本2"),
@@ -816,6 +937,9 @@ class GeminiDrawerPlugin(BasePlugin):
             (ResetKeysCommand.get_command_info(), ResetKeysCommand),
             (AddPromptCommand.get_command_info(), AddPromptCommand),
             (DeletePromptCommand.get_command_info(), DeletePromptCommand),
+            # 渠道管理命令
+            (AddChannelCommand.get_command_info(), AddChannelCommand),
+            (DeleteChannelCommand.get_command_info(), DeleteChannelCommand),
             # 自定义绘图命令
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
         ]
