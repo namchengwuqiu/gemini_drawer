@@ -24,10 +24,6 @@ from src.common.logger import get_logger
 # 日志记录器
 logger = get_logger("gemini_drawer")
 
-# --- 全局常量 ---
-PLUGIN_DATA_DIR = Path(f"data/gemini_drawer")
-KEYS_FILE = PLUGIN_DATA_DIR / "keys.json"
-
 # --- [新] 健壮的JSON解析函数 ---
 async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
     """通过遍历所有部分来安全地从Gemini API响应中提取图像数据，并兼容LMArena的响应格式。"""
@@ -40,7 +36,10 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                 match_url = re.search(r"!\[.*?\]\((.*?)\)", message["content"])
                 if match_url:
                     image_url = match_url.group(1)
-                    logger.info(f"从LMArena响应中提取到图片URL: {image_url}")
+                    log_url = image_url
+                    if len(log_url) > 100 and "base64" in log_url:
+                        log_url = log_url[:50] + "..." + log_url[-20:]
+                    logger.info(f"从LMArena响应中提取到图片URL: {log_url}")
                     return image_url
 
                 # 检查 content 字段中的Markdown格式图片 (Base64)
@@ -88,14 +87,126 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
 
 # --- API密钥管理器 (代码已修改) ---
 class KeyManager:
-    def __init__(self, keys_file_path: Path):
-        self.keys_file = keys_file_path
+    def __init__(self, keys_file_path: Path = None):
+        if keys_file_path is None:
+            self.plugin_dir = Path(__file__).parent
+            self.data_dir = self.plugin_dir / "data"
+            self.data_dir.mkdir(exist_ok=True)
+            self.keys_file = self.data_dir / "keys.json"
+        else:
+            self.keys_file = keys_file_path
+            self.plugin_dir = self.keys_file.parent.parent # Assumption for legacy test support
+            
         self.config = self._load_config()
+        self._migrate_legacy_data()
+
+    def _migrate_legacy_data(self):
+        """迁移旧数据到新的存储位置"""
+        migrated = False
+        
+        # 1. 迁移旧的 keys.json (如果在插件根目录)
+        # 优先处理旧数据，确保它们被保留
+        old_keys_file = self.plugin_dir / "keys.json"
+        if old_keys_file.exists() and old_keys_file != self.keys_file:
+            try:
+                with open(old_keys_file, 'r', encoding='utf-8') as f:
+                    old_data = json.load(f)
+                    old_keys = old_data.get('keys', [])
+                    if old_keys:
+                        # 合并到现有配置
+                        current_keys = {k['value'] for k in self.config.get('keys', [])}
+                        for k in old_keys:
+                            if k['value'] not in current_keys:
+                                # 旧数据通常没有 type，默认为 google 或根据前缀判断
+                                if 'type' not in k:
+                                    k['type'] = 'bailili' if k['value'].startswith('sk-') else 'google'
+                                self.config['keys'].append(k)
+                                migrated = True
+                # 备份旧文件
+                old_keys_file.rename(old_keys_file.with_suffix('.json.bak'))
+                logger.info("已迁移旧的 keys.json 数据")
+            except Exception as e:
+                logger.error(f"迁移旧 keys.json 失败: {e}")
+
+        # 2. 迁移 config.toml 中的自定义渠道 Key
+        config_path = self.plugin_dir / "config.toml"
+        if config_path.exists():
+            try:
+                import toml
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config_data = toml.load(f)
+                
+                channels = config_data.get("channels", {})
+                config_changed = False
+                
+                for name, info in channels.items():
+                    key_to_migrate = None
+                    if isinstance(info, str):
+                        # 旧格式 "url:key"
+                        # 更加智能的分割：只有当冒号后的部分看起来像 Key 时才分割
+                        if ":" in info:
+                            # 尝试从右边分割
+                            possible_url, possible_key = info.rsplit(":", 1)
+                            
+                            # 验证 possible_key 是否像一个 Key
+                            # 1. 不包含 / (URL路径)
+                            # 2. 长度通常较长 (虽然有些 key 很短，但 URL 后缀通常是单词)
+                            # 3. 不包含 . (除了 base64 字符)
+                            # 4. 排除常见的 URL 结尾，如 generateContent
+                            
+                            is_key = True
+                            if '/' in possible_key:
+                                is_key = False
+                            elif possible_key in ['generateContent', 'streamGenerateContent']:
+                                is_key = False
+                            elif len(possible_key) < 10 and not possible_key.startswith('sk-'):
+                                # 极短的字符串可能不是 Key，除非是 sk- 开头
+                                # 但这里保守一点，如果太短且不像 key，就认为是 URL 的一部分
+                                # 实际上，如果用户真的把 key 写在后面，我们应该信任。
+                                # 主要问题是 URL 中包含冒号。
+                                # 如果 possible_url 是 http 或 https 结尾，说明冒号是协议分隔符
+                                if possible_url.lower() in ['http', 'https']:
+                                    is_key = False
+                            
+                            if is_key:
+                                url = possible_url
+                                key = possible_key
+                                key_to_migrate = key
+                                # 更新为新格式
+                                channels[name] = {"url": url, "enabled": True}
+                                config_changed = True
+                            else:
+                                # 整个字符串都是 URL
+                                channels[name] = {"url": info, "enabled": True}
+                                config_changed = True
+                                
+                    elif isinstance(info, dict):
+                        if "key" in info:
+                            key_to_migrate = info.pop("key")
+                            config_changed = True
+                    
+                    if key_to_migrate:
+                        # 添加到 KeyManager
+                        # 注意：如果 Key 已经存在（例如从 keys.json 迁移过来的），add_keys 会忽略它
+                        # 这符合“优先考虑旧版数据”的要求，如果旧版数据已经有了这个 Key，我们就不覆盖它的属性
+                        self.add_keys([key_to_migrate], name)
+                        migrated = True
+                        logger.info(f"已迁移渠道 {name} 的 Key")
+
+                if config_changed:
+                    with open(config_path, 'w', encoding='utf-8') as f:
+                        toml.dump(config_data, f)
+                    logger.info("已从 config.toml 移除 Key")
+
+            except Exception as e:
+                logger.error(f"迁移 config.toml 数据失败: {e}")
+
+        if migrated:
+            self.save_config(self.config)
 
     def _load_config(self) -> Dict[str, Any]:
         try:
             if not self.keys_file.exists():
-                self.keys_file.parent.mkdir(parents=True, exist_ok=True)
                 default_config = {"keys": [], "current_index": 0}
                 self.save_config(default_config)
                 return default_config
@@ -181,7 +292,8 @@ class KeyManager:
             self.save_config(self.config)
         return reset_count
 
-key_manager = KeyManager(KEYS_FILE)
+# 初始化 KeyManager
+key_manager = KeyManager()
 
 # --- 图像工具 (代码无变化) ---
 async def download_image(url: str, proxy: Optional[str]) -> Optional[bytes]:
@@ -274,7 +386,7 @@ class ChannelAddKeyCommand(BaseAdminCommand):
         new_keys = parts[1:]
 
         # 验证渠道名称
-        valid_channels = ['google', 'bailili']
+        valid_channels = ['google']
         custom_channels = self.get_config("channels", {})
         valid_channels.extend(custom_channels.keys())
         
@@ -446,88 +558,205 @@ class DeletePromptCommand(BaseAdminCommand):
 
 class AddChannelCommand(BaseAdminCommand):
     command_name: str = "gemini_add_channel"
-    command_description: str = "添加自定义API渠道 (格式: 名称:API地址:密钥[:模型])"
-    command_pattern: str = "/添加渠道"
+    command_description: str = "添加自定义API渠道"
+    command_pattern: str = r"^/添加渠道"
 
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         command_prefix = "/添加渠道"
-        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        rest = self.message.raw_message.replace(command_prefix, "", 1).strip()
         
-        if ":" not in content:
-             await self.send_text("❌ 格式错误！\n正确格式：`/添加渠道 名称:API地址:密钥[:模型]`")
-             return True, "格式错误", True
+        help_msg = (
+            "❌ 请提供正确的渠道信息！\n"
+            "支持两种格式：\n"
+            "1. **OpenAI格式** (必须指定模型)：\n"
+            "   `/添加渠道 名称:https://.../v1/chat/completions:模型名称`\n"
+            "2. **Gemini格式** (模型在URL中)：\n"
+            "   `/添加渠道 名称:https://.../models/模型名称:generateContent`"
+        )
+
+        if not rest:
+            await self.send_text(help_msg)
+            return True, "缺少参数", True
 
         try:
-            # 分割名称和剩余部分
-            name, rest = content.split(':', 1)
+            # 格式: 名称:API地址[:模型]
             if ":" not in rest:
-                 await self.send_text("❌ 格式错误！无法解析API地址和密钥。\n正确格式：`/添加渠道 名称:API地址:密钥[:模型]`")
-                 return True, "格式错误", True
+                await self.send_text(help_msg)
+                return True, "格式错误", True
+
+            name, rest_part = rest.split(':', 1)
+            name = name.strip()
             
-            # 尝试分割出 model (可选)
-            # 格式: 名称:API地址:密钥[:模型]
-            parts = rest.split(':')
             url = ""
-            key = ""
             model = None
             
-            # 让我们用 rsplit
-            temp_parts = rest.rsplit(':', 2)
-            if len(temp_parts) == 3:
-                # 检查是否误切了协议 (例如 https://...)
-                # 如果第一部分是 http 或 https，说明我们把协议冒号切开了，这实际上是 url:key 格式
-                if temp_parts[0].lower() in ['http', 'https']:
-                    # 误切了协议，回退到 url:key 处理
-                    url, key = rest.rsplit(':', 1)
+            # 尝试分割 URL 和 Model
+            # 逻辑：
+            # 1. 如果 URL 包含 /chat/completions，则必须有 Model
+            # 2. 如果 URL 包含 :generateContent，则 Model 通常在 URL 中，不需要额外指定
+            
+            # 先尝试按最后一个冒号分割，看看是不是 Model
+            last_colon_index = rest_part.rfind(':')
+            
+            # 预判 URL 类型
+            is_openai = "/chat/completions" in rest_part
+            is_gemini = "generateContent" in rest_part
+            
+            if not is_openai and not is_gemini:
+                await self.send_text(
+                    "❌ URL 格式不正确！\n"
+                    "请检查 API 地址是否正确：\n"
+                    "- OpenAI 格式应包含 `/chat/completions`\n"
+                    "- Gemini 格式应包含 `:generateContent`"
+                )
+                return True, "URL格式错误", True
+
+            if is_openai:
+                # OpenAI 格式，必须有 Model
+                # 检查是否提供了 Model (即是否存在冒号分隔)
+                # 注意：URL 本身可能包含端口号 (http://localhost:1234/...)
+                # 如果 rest_part 结尾是 /chat/completions，说明没有提供 Model
+                if rest_part.strip().endswith("/chat/completions"):
+                     await self.send_text("❌ OpenAI 格式必须指定模型名称！\n例如：`/添加渠道 PockGo:https://.../chat/completions:gemini-1.5-pro`")
+                     return True, "缺少模型", True
+                
+                # 尝试分割
+                if last_colon_index != -1:
+                    possible_model = rest_part[last_colon_index+1:].strip()
+                    possible_url = rest_part[:last_colon_index].strip()
+                    
+                    # 再次验证 URL
+                    if possible_url.endswith("/chat/completions"):
+                        url = possible_url
+                        model = possible_model
+                    else:
+                        # 可能是端口号？但我们要求必须有 Model
+                        # 如果分割出来的 url 不对，那可能是用户没加 Model，而冒号是端口号的一部分
+                        await self.send_text("❌ 无法解析模型名称，请确保格式为 `URL:模型`")
+                        return True, "解析失败", True
                 else:
-                    url = temp_parts[0].strip()
-                    key = temp_parts[1].strip()
-                    model = temp_parts[2].strip()
-            else:
-                # 可能是 url:key 格式
-                url, key = rest.rsplit(':', 1)
+                     await self.send_text("❌ OpenAI 格式必须指定模型名称！")
+                     return True, "缺少模型", True
 
-            name = name.strip()
-            url = url.strip()
-            key = key.strip()
+            elif is_gemini:
+                # Gemini 格式，Model 在 URL 中
+                # 通常不需要额外指定 Model，但如果用户指定了，我们也可以接受（虽然可能用不上，或者用于覆盖？）
+                # 现阶段逻辑：Gemini 格式不需要 Model 参数
+                url = rest_part.strip()
+                # 简单的验证
+                if not url.endswith(":generateContent") and "generateContent" not in url:
+                     await self.send_text("❌ Gemini 格式 URL 应以 `:generateContent` 结尾！")
+                     return True, "URL格式错误", True
 
-            if not name or not url or not key:
-                await self.send_text("❌ 名称、API地址和密钥都不能为空！")
+            if not name or not url:
+                await self.send_text("❌ 名称和API地址不能为空！")
                 return True, "参数不全", True
 
+            # 保存到 config.toml
             import toml
             config_path = Path(__file__).parent / "config.toml"
             
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
-            
+
             if "channels" not in config_data:
                 config_data["channels"] = {}
-            
-            if name in config_data["channels"]:
-                await self.send_text(f"❌ 添加失败：渠道名称 `{name}` 已存在。")
-                return True, "名称重复", True
 
-            # 保存为字典格式
-            channel_data = {"url": url, "key": key}
+            channel_info = {
+                "url": url,
+                "enabled": True
+            }
             if model:
-                channel_data["model"] = model
+                channel_info["model"] = model
 
-            config_data["channels"][name] = channel_data
-            
+            config_data["channels"][name] = channel_info
+
             with open(config_path, 'w', encoding='utf-8') as f:
                 toml.dump(config_data, f)
-            
-            msg = f"✅ 渠道 `{name}` 添加成功！\n"
+
+            msg = f"✅ 自定义渠道 `{name}` 添加成功！\n"
+            msg += f"- 类型: {'OpenAI' if is_openai else 'Gemini'}\n"
+            msg += f"- URL: `{url}`\n"
             if model:
-                msg += f"指定模型: {model}\n"
-            msg += "请手动重启程序以应用更改。"
+                msg += f"- Model: `{model}`\n"
+            msg += f"\n⚠️ **注意**：请**重启Bot**以应用更改！\n重启后使用 `/渠道添加key {name} <key>` 添加密钥。"
+            
             await self.send_text(msg)
             return True, "添加成功", True
 
         except Exception as e:
             logger.error(f"添加渠道失败: {e}")
-            await self.send_text(f"❌ 操作失败：{e}")
+            await self.send_text(f"❌ 添加失败：{e}")
+            return False, str(e), True
+
+class ChannelUpdateModelCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_update_model"
+    command_description: str = "修改渠道模型 (格式: /渠道修改模型 <渠道名称> <新模型名称>)"
+    command_pattern: str = r"^/渠道修改模型"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/渠道修改模型"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        
+        parts = content.split()
+        if len(parts) < 2:
+            await self.send_text("❌ 参数错误！\n格式：`/渠道修改模型 <渠道名称> <新模型名称>`\n例如：`/渠道修改模型 PockGo gemini-1.5-pro`")
+            return True, "参数不足", True
+
+        channel_name = parts[0]
+        new_model = parts[1]
+
+        # 读取 config.toml
+        import toml
+        config_path = Path(__file__).parent / "config.toml"
+        
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+            
+            channels = config_data.get("channels", {})
+            
+            if channel_name not in channels:
+                await self.send_text(f"❌ 未找到渠道 `{channel_name}`！\n请先使用 `/添加渠道` 创建该渠道。")
+                return True, "渠道不存在", True
+            
+            channel_info = channels[channel_name]
+            old_model = channel_info.get("model", "未设置")
+            url = channel_info.get("url", "")
+            
+            # 更新模型字段
+            channel_info["model"] = new_model
+            
+            msg = f"✅ 渠道 `{channel_name}` 模型已更新！\n"
+            msg += f"- 旧模型: `{old_model}`\n"
+            msg += f"- 新模型: `{new_model}`\n"
+
+            # 特殊处理 Gemini 格式 URL: 尝试替换 URL 中的模型部分
+            # 格式: .../models/<model_name>:generateContent
+            if "generateContent" in url and "/models/" in url:
+                import re
+                # 匹配 /models/ 之后，:generateContent 之前的部分
+                pattern = r"(/models/)([^:]+)(:generateContent)"
+                if re.search(pattern, url):
+                    new_url = re.sub(pattern, f"\\g<1>{new_model}\\g<3>", url)
+                    if new_url != url:
+                        channel_info["url"] = new_url
+                        msg += f"- URL已自动更新: `{new_url}`\n"
+
+            channels[channel_name] = channel_info
+            config_data["channels"] = channels
+            
+            with open(config_path, 'w', encoding='utf-8') as f:
+                toml.dump(config_data, f)
+                
+            msg += "\n⚠️ **注意**：请**重启Bot**以应用更改！"
+            
+            await self.send_text(msg)
+            return True, "更新成功", True
+
+        except Exception as e:
+            logger.error(f"更新渠道模型失败: {e}")
+            await self.send_text(f"❌ 更新失败：{e}")
             return False, str(e), True
 
 class DeleteChannelCommand(BaseAdminCommand):
@@ -596,9 +825,6 @@ class ToggleChannelCommand(BaseAdminCommand):
             if name.lower() == 'google':
                 config_data["api"]["enable_google"] = is_enable
                 target_found = True
-            elif name.lower() == 'bailili':
-                config_data["api"]["enable_bailili"] = is_enable
-                target_found = True
             elif name.lower() == 'lmarena':
                 config_data["api"]["enable_lmarena"] = is_enable
                 target_found = True
@@ -648,13 +874,15 @@ class ListChannelsCommand(BaseAdminCommand):
 
             msg_lines = ["📋 **当前渠道状态列表**", "--------------------"]
 
-            # 内置渠道
-            def get_status_icon(key, default=True):
-                return "✅" if api_config.get(key, default) else "❌"
+            # 1. Google 官方
+            enable_google = api_config.get("enable_google", True)
+            status_icon = "✅" if enable_google else "❌"
+            msg_lines.append(f"{status_icon} **Google** (官方Key)")
 
-            msg_lines.append(f"{get_status_icon('enable_google')} **Google** (官方Key)")
-            msg_lines.append(f"{get_status_icon('enable_bailili')} **Bailili** (中转Key)")
-            msg_lines.append(f"{get_status_icon('enable_lmarena')} **LMArena** (免费接口)")
+            # 2. LMArena
+            enable_lmarena = api_config.get("enable_lmarena", False)
+            status_icon = "✅" if enable_lmarena else "❌"
+            msg_lines.append(f"{status_icon} **LMArena** (免费接口)")
 
             # 自定义渠道
             if channels_config:
@@ -815,7 +1043,7 @@ class BaseDrawCommand(BaseCommand, ABC):
 
         # 然后添加所有从 key_manager 获取的密钥 (包括内置和自定义渠道的)
         enable_google = self.get_config("api.enable_google", True)
-        enable_bailili = self.get_config("api.enable_bailili", True)
+        # enable_bailili 已移除，bailili 现在作为自定义渠道处理
 
         for key_info in key_manager.get_all_keys():
             if key_info.get('status') != 'active':
@@ -835,16 +1063,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                         "key": key_info['value']
                     })
             
-            # 2. Bailili 中转渠道
-            elif key_type == 'bailili':
-                if enable_bailili:
-                    endpoints_to_try.append({
-                        "type": "bailili",
-                        "url": self.get_config("api.bailili_api_url"),
-                        "key": key_info['value']
-                    })
-            
-            # 3. 自定义渠道 (key_type == 渠道名称)
+            # 2. 自定义渠道 (包括 bailili)
             elif key_type in custom_channels:
                 channel_info = custom_channels[key_type]
                 c_enabled = True
@@ -855,8 +1074,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                     c_url = channel_info.get("url")
                     c_model = channel_info.get("model")
                     c_enabled = channel_info.get("enabled", True)
-                elif isinstance(channel_info, str) and ":" in channel_info:
-                    c_url, _ = channel_info.rsplit(":", 1) # 旧格式只取URL，Key用key_manager里的
                 
                 if c_enabled and c_url:
                     endpoints_to_try.append({
@@ -889,22 +1106,25 @@ class BaseDrawCommand(BaseCommand, ABC):
                 current_payload = payload # Default payload
                 client_proxy = proxy # Use global proxy by default
                 
-                # 判断是否为 OpenAI 兼容格式
-                # 1. 显式指定了 model
-                # 2. URL 包含 /chat/completions
-                # 3. 类型是 lmarena
-                is_openai_compatible = endpoint_type == 'lmarena' or \
-                                     endpoint.get("model") is not None or \
-                                     "/chat/completions" in api_url
+                is_openai = False
+                
+                # 严格根据 URL 判断模式
+                if endpoint_type == 'lmarena':
+                    # LMArena 特殊处理
+                    is_openai = True
+                    request_url = f"{api_url}/v1/chat/completions"
+                    client_proxy = None # Disable proxy for local lmarena connection
+                elif "/chat/completions" in api_url:
+                    is_openai = True
+                    request_url = api_url
+                elif "generateContent" in api_url:
+                    is_openai = False
+                    request_url = f"{api_url}?key={api_key}"
+                else:
+                    logger.warning(f"无法识别的API地址格式: {api_url}，跳过。请检查配置。")
+                    continue
 
-                if is_openai_compatible:
-                    # 确定请求 URL
-                    if endpoint_type == 'lmarena':
-                        request_url = f"{api_url}/v1/chat/completions"
-                        client_proxy = None # Disable proxy for local lmarena connection
-                    else:
-                        request_url = api_url
-
+                if is_openai:
                     if api_key: # 只有存在key时才添加Authorization头
                         headers["Authorization"] = f"Bearer {api_key}"
                     headers["Content-Type"] = "application/json" # 确保Content-Type为application/json
@@ -928,8 +1148,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                         "n": 1
                     }
                     current_payload = openai_payload
-                else: # 对于 google 和 bailili，将key作为查询参数
-                    request_url = f"{api_url}?key={api_key}"
 
                 # logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {json.dumps(current_payload, ensure_ascii=False)}")
 
@@ -973,6 +1191,14 @@ class BaseDrawCommand(BaseCommand, ABC):
                                         image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
                                         encode_elapsed = (datetime.now() - encode_start_time).total_seconds()
                                         logger.info(f"Base64编码完成，耗时 {encode_elapsed:.2f}s")
+                                elif img_data.startswith('data:image'):
+                                    # 处理 data URI 格式
+                                    if 'base64,' in img_data:
+                                        image_to_send_b64 = img_data.split('base64,')[1]
+                                    else:
+                                        # 可能是其他编码，暂不支持
+                                        logger.warning("不支持的 data URI 格式")
+                                        image_to_send_b64 = None
                                 else:
                                     image_to_send_b64 = img_data
                                 
@@ -1060,6 +1286,7 @@ class HelpCommand(BaseCommand):
             reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
             reply_lines.append("  - `/添加渠道`: 添加自定义API渠道")
             reply_lines.append("  - `/删除渠道`: 删除自定义API渠道")
+            reply_lines.append("  - `/渠道修改模型`: 修改渠道模型")
             reply_lines.append("  - `/启用渠道`: 启用指定渠道")
             reply_lines.append("  - `/禁用渠道`: 禁用指定渠道")
             reply_lines.append("  - `/渠道列表`: 查看所有渠道状态")
@@ -1100,8 +1327,8 @@ class GeminiDrawerPlugin(BasePlugin):
             "proxy_url": ConfigField(type=str, default="http://127.0.0.1:7890", description="HTTP 代理地址"),
         },
         "api": {
+            "enable_google": ConfigField(type=bool, default=True, description="是否启用Google官方API"),
             "api_url": ConfigField(type=str, default="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent", description="Google官方的Gemini API 端点"),
-            "bailili_api_url": ConfigField(type=str, default="https://newapi.sisuo.de/v1beta/models/gemini-2.5-flash-image-preview-free:generateContent", description="Bailili等第三方兼容API端点"),
             "enable_lmarena": ConfigField(type=bool, default=False, description="是否启用LMArena API"),
             "lmarena_api_url": ConfigField(type=str, default="http://host.docker.internal:5102", description="LMArena API的基础URL (例如: http://host.docker.internal:5102, 如果在Docker中运行)"),
             "lmarena_api_key": ConfigField(type=str, default="", description="[新增]特殊的LMArena API密钥 (可选, 使用Bearer Token)"),
@@ -1183,6 +1410,7 @@ class GeminiDrawerPlugin(BasePlugin):
             (ChannelAddKeyCommand.get_command_info(), ChannelAddKeyCommand),
             (ChannelListKeysCommand.get_command_info(), ChannelListKeysCommand),
             (ChannelResetKeysCommand.get_command_info(), ChannelResetKeysCommand),
+            (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), # 新增
             # Prompt管理命令
             (AddPromptCommand.get_command_info(), AddPromptCommand),
             (DeletePromptCommand.get_command_info(), DeletePromptCommand),

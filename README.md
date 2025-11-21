@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.1.4
+> **Version:** 1.1.8
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片。
 
@@ -47,18 +47,19 @@ pip install -r requirements.txt
 
 ### 管理员指令
 
-| 指令                                         | 功能                                                     |
-| :------------------------------------------- | :------------------------------------------------------- |
-| `/渠道添加key {渠道} {key} ...`              | **[改]** 添加指定渠道的 API Key。                        |
-| `/渠道key列表`                               | **[改]** 查看各渠道 Key 的状态。                         |
-| `/渠道手动重置key [渠道]`                    | **[改]** 重置指定渠道或所有渠道的失效 Key。              |
-| `/添加提示词 {名称}:{prompt}`                | **[新]** 动态添加一个绘图指令，加载需重启。              |
-| `/删除提示词 {名称}`                         | **[新]** 动态删除一个绘图指令，加载需重启。              |
-| `/添加渠道 {名称}:{API地址}:{密钥}[:{模型}]` | **[新]** 动态添加一个自定义 API 渠道。支持 OpenAI 格式。 |
-| `/删除渠道 {名称}`                           | **[新]** 动态删除一个自定义 API 渠道。                   |
-| `/启用渠道 {名称}`                           | **[新]** 启用指定渠道 (支持 google/bailili/lmarena)。    |
-| `/禁用渠道 {名称}`                           | **[新]** 禁用指定渠道。                                  |
-| `/渠道列表`                                  | **[新]** 查看所有渠道的启用/禁用状态。                   |
+| 指令                                  | 功能                                                               |
+| :------------------------------------ | :----------------------------------------------------------------- |
+| `/渠道添加key {渠道} {key} ...`       | **[改]** 添加指定渠道的 API Key。                                  |
+| `/渠道key列表`                        | **[改]** 查看各渠道 Key 的状态。                                   |
+| `/渠道手动重置key [渠道]`             | **[改]** 重置指定渠道或所有渠道的失效 Key。                        |
+| `/添加提示词 {名称}:{prompt}`         | **[新]** 动态添加一个绘图指令，加载需重启。                        |
+| `/删除提示词 {名称}`                  | **[新]** 动态删除一个绘图指令，加载需重启。                        |
+| `/添加渠道 {名称}:{API地址}[:{模型}]` | **[改]** 动态添加一个自定义 API 渠道。支持 OpenAI 和 Gemini 格式。 |
+| `/渠道修改模型 {名称} {新模型}`       | **[新]** 修改指定渠道的模型名称，加载需重启。                      |
+| `/删除渠道 {名称}`                    | **[新]** 动态删除一个自定义 API 渠道。                             |
+| `/启用渠道 {名称}`                    | **[新]** 启用指定渠道 (支持 google/lmarena)。                      |
+| `/禁用渠道 {名称}`                    | **[新]** 禁用指定渠道。                                            |
+| `/渠道列表`                           | **[新]** 查看所有渠道的启用/禁用状态。                             |
 
 **注**：管理员指令在 `/基咪绘图帮助` 中仅对管理员可见。
 
@@ -77,24 +78,36 @@ pip install -r requirements.txt
 ### `[proxy]` - 代理设置
 
 - `enable` (布尔值, 默认 `false`): 是否为 API 请求启用代理。
-- `proxy_url` (字符串, 默认 `"http://127.0.0.1:7890"`): 你的 HTTP 代理地址。
+- `proxy_url` (字符串, 默认 `"http://127.00.1:7890"`): 你的 HTTP 代理地址。
 
 ### `[api]` - API 端点设置
 
 此部分用于配置插件可以使用的不同后端 API。
 
-- `api_url` (字符串): Google 官方的 Gemini API 端点。
-- `bailili_api_url` (字符串): 第三方兼容 API 端点 (如 Bailili, VC-AI 等)。插件会自动根据 Key 的格式（是否以 `sk-` 开头）选择合适的端点。
+- `enable_google` (布尔值, 默认 `true`): 是否启用 Google 官方 API。
+- `api_url` (字符串): Google 官方 API 的端点地址。
+- `enable_lmarena` (布尔值, 默认 `false`): 是否启用 LMArena API。插件会自动根据 Key 的格式（是否以 `sk-` 开头）选择合适的端点。
 - `lmarena_api_url` (字符串, 默认 `http://host.docker.internal:5102`): **[新增]** LMArena API 的基础 URL。如果你在 Docker 中运行，并且 LMArena 也在 Docker 网络中，这个地址通常是正确的。
 - `lmarena_api_key` (字符串, 默认 `""`): **[新增]** LMArena API 的密钥 (可选, 使用 Bearer Token)。
 - `lmarena_model_name` (字符串, 默认 `gemini-2.5-flash-image-preview (nano-banana)`): **[新增]** LMArena 使用的模型名称。
 
-### `[channels]` - 自定义渠道配置
+### `[channels]` - 自定义渠道配置 (config.toml)
 
-此部分用于存储通过 `/添加渠道` 指令添加的自定义 API 渠道。
+自定义渠道的配置现在只包含 URL 和 Model。Key 统一存储在 `data/keys.json` 中。
 
-- 格式: `名称 = { url = "API地址", key = "密钥", model = "模型名称(可选)" }`
-- **OpenAI 兼容支持**: 如果 API 地址以 `/chat/completions` 结尾，或者指定了 `model` 参数，插件将自动使用 OpenAI 兼容格式（Bearer Token + Messages Payload）发送请求。这使得插件可以支持如 PockGo 等第三方服务。
+**支持的 URL 格式 (严格校验)**：
+
+1.  **OpenAI 格式** (必须包含 `/chat/completions`):
+    *   URL: `https://api.example.com/v1/chat/completions`
+    *   Model: **必须指定** (例如 `gemini-1.5-pro`)
+    *   指令示例: `/添加渠道 MyOpenAI:https://api.example.com/v1/chat/completions:gemini-1.5-pro`
+
+2.  **Gemini 格式** (必须包含 `:generateContent`):
+    *   URL: `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent`
+    *   Model: 包含在 URL 中，无需额外指定。
+    *   指令示例: `/添加渠道 MyGemini:https://.../models/gemini-1.5-flash:generateContent`
+
+- 格式: `名称 = { url = "API地址", model = "模型名称(可选)", enabled = true }`
 
 ### 渠道管理
 
