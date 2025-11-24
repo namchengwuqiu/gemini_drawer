@@ -24,6 +24,32 @@ from src.common.logger import get_logger
 # 日志记录器
 logger = get_logger("gemini_drawer")
 
+def truncate_for_log(data: str, max_length: int = 100) -> str:
+    """截断用于日志的数据，避免过长"""
+    if len(data) <= max_length:
+        return data
+    return data[:max_length//2] + "...[truncated]..." + data[-max_length//2:]
+
+def safe_json_dumps(obj: Any) -> str:
+    """安全地序列化JSON对象，对base64数据进行截断"""
+    def truncate_base64_values(o):
+        if isinstance(o, dict):
+            new_dict = {}
+            for k, v in o.items():
+                if isinstance(v, str) and ('base64' in v.lower() or len(v) > 500):
+                    new_dict[k] = truncate_for_log(v)
+                elif isinstance(v, (dict, list)):
+                    new_dict[k] = truncate_base64_values(v)
+                else:
+                    new_dict[k] = v
+            return new_dict
+        elif isinstance(o, list):
+            return [truncate_base64_values(item) for item in o]
+        return o
+    
+    truncated_obj = truncate_base64_values(obj)
+    return json.dumps(truncated_obj, ensure_ascii=False)
+
 # --- [新] 健壮的JSON解析函数 ---
 async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
     """通过遍历所有部分来安全地从Gemini API响应中提取图像数据，并兼容LMArena的响应格式。"""
@@ -1110,9 +1136,8 @@ class BaseDrawCommand(BaseCommand, ABC):
                 
                 # 严格根据 URL 判断模式
                 if endpoint_type == 'lmarena':
-                    # LMArena 特殊处理
                     is_openai = True
-                    request_url = f"{api_url}/v1/chat/completions"
+                    request_url = f"{api_url}/v1/chat/completions" # LMArena SSE endpoint
                     client_proxy = None # Disable proxy for local lmarena connection
                 elif "/chat/completions" in api_url:
                     is_openai = True
@@ -1127,109 +1152,171 @@ class BaseDrawCommand(BaseCommand, ABC):
                 if is_openai:
                     if api_key: # 只有存在key时才添加Authorization头
                         headers["Authorization"] = f"Bearer {api_key}"
-                    headers["Content-Type"] = "application/json" # 确保Content-Type为application/json
                     
                     # 构造 OpenAI/LMArena 特定的 payload
-                    openai_messages = []
-                    for part in parts:
-                        if "inline_data" in part:
-                            openai_messages.append({"role": "user", "content": [{"type": "image_url", "image_url": {"url": f"data:{part['inline_data']['mime_type']};base64,{part['inline_data']['data']}"}}]})
-                        elif "text" in part:
-                            openai_messages.append({"role": "user", "content": part["text"]})
+                    # 用户的 prompt 应该放在最后一个 message
+                    user_text_prompt = ""
+                    for p in parts:
+                        if "text" in p:
+                            user_text_prompt = p["text"]
+                            break
                     
+                    openai_messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": { "url": f"data:{mime_type};base64,{base64_img}" }
+                                },
+                                {
+                                    "type": "text",
+                                    "text": user_text_prompt
+                                }
+                            ]
+                        }
+                    ]
+
                     # 确定模型名称
                     model_name = endpoint.get("model")
                     if not model_name:
-                        model_name = self.get_config("api.lmarena_model_name", "gemini-2.5-flash-image-preview (nano-banana)")
-                    
+                         # 默认模型
+                        model_name = self.get_config("api.lmarena_model_name", "gemini-pro-vision") if endpoint_type != 'lmarena' else "llava-v1.6-34b"
+
                     openai_payload = {
                         "model": model_name,
                         "messages": openai_messages,
+                        "stream": endpoint_type == 'lmarena', # LMArena需要开启stream
                         "n": 1
                     }
                     current_payload = openai_payload
 
-                # logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {json.dumps(current_payload, ensure_ascii=False)}")
+                # 为避免日志被base64数据占满，使用安全的JSON序列化方法
+                logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {safe_json_dumps(current_payload)}")
+                
+                img_data = None
+                
+                # A. LMArena SSE (流式) 处理逻辑
+                if endpoint_type == 'lmarena':
+                    try:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0) as client:
+                            async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
+                                if response.status_code != 200:
+                                    raw_body = await response.aread()
+                                    raise Exception(f"API请求失败, 状态码: {response.status_code} - {raw_body.decode('utf-8', 'ignore')}")
 
-                try:
-                    async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
-                        response = await client.post(request_url, json=current_payload, headers=headers)
-                except httpx.RequestError as e:
-                    logger.error(f"httpx.RequestError for endpoint {endpoint_type} ({request_url}): {e}")
-                    raise # Re-raise to be caught by the outer except block
+                                # logger.info("LMArena 连接成功，开始接收SSE事件...")
+                                current_event = ''
+                                async for line in response.aiter_lines():
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    
+                                    if line.startswith('event:'):
+                                        current_event = line.replace('event:', '').strip()
+                                    elif line.startswith('data:'):
+                                        data_str = line.replace('data:', '').strip()
 
-                if response.status_code == 200:
-                    data = response.json()
-                    img_data = await extract_image_data(data)
-                    
-                    if img_data:
-                        if endpoint_type != 'lmarena':
-                            key_manager.record_key_usage(api_key, True)
-                        
-                        elapsed = (datetime.now() - start_time).total_seconds()
-                        logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
-                        
-                        try:
-                            from src.plugin_system.apis import send_api, chat_api
-                            stream_id = None
-                            if hasattr(self.message, 'chat_stream') and self.message.chat_stream:
-                                stream_info = chat_api.get_stream_info(self.message.chat_stream)
-                                stream_id = stream_info.get('stream_id')
-
-                            if stream_id:
-                                image_to_send_b64 = None
-                                if img_data.startswith(('http://', 'https')):
-                                    logger.info("开始下载图片...")
-                                    download_start_time = datetime.now()
-                                    image_bytes = await download_image(img_data, proxy)
-                                    download_elapsed = (datetime.now() - download_start_time).total_seconds()
-                                    logger.info(f"图片下载完成，耗时 {download_elapsed:.2f}s")
-
-                                    if image_bytes:
-                                        logger.info("开始进行Base64编码...")
-                                        encode_start_time = datetime.now()
-                                        image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
-                                        encode_elapsed = (datetime.now() - encode_start_time).total_seconds()
-                                        logger.info(f"Base64编码完成，耗时 {encode_elapsed:.2f}s")
-                                elif img_data.startswith('data:image'):
-                                    # 处理 data URI 格式
-                                    if 'base64,' in img_data:
-                                        image_to_send_b64 = img_data.split('base64,')[1]
-                                    else:
-                                        # 可能是其他编码，暂不支持
-                                        logger.warning("不支持的 data URI 格式")
-                                        image_to_send_b64 = None
-                                else:
-                                    image_to_send_b64 = img_data
-                                
-                                if image_to_send_b64:
-                                    logger.info("开始发送图片...")
-                                    send_start_time = datetime.now()
-                                    await send_api.image_to_stream(
-                                        image_base64=image_to_send_b64,
-                                        stream_id=stream_id,
-                                        storage_message=False
-                                    )
-                                    send_elapsed = (datetime.now() - send_start_time).total_seconds()
-                                    logger.info(f"图片发送完成，耗时 {send_elapsed:.2f}s")
-                                    await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
-                                else:
-                                    raise Exception("图片下载或转换失败")
-                            else:
-                                raise Exception("无法从当前消息中确定stream_id")
-                        except Exception as e:
-                            logger.error(f"发送图片失败: {e}")
-                            await self.send_text("❌ 图片发送失败。" )
-
-                        return True, "绘图成功", True
-                    else:
-                        response_file = PLUGIN_DATA_DIR / f"{endpoint_type}_response.json"
-                        with open(response_file, 'w', encoding='utf-8') as f:
-                            json.dump(data, f, indent=4, ensure_ascii=False)
-                        logger.info(f"API响应内容已保存至: {response_file}")
-                        raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
+                                        if data_str == "[DONE]":
+                                            logger.info("LMArena SSE事件流结束 (DONE)。")
+                                            break
+                                        
+                                        if current_event == 'status':
+                                            try:
+                                                status_data = json.loads(data_str)
+                                                status = status_data.get('status')
+                                                position = status_data.get('position')
+                                                # if status == 'queued' and position is not None:
+                                                    # await self.send_text(f"⏳ 已加入队列，当前排在第 {position} 位...")
+                                                # elif status == 'processing':
+                                                    # await self.send_text("🏃‍♂️ 开始处理，请稍候...")
+                                            except json.JSONDecodeError:
+                                                logger.warning(f"无法解析LMArena status data: {data_str}")
+                                        
+                                        elif current_event == 'result':
+                                            try:
+                                                result_data = json.loads(data_str)
+                                                if result_data.get('status') == 'completed' and result_data.get('image'):
+                                                    img_data = result_data['image']
+                                                    logger.info("从LMArena SSE 'result'事件中成功提取图片数据。")
+                                            except json.JSONDecodeError:
+                                                logger.warning(f"无法解析LMArena result data: {data_str}")
+                                        
+                                        elif current_event == 'done': # 有些实现会把 [DONE] 放在 event: done 后面
+                                            logger.info("LMArena SSE事件流结束。")
+                                            break
+                    except httpx.RequestError as e:
+                        logger.error(f"LMArena SSE 请求错误: {e}")
+                        raise
+                    except Exception as e:
+                        logger.error(f"LMArena SSE 流处理失败: {e}")
+                        raise
+                
+                # B. 其他标准 POST 请求处理逻辑
                 else:
-                    raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+                    try:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
+                            response = await client.post(request_url, json=current_payload, headers=headers)
+                    except httpx.RequestError as e:
+                        logger.error(f"httpx.RequestError for endpoint {endpoint_type} ({request_url}): {e}")
+                        raise
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        img_data = await extract_image_data(data)
+                        if not img_data:
+                            logger.warning(f"API 响应成功但未提取到图片。响应: {json.dumps(data, indent=2, ensure_ascii=False)}")
+                            raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
+                    else:
+                        raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+
+                # C. 统一的成功处理逻辑
+                if img_data:
+                    if endpoint_type != 'lmarena':
+                        key_manager.record_key_usage(api_key, True)
+                    
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
+                    
+                    try:
+                        from src.plugin_system.apis import send_api, chat_api
+                        stream_id = None
+                        if hasattr(self.message, 'chat_stream') and self.message.chat_stream:
+                            stream_info = chat_api.get_stream_info(self.message.chat_stream)
+                            stream_id = stream_info.get('stream_id')
+
+                        if stream_id:
+                            image_to_send_b64 = None
+                            if img_data.startswith(('http://', 'https')):
+                                image_bytes = await download_image(img_data, proxy)
+                                if image_bytes:
+                                    image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                            elif 'base64,' in img_data:
+                                image_to_send_b64 = img_data.split('base64,')[1]
+                            else:
+                                image_to_send_b64 = img_data
+                            
+                            if image_to_send_b64:
+                                await send_api.image_to_stream(
+                                    image_base64=image_to_send_b64,
+                                    stream_id=stream_id,
+                                    storage_message=False
+                                )
+                                await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
+                            else:
+                                raise Exception("图片下载或转换失败")
+                        else:
+                            raise Exception("无法从当前消息中确定stream_id")
+                    except Exception as e:
+                        logger.error(f"发送图片失败: {e}")
+                        await self.send_text("❌ 图片发送失败。" )
+
+                    return True, "绘图成功", True # 成功，终止循环
+
+                # 如果img_data为空（例如LMArena流结束但没收到图片），则会自然走到循环末尾的异常捕获
+                if not img_data:
+                    raise Exception("未能从API响应中获取图片数据")
+
 
             except Exception as e:
                 logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
