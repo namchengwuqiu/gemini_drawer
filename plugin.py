@@ -1315,7 +1315,7 @@ class BaseDrawCommand(BaseCommand, ABC):
 
                 # 如果img_data为空（例如LMArena流结束但没收到图片），则会自然走到循环末尾的异常捕获
                 if not img_data:
-                    raise Exception("未能从API响应中获取图片数据")
+                    raise Exception("审核不通过，未能从API响应中获取图片数据")
 
 
             except Exception as e:
