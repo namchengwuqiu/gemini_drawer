@@ -1387,11 +1387,25 @@ class CustomDrawCommand(BaseDrawCommand):
     command_description: str = "使用自定义Prompt进行AI绘图"
     command_pattern: str = r".*/bnn.*"
     async def get_prompt(self) -> Optional[str]:
-        command_prefix = "/bnn"
-        prompt_text = self.message.raw_message.replace(command_prefix, "", 1).strip()
-        if not prompt_text:
-            await self.send_text("❌ 自定义指令(/bnn)内容不能为空。" )
+        # 清理原始消息中的CQ码
+        cleaned_message = re.sub(r'\[CQ:.*?\]', '', self.message.raw_message).strip()
+        
+        command_pattern = "/bnn"
+        
+        # 在清理后的文本中查找指令
+        command_pos = cleaned_message.find(command_pattern)
+        
+        if command_pos == -1:
+            await self.send_text("❌ 未找到 /bnn 指令。")
             return None
+            
+        # 提取指令后的文本
+        prompt_text = cleaned_message[command_pos + len(command_pattern):].strip()
+        
+        if not prompt_text:
+            await self.send_text("❌ 自定义指令(/bnn)内容不能为空。")
+            return None
+            
         return prompt_text
 
 # --- 插件注册 (代码已修改) ---
