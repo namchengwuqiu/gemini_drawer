@@ -1009,7 +1009,7 @@ class BaseDrawCommand(BaseCommand, ABC):
         # 首先添加 LMArena (如果启用)
         if self.get_config("api.enable_lmarena", True):
             lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
-            lmarena_key = "lmarena" # Placeholder
+            lmarena_key = self.get_config("api.lmarena_api_key", "") # Placeholder
             endpoints_to_try.append({
                 "type": "lmarena",
                 "url": lmarena_url,
