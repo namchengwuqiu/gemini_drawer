@@ -318,6 +318,28 @@ class KeyManager:
             self.save_config(self.config)
         return reset_count
 
+    def reset_specific_key(self, key_type: str, index: int) -> bool:
+        """重置指定渠道的特定Key (index从1开始)"""
+        keys = self.config.get('keys', [])
+        target_keys = []
+        
+        # 筛选出目标渠道的key，并记录它们在原始列表中的索引
+        for i, key_obj in enumerate(keys):
+            if key_obj.get('type') == key_type:
+                target_keys.append((i, key_obj))
+        
+        if index < 1 or index > len(target_keys):
+            return False
+            
+        real_index, key_obj = target_keys[index - 1]
+        
+        # 重置状态
+        key_obj['status'] = 'active'
+        key_obj['error_count'] = 0
+        
+        self.save_config(self.config)
+        return True
+
 # 初始化 KeyManager
 key_manager = KeyManager()
 
@@ -465,26 +487,46 @@ class ChannelListKeysCommand(BaseAdminCommand):
         await self.send_text("\n".join(msg_lines))
         return True, "查询成功", True
 
-class ChannelResetKeysCommand(BaseAdminCommand):
-    command_name: str = "gemini_channel_reset_keys"
-    command_description: str = "重置渠道Key状态 (格式: /渠道手动重置key [渠道名称])"
-    command_pattern: str = r"^/渠道手动重置key"
+class ChannelResetKeyCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_reset_key"
+    command_description: str = "重置Key状态 (格式: /渠道重置key [渠道] [序号])"
+    command_pattern: str = r"^/渠道重置key"
 
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
-        command_prefix = "/渠道手动重置key"
-        channel_name = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        command_prefix = "/渠道重置key"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        parts = content.split()
         
-        if not channel_name:
-            channel_name = None # 重置所有
+        if not parts:
+            # Case 0: No args -> Reset ALL channels
+            count = key_manager.manual_reset_keys(None)
+            if count > 0:
+                await self.send_text(f"✅ 已成功重置所有渠道的 {count} 个失效 Key。")
+            else:
+                await self.send_text("ℹ️ 所有渠道均没有需要重置的 Key。")
+            return True, "重置所有成功", True
+            
+        channel_name = parts[0]
         
-        count = key_manager.manual_reset_keys(channel_name)
-        
-        target = f"渠道 `{channel_name}`" if channel_name else "所有渠道"
-        if count > 0:
-            await self.send_text(f"✅ 已成功重置 {target} 的 {count} 个失效 Key。")
+        if len(parts) >= 2:
+            # Case 2: Channel + Index -> Reset specific Key
+            try:
+                index = int(parts[1])
+                if key_manager.reset_specific_key(channel_name, index):
+                    await self.send_text(f"✅ 已成功重置渠道 `{channel_name}` 的第 {index} 个 Key。")
+                else:
+                    await self.send_text(f"❌ 重置失败：渠道 `{channel_name}` 不存在第 {index} 个 Key。")
+            except ValueError:
+                await self.send_text("❌ 序号必须是数字！")
         else:
-            await self.send_text(f"ℹ️ {target} 没有需要重置的 Key。")
-        return True, "重置成功", True
+            # Case 1: Channel only -> Reset that channel
+            count = key_manager.manual_reset_keys(channel_name)
+            if count > 0:
+                await self.send_text(f"✅ 已成功重置渠道 `{channel_name}` 的 {count} 个失效 Key。")
+            else:
+                await self.send_text(f"ℹ️ 渠道 `{channel_name}` 没有需要重置的 Key。")
+                
+        return True, "操作完成", True
 
 # --- [新] 管理命令 (Prompt管理) ---
 class AddPromptCommand(BaseAdminCommand):
@@ -1368,7 +1410,7 @@ class HelpCommand(BaseCommand):
             reply_lines.append("🔑 管理员指令 🔑")
             reply_lines.append("  - `/渠道添加key`: 添加渠道API Key")
             reply_lines.append("  - `/渠道key列表`: 查看各渠道Key状态")
-            reply_lines.append("  - `/渠道手动重置key`: 重置渠道Key状态")
+            reply_lines.append("  - `/渠道重置key`: 重置指定渠道的Key")
             reply_lines.append("  - `/添加提示词`: 添加自定义绘图风格")
             reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
             reply_lines.append("  - `/添加渠道`: 添加自定义API渠道")
@@ -1510,7 +1552,7 @@ class GeminiDrawerPlugin(BasePlugin):
             # Key管理命令
             (ChannelAddKeyCommand.get_command_info(), ChannelAddKeyCommand),
             (ChannelListKeysCommand.get_command_info(), ChannelListKeysCommand),
-            (ChannelResetKeysCommand.get_command_info(), ChannelResetKeysCommand),
+            (ChannelResetKeyCommand.get_command_info(), ChannelResetKeyCommand), # 新增
             (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), # 新增
             # Prompt管理命令
             (AddPromptCommand.get_command_info(), AddPromptCommand),

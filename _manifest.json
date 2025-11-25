@@ -28,5 +28,6 @@
   "plugin_info": {
     "is_built_in": false,
     "plugin_type": "command"
-  }
+  },
+  "id": "sakura桜花.gemini_drawer"
 }
