@@ -1582,7 +1582,7 @@ class GeminiDrawerPlugin(BasePlugin):
                 {
                     "command_name": f"gemini_{prompt_name}",
                     "command_description": f"将图片{prompt_name}",
-                    "command_pattern": f".*/{prompt_name}",
+                    "command_pattern": f".*/{prompt_name}(?:$|\\s)",
                     "get_prompt": create_get_prompt(prompt_name)
                 }
             )
