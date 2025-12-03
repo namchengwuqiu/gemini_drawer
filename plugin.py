@@ -1223,7 +1223,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                     model_name = endpoint.get("model")
                     if not model_name:
                          # 默认模型
-                        model_name = self.get_config("api.lmarena_model_name", "gemini-pro-vision") if endpoint_type != 'lmarena' else "llava-v1.6-34b"
+                        model_name = self.get_config("api.lmarena_model_name", "gemini-pro-vision") if endpoint_type != 'lmarena' else "gemini-3-pro-image-preview"
 
                     openai_payload = {
                         "model": model_name,
