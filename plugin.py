@@ -24,6 +24,79 @@ from src.common.logger import get_logger
 # 日志记录器
 logger = get_logger("gemini_drawer")
 
+# --- [新增] 配置文件修复工具 ---
+def fix_broken_toml_config(file_path: Path):
+    """
+    读取配置文件原始文本，使用正则强制修复未加引号的中文键名。
+    专门解决框架自动生成时 key 不带引号导致 Empty key 报错的问题。
+    """
+    if not file_path.exists():
+        return
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        fixed_lines = []
+        modified = False
+        
+        # 匹配规则：行首是非引号、非注释、非方括号的字符，且包含中文，后接等号
+        # 简单来说就是匹配： 手办化 = "..." 这种格式
+        pattern = re.compile(r'^([^#\n"\'\[]*[\u4e00-\u9fa5][^#\n"\'\[]*?)\s*=')
+        
+        for line in lines:
+            match = pattern.match(line)
+            if match:
+                key = match.group(1).strip()
+                # 构造修复后的行： "手办化" = ...
+                # 保持原有的等号后的内容
+                parts = line.split('=', 1)
+                if len(parts) == 2:
+                    new_line = f'"{key}" ={parts[1]}'
+                    fixed_lines.append(new_line)
+                    modified = True
+                    # logger.info(f"自动修复配置文件格式: {key} -> \"{key}\"")
+                else:
+                    fixed_lines.append(line)
+            else:
+                fixed_lines.append(line)
+        
+        if modified:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.writelines(fixed_lines)
+            logger.info("配置文件格式已自动修复（添加了丢失的引号）。")
+            
+    except Exception as e:
+        logger.error(f"尝试自动修复配置文件失败: {e}")
+
+def save_config_file(config_path: Path, config_data: Dict[str, Any]):
+    """
+    统一的保存入口，保存前先转为字符串并二次处理，确保中文Key有引号。
+    """
+    try:
+        import toml
+        # 1. 先生成标准 TOML 字符串
+        content = toml.dumps(config_data)
+        
+        # 2. 再次进行正则修复，确保万无一失
+        lines = content.splitlines()
+        final_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if '=' in stripped and not stripped.startswith('#') and not stripped.startswith('['):
+                key_part, rest = stripped.split('=', 1)
+                key_clean = key_part.strip()
+                # 如果包含非ASCII且没引号
+                if any(ord(c) > 127 for c in key_clean) and not (key_clean.startswith('"') or key_clean.startswith("'")):
+                    line = f'"{key_clean}" ={rest}'
+            final_lines.append(line)
+            
+        with open(config_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(final_lines))
+            
+    except Exception as e:
+        logger.error(f"保存配置文件失败: {e}")
+
 def truncate_for_log(data: str, max_length: int = 100) -> str:
     """截断用于日志的数据，避免过长"""
     if len(data) <= max_length:
@@ -50,15 +123,12 @@ def safe_json_dumps(obj: Any) -> str:
     truncated_obj = truncate_base64_values(obj)
     return json.dumps(truncated_obj, ensure_ascii=False)
 
-# --- [新] 健壮的JSON解析函数 ---
+# --- 健壮的JSON解析函数 ---
 async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
-    """通过遍历所有部分来安全地从Gemini API响应中提取图像数据，并兼容LMArena的响应格式。"""
     try:
-        # 尝试解析LMArena (OpenAI-like) 响应格式
         if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
             message = response_data["choices"][0].get("message")
             if message and "content" in message and isinstance(message["content"], str):
-                # 检查 content 字段中的Markdown格式图片 (URL)
                 match_url = re.search(r"!\[.*?\]\((.*?)\)", message["content"])
                 if match_url:
                     image_url = match_url.group(1)
@@ -68,12 +138,10 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                     logger.info(f"从LMArena响应中提取到图片URL: {log_url}")
                     return image_url
 
-                # 检查 content 字段中的Markdown格式图片 (Base64)
                 match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", message["content"])
                 if match_b64:
                     return match_b64.group(1)
 
-        # 原始的Gemini API响应解析逻辑
         candidates = response_data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
             return None
@@ -86,32 +154,26 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
         if not isinstance(parts, list) or not parts:
             return None
 
-        # 遍历所有部分以查找图像数据
         for part in parts:
             if not isinstance(part, dict):
                 continue
-
-            # 检查 inlineData (以及兼容的 inline_data 写法)
             inline_data = part.get("inlineData") or part.get("inline_data")
             if isinstance(inline_data, dict):
                 image_b64 = inline_data.get("data")
                 if isinstance(image_b64, str):
-                    return image_b64  # 找到了，立即返回
+                    return image_b64
 
-            # 新增：检查 text 字段中的Markdown格式图片
             text_content = part.get("text")
             if isinstance(text_content, str):
                 match = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", text_content)
                 if match:
                     return match.group(1)
 
-        # 如果循环完成仍未找到图像
         return None
-
     except Exception:
         return None
 
-# --- API密钥管理器 (代码已修改) ---
+# --- API密钥管理器 ---
 class KeyManager:
     def __init__(self, keys_file_path: Path = None):
         if keys_file_path is None:
@@ -121,17 +183,13 @@ class KeyManager:
             self.keys_file = self.data_dir / "keys.json"
         else:
             self.keys_file = keys_file_path
-            self.plugin_dir = self.keys_file.parent.parent # Assumption for legacy test support
+            self.plugin_dir = self.keys_file.parent.parent 
             
         self.config = self._load_config()
         self._migrate_legacy_data()
 
     def _migrate_legacy_data(self):
-        """迁移旧数据到新的存储位置"""
         migrated = False
-        
-        # 1. 迁移旧的 keys.json (如果在插件根目录)
-        # 优先处理旧数据，确保它们被保留
         old_keys_file = self.plugin_dir / "keys.json"
         if old_keys_file.exists() and old_keys_file != self.keys_file:
             try:
@@ -139,26 +197,24 @@ class KeyManager:
                     old_data = json.load(f)
                     old_keys = old_data.get('keys', [])
                     if old_keys:
-                        # 合并到现有配置
                         current_keys = {k['value'] for k in self.config.get('keys', [])}
                         for k in old_keys:
                             if k['value'] not in current_keys:
-                                # 旧数据通常没有 type，默认为 google 或根据前缀判断
                                 if 'type' not in k:
                                     k['type'] = 'bailili' if k['value'].startswith('sk-') else 'google'
                                 self.config['keys'].append(k)
                                 migrated = True
-                # 备份旧文件
                 old_keys_file.rename(old_keys_file.with_suffix('.json.bak'))
                 logger.info("已迁移旧的 keys.json 数据")
             except Exception as e:
                 logger.error(f"迁移旧 keys.json 失败: {e}")
 
-        # 2. 迁移 config.toml 中的自定义渠道 Key
         config_path = self.plugin_dir / "config.toml"
         if config_path.exists():
             try:
                 import toml
+                # 尝试加载，如果这里加载失败（因为Empty key），应该直接跳过或先修复
+                # 但我们在 __init__ 里已经修复了文件，所以这里应该能正常加载
                 with open(config_path, 'r', encoding='utf-8') as f:
                     config_data = toml.load(f)
                 
@@ -168,41 +224,21 @@ class KeyManager:
                 for name, info in channels.items():
                     key_to_migrate = None
                     if isinstance(info, str):
-                        # 旧格式 "url:key"
-                        # 更加智能的分割：只有当冒号后的部分看起来像 Key 时才分割
                         if ":" in info:
-                            # 尝试从右边分割
                             possible_url, possible_key = info.rsplit(":", 1)
-                            
-                            # 验证 possible_key 是否像一个 Key
-                            # 1. 不包含 / (URL路径)
-                            # 2. 长度通常较长 (虽然有些 key 很短，但 URL 后缀通常是单词)
-                            # 3. 不包含 . (除了 base64 字符)
-                            # 4. 排除常见的 URL 结尾，如 generateContent
-                            
                             is_key = True
-                            if '/' in possible_key:
-                                is_key = False
-                            elif possible_key in ['generateContent', 'streamGenerateContent']:
-                                is_key = False
+                            if '/' in possible_key: is_key = False
+                            elif possible_key in ['generateContent', 'streamGenerateContent']: is_key = False
                             elif len(possible_key) < 10 and not possible_key.startswith('sk-'):
-                                # 极短的字符串可能不是 Key，除非是 sk- 开头
-                                # 但这里保守一点，如果太短且不像 key，就认为是 URL 的一部分
-                                # 实际上，如果用户真的把 key 写在后面，我们应该信任。
-                                # 主要问题是 URL 中包含冒号。
-                                # 如果 possible_url 是 http 或 https 结尾，说明冒号是协议分隔符
-                                if possible_url.lower() in ['http', 'https']:
-                                    is_key = False
+                                if possible_url.lower() in ['http', 'https']: is_key = False
                             
                             if is_key:
                                 url = possible_url
                                 key = possible_key
                                 key_to_migrate = key
-                                # 更新为新格式
                                 channels[name] = {"url": url, "enabled": True}
                                 config_changed = True
                             else:
-                                # 整个字符串都是 URL
                                 channels[name] = {"url": info, "enabled": True}
                                 config_changed = True
                                 
@@ -212,16 +248,12 @@ class KeyManager:
                             config_changed = True
                     
                     if key_to_migrate:
-                        # 添加到 KeyManager
-                        # 注意：如果 Key 已经存在（例如从 keys.json 迁移过来的），add_keys 会忽略它
-                        # 这符合“优先考虑旧版数据”的要求，如果旧版数据已经有了这个 Key，我们就不覆盖它的属性
                         self.add_keys([key_to_migrate], name)
                         migrated = True
                         logger.info(f"已迁移渠道 {name} 的 Key")
 
                 if config_changed:
-                    with open(config_path, 'w', encoding='utf-8') as f:
-                        toml.dump(config_data, f)
+                    save_config_file(config_path, config_data) # 使用修复版保存
                     logger.info("已从 config.toml 移除 Key")
 
             except Exception as e:
@@ -257,7 +289,6 @@ class KeyManager:
             if key_value in existing_keys:
                 duplicate_count += 1
             else:
-                # key_type 由外部传入
                 key_obj = {"value": key_value, "type": key_type, "status": "active", "error_count": 0, "last_used": None}
                 self.config['keys'].append(key_obj)
                 added_count += 1
@@ -268,7 +299,6 @@ class KeyManager:
         return self.config.get('keys', [])
 
     def get_next_api_key(self) -> Optional[Dict[str, str]]:
-        # 注意：这个方法主要用于旧逻辑或默认逻辑，新的 BaseDrawCommand 可能会自己筛选 Key
         keys = self.config.get('keys', [])
         active_keys = [key for key in keys if key.get('status') == 'active']
         if not active_keys:
@@ -306,10 +336,8 @@ class KeyManager:
         keys = self.config.get('keys', [])
         reset_count = 0
         for key_obj in keys:
-            # 如果指定了 key_type，则只重置该类型的 key
             if key_type and key_obj.get('type') != key_type:
                 continue
-                
             if key_obj.get('status') == 'disabled':
                 key_obj['status'] = 'active'
                 key_obj['error_count'] = 0
@@ -319,31 +347,24 @@ class KeyManager:
         return reset_count
 
     def reset_specific_key(self, key_type: str, index: int) -> bool:
-        """重置指定渠道的特定Key (index从1开始)"""
         keys = self.config.get('keys', [])
         target_keys = []
-        
-        # 筛选出目标渠道的key，并记录它们在原始列表中的索引
         for i, key_obj in enumerate(keys):
             if key_obj.get('type') == key_type:
                 target_keys.append((i, key_obj))
         
         if index < 1 or index > len(target_keys):
             return False
-            
         real_index, key_obj = target_keys[index - 1]
-        
-        # 重置状态
         key_obj['status'] = 'active'
         key_obj['error_count'] = 0
-        
         self.save_config(self.config)
         return True
 
 # 初始化 KeyManager
 key_manager = KeyManager()
 
-# --- 图像工具 (代码无变化) ---
+# --- 图像工具 ---
 async def download_image(url: str, proxy: Optional[str]) -> Optional[bytes]:
     try:
         async with httpx.AsyncClient(proxy=proxy, timeout=30.0) as client:
@@ -380,9 +401,8 @@ def convert_if_gif(image_bytes: bytes) -> bytes:
             return image_bytes
     return image_bytes
 
-# --- [新] 管理命令基类 ---
+# --- 管理命令基类 ---
 class BaseAdminCommand(BaseCommand, ABC):
-    """封装了管理员权限检查的基类"""
     permission: str = "owner"
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
@@ -407,7 +427,6 @@ class BaseAdminCommand(BaseCommand, ABC):
 
     @abstractmethod
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
-        """由子类实现的核心命令逻辑"""
         raise NotImplementedError
 
 # --- 命令组件 (Key管理部分) ---
@@ -419,11 +438,8 @@ class ChannelAddKeyCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         command_prefix = "/渠道添加key"
         content = self.message.raw_message.replace(command_prefix, "", 1).strip()
-        
-        # 使用正则分割，支持空格、逗号、换行等
         import re
         parts = re.split(r"[\s,;，；\n\r]+", content)
-        # 过滤空字符串
         parts = [p for p in parts if p.strip()]
 
         if len(parts) < 2:
@@ -433,7 +449,6 @@ class ChannelAddKeyCommand(BaseAdminCommand):
         channel_name = parts[0]
         new_keys = parts[1:]
 
-        # 验证渠道名称
         valid_channels = ['google']
         custom_channels = self.get_config("channels", {})
         valid_channels.extend(custom_channels.keys())
@@ -443,12 +458,9 @@ class ChannelAddKeyCommand(BaseAdminCommand):
              return True, "未知渠道", True
 
         added, duplicates = key_manager.add_keys(new_keys, channel_name)
-        
-        msg = f"✅ 操作完成 (渠道: {channel_name})：\n"
-        msg += f"- 成功添加: {added} 个\n"
+        msg = f"✅ 操作完成 (渠道: {channel_name})：\n- 成功添加: {added} 个\n"
         if duplicates > 0:
             msg += f"- 重复忽略: {duplicates} 个"
-        
         await self.send_text(msg)
         return True, "添加成功", True
 
@@ -463,7 +475,6 @@ class ChannelListKeysCommand(BaseAdminCommand):
             await self.send_text("ℹ️ 当前未配置任何 API Key。")
             return True, "无Key", True
 
-        # 按渠道分组
         grouped_keys = {}
         for k in all_keys:
             ctype = k.get('type', 'unknown')
@@ -472,17 +483,15 @@ class ChannelListKeysCommand(BaseAdminCommand):
             grouped_keys[ctype].append(k)
 
         msg_lines = ["📋 **渠道 Key 状态列表**", "--------------------"]
-        
         for channel, keys in grouped_keys.items():
             active_count = sum(1 for k in keys if k['status'] == 'active')
             msg_lines.append(f"🔷 **{channel}** (可用: {active_count}/{len(keys)})")
-            
             for i, k in enumerate(keys):
                 status_icon = "✅" if k['status'] == 'active' else "❌"
                 masked_key = k['value'][:8] + "..." + k['value'][-4:]
                 err_info = f"(错误: {k.get('error_count', 0)})" if k.get('error_count', 0) > 0 else ""
                 msg_lines.append(f"  {i+1}. {status_icon} `{masked_key}` {err_info}")
-            msg_lines.append("") # 空行分隔
+            msg_lines.append("")
 
         await self.send_text("\n".join(msg_lines))
         return True, "查询成功", True
@@ -498,7 +507,6 @@ class ChannelResetKeyCommand(BaseAdminCommand):
         parts = content.split()
         
         if not parts:
-            # Case 0: No args -> Reset ALL channels
             count = key_manager.manual_reset_keys(None)
             if count > 0:
                 await self.send_text(f"✅ 已成功重置所有渠道的 {count} 个失效 Key。")
@@ -507,9 +515,7 @@ class ChannelResetKeyCommand(BaseAdminCommand):
             return True, "重置所有成功", True
             
         channel_name = parts[0]
-        
         if len(parts) >= 2:
-            # Case 2: Channel + Index -> Reset specific Key
             try:
                 index = int(parts[1])
                 if key_manager.reset_specific_key(channel_name, index):
@@ -519,16 +525,14 @@ class ChannelResetKeyCommand(BaseAdminCommand):
             except ValueError:
                 await self.send_text("❌ 序号必须是数字！")
         else:
-            # Case 1: Channel only -> Reset that channel
             count = key_manager.manual_reset_keys(channel_name)
             if count > 0:
                 await self.send_text(f"✅ 已成功重置渠道 `{channel_name}` 的 {count} 个失效 Key。")
             else:
                 await self.send_text(f"ℹ️ 渠道 `{channel_name}` 没有需要重置的 Key。")
-                
         return True, "操作完成", True
 
-# --- [新] 管理命令 (Prompt管理) ---
+# --- 管理命令 (Prompt管理) ---
 class AddPromptCommand(BaseAdminCommand):
     command_name: str = "gemini_add_prompt"
     command_description: str = "添加一个新的绘图提示词预设"
@@ -537,12 +541,10 @@ class AddPromptCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         command_prefix = "/添加提示词"
         content = self.message.raw_message.replace(command_prefix, "", 1).strip()
-        
         if ":" not in content and "：" not in content:
             await self.send_text("❌ 格式错误！\n\n正确格式：`/添加提示词 功能名称:具体提示词`")
             return True, "格式错误", True
 
-        # 同时处理中英文冒号
         parts = re.split(r"[:：]", content, 1)
         name, prompt = parts[0].strip(), parts[1].strip()
 
@@ -553,25 +555,18 @@ class AddPromptCommand(BaseAdminCommand):
         try:
             import toml
             config_path = Path(__file__).parent / "config.toml"
-            
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
-            
             if "prompts" not in config_data:
                 config_data["prompts"] = {}
-            
             if name in config_data["prompts"]:
                 await self.send_text(f"❌ 添加失败：功能名称 `{name}` 已存在，请使用其他名称。")
                 return True, "名称重复", True
 
             config_data["prompts"][name] = prompt
-            
-            with open(config_path, 'w', encoding='utf-8') as f:
-                toml.dump(config_data, f)
-            
+            save_config_file(config_path, config_data) # 使用修复版保存
             await self.send_text(f"✅ 提示词 `{name}` 添加成功！\n请手动重启程序以应用更改。")
             return True, "添加成功", True
-
         except ImportError:
             await self.send_text("❌ 错误：`toml` 库未安装，无法修改配置文件。")
             return False, "缺少toml库", True
@@ -588,7 +583,6 @@ class DeletePromptCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         command_prefix = "/删除提示词"
         name = self.message.raw_message.replace(command_prefix, "", 1).strip()
-
         if not name:
             await self.send_text("❌ 请提供要删除的功能名称！\n\n正确格式：`/删除提示词 功能名称`")
             return True, "缺少参数", True
@@ -596,7 +590,6 @@ class DeletePromptCommand(BaseAdminCommand):
         try:
             import toml
             config_path = Path(__file__).parent / "config.toml"
-
             if not config_path.exists():
                 await self.send_text("❌ 配置文件 `config.toml` 不存在。")
                 return True, "配置文件不存在", True
@@ -606,19 +599,12 @@ class DeletePromptCommand(BaseAdminCommand):
 
             if "prompts" in config_data and name in config_data["prompts"]:
                 del config_data["prompts"][name]
-                
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    toml.dump(config_data, f)
-                
+                save_config_file(config_path, config_data) # 使用修复版保存
                 await self.send_text(f"✅ 提示词 `{name}` 删除成功！\n请手动重启程序以应用更改。")
                 return True, "删除成功", True
             else:
                 await self.send_text(f"❌ 未在配置文件中找到名为 `{name}` 的提示词。")
                 return True, "提示词不存在", True
-
-        except ImportError:
-            await self.send_text("❌ 错误：`toml` 库未安装，无法修改配置文件。")
-            return False, "缺少toml库", True
         except Exception as e:
             logger.error(f"删除提示词失败: {e}")
             await self.send_text(f"❌ 操作失败，发生内部错误：{e}")
@@ -632,7 +618,6 @@ class AddChannelCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         command_prefix = "/添加渠道"
         rest = self.message.raw_message.replace(command_prefix, "", 1).strip()
-        
         help_msg = (
             "❌ 请提供正确的渠道信息！\n"
             "支持两种格式：\n"
@@ -641,32 +626,20 @@ class AddChannelCommand(BaseAdminCommand):
             "2. **Gemini格式** (模型在URL中)：\n"
             "   `/添加渠道 名称:https://.../models/模型名称:generateContent`"
         )
-
         if not rest:
             await self.send_text(help_msg)
             return True, "缺少参数", True
 
         try:
-            # 格式: 名称:API地址[:模型]
             if ":" not in rest:
                 await self.send_text(help_msg)
                 return True, "格式错误", True
 
             name, rest_part = rest.split(':', 1)
             name = name.strip()
-            
             url = ""
             model = None
-            
-            # 尝试分割 URL 和 Model
-            # 逻辑：
-            # 1. 如果 URL 包含 /chat/completions，则必须有 Model
-            # 2. 如果 URL 包含 :generateContent，则 Model 通常在 URL 中，不需要额外指定
-            
-            # 先尝试按最后一个冒号分割，看看是不是 Model
             last_colon_index = rest_part.rfind(':')
-            
-            # 预判 URL 类型
             is_openai = "/chat/completions" in rest_part
             is_gemini = "generateContent" in rest_part
             
@@ -680,26 +653,16 @@ class AddChannelCommand(BaseAdminCommand):
                 return True, "URL格式错误", True
 
             if is_openai:
-                # OpenAI 格式，必须有 Model
-                # 检查是否提供了 Model (即是否存在冒号分隔)
-                # 注意：URL 本身可能包含端口号 (http://localhost:1234/...)
-                # 如果 rest_part 结尾是 /chat/completions，说明没有提供 Model
                 if rest_part.strip().endswith("/chat/completions"):
                      await self.send_text("❌ OpenAI 格式必须指定模型名称！\n例如：`/添加渠道 PockGo:https://.../chat/completions:gemini-1.5-pro`")
                      return True, "缺少模型", True
-                
-                # 尝试分割
                 if last_colon_index != -1:
                     possible_model = rest_part[last_colon_index+1:].strip()
                     possible_url = rest_part[:last_colon_index].strip()
-                    
-                    # 再次验证 URL
                     if possible_url.endswith("/chat/completions"):
                         url = possible_url
                         model = possible_model
                     else:
-                        # 可能是端口号？但我们要求必须有 Model
-                        # 如果分割出来的 url 不对，那可能是用户没加 Model，而冒号是端口号的一部分
                         await self.send_text("❌ 无法解析模型名称，请确保格式为 `URL:模型`")
                         return True, "解析失败", True
                 else:
@@ -707,11 +670,7 @@ class AddChannelCommand(BaseAdminCommand):
                      return True, "缺少模型", True
 
             elif is_gemini:
-                # Gemini 格式，Model 在 URL 中
-                # 通常不需要额外指定 Model，但如果用户指定了，我们也可以接受（虽然可能用不上，或者用于覆盖？）
-                # 现阶段逻辑：Gemini 格式不需要 Model 参数
                 url = rest_part.strip()
-                # 简单的验证
                 if not url.endswith(":generateContent") and "generateContent" not in url:
                      await self.send_text("❌ Gemini 格式 URL 应以 `:generateContent` 结尾！")
                      return True, "URL格式错误", True
@@ -720,10 +679,8 @@ class AddChannelCommand(BaseAdminCommand):
                 await self.send_text("❌ 名称和API地址不能为空！")
                 return True, "参数不全", True
 
-            # 保存到 config.toml
             import toml
             config_path = Path(__file__).parent / "config.toml"
-            
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
 
@@ -738,9 +695,7 @@ class AddChannelCommand(BaseAdminCommand):
                 channel_info["model"] = model
 
             config_data["channels"][name] = channel_info
-
-            with open(config_path, 'w', encoding='utf-8') as f:
-                toml.dump(config_data, f)
+            save_config_file(config_path, config_data) # 使用修复版保存
 
             msg = f"✅ 自定义渠道 `{name}` 添加成功！\n"
             msg += f"- 类型: {'OpenAI' if is_openai else 'Gemini'}\n"
@@ -748,7 +703,6 @@ class AddChannelCommand(BaseAdminCommand):
             if model:
                 msg += f"- Model: `{model}`\n"
             msg += f"\n⚠️ **注意**：请**重启Bot**以应用更改！\n重启后使用 `/渠道添加key {name} <key>` 添加密钥。"
-            
             await self.send_text(msg)
             return True, "添加成功", True
 
@@ -765,7 +719,6 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         command_prefix = "/渠道修改模型"
         content = self.message.raw_message.replace(command_prefix, "", 1).strip()
-        
         parts = content.split()
         if len(parts) < 2:
             await self.send_text("❌ 参数错误！\n格式：`/渠道修改模型 <渠道名称> <新模型名称>`\n例如：`/渠道修改模型 PockGo gemini-1.5-pro`")
@@ -773,8 +726,6 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
 
         channel_name = parts[0]
         new_model = parts[1]
-
-        # 读取 config.toml
         import toml
         config_path = Path(__file__).parent / "config.toml"
         
@@ -783,7 +734,6 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
                 config_data = toml.load(f)
             
             channels = config_data.get("channels", {})
-            
             if channel_name not in channels:
                 await self.send_text(f"❌ 未找到渠道 `{channel_name}`！\n请先使用 `/添加渠道` 创建该渠道。")
                 return True, "渠道不存在", True
@@ -792,18 +742,13 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
             old_model = channel_info.get("model", "未设置")
             url = channel_info.get("url", "")
             
-            # 更新模型字段
             channel_info["model"] = new_model
-            
             msg = f"✅ 渠道 `{channel_name}` 模型已更新！\n"
             msg += f"- 旧模型: `{old_model}`\n"
             msg += f"- 新模型: `{new_model}`\n"
 
-            # 特殊处理 Gemini 格式 URL: 尝试替换 URL 中的模型部分
-            # 格式: .../models/<model_name>:generateContent
             if "generateContent" in url and "/models/" in url:
                 import re
-                # 匹配 /models/ 之后，:generateContent 之前的部分
                 pattern = r"(/models/)([^:]+)(:generateContent)"
                 if re.search(pattern, url):
                     new_url = re.sub(pattern, f"\\g<1>{new_model}\\g<3>", url)
@@ -813,15 +758,11 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
 
             channels[channel_name] = channel_info
             config_data["channels"] = channels
-            
-            with open(config_path, 'w', encoding='utf-8') as f:
-                toml.dump(config_data, f)
+            save_config_file(config_path, config_data) # 使用修复版保存
                 
             msg += "\n⚠️ **注意**：请**重启Bot**以应用更改！"
-            
             await self.send_text(msg)
             return True, "更新成功", True
-
         except Exception as e:
             logger.error(f"更新渠道模型失败: {e}")
             await self.send_text(f"❌ 更新失败：{e}")
@@ -835,7 +776,6 @@ class DeleteChannelCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         command_prefix = "/删除渠道"
         name = self.message.raw_message.replace(command_prefix, "", 1).strip()
-
         if not name:
             await self.send_text("❌ 请提供要删除的渠道名称！")
             return True, "缺少参数", True
@@ -843,20 +783,17 @@ class DeleteChannelCommand(BaseAdminCommand):
         try:
             import toml
             config_path = Path(__file__).parent / "config.toml"
-            
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
 
             if "channels" in config_data and name in config_data["channels"]:
                 del config_data["channels"][name]
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    toml.dump(config_data, f)
+                save_config_file(config_path, config_data) # 使用修复版保存
                 await self.send_text(f"✅ 渠道 `{name}` 删除成功！\n请手动重启程序以应用更改。")
                 return True, "删除成功", True
             else:
                 await self.send_text(f"❌ 未找到名为 `{name}` 的渠道。")
                 return True, "渠道不存在", True
-
         except Exception as e:
             logger.error(f"删除渠道失败: {e}")
             await self.send_text(f"❌ 操作失败：{e}")
@@ -879,31 +816,24 @@ class ToggleChannelCommand(BaseAdminCommand):
         try:
             import toml
             config_path = Path(__file__).parent / "config.toml"
-            
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
 
-            # 确保 api 和 channels 节存在
             if "api" not in config_data: config_data["api"] = {}
             if "channels" not in config_data: config_data["channels"] = {}
 
             target_found = False
-            
-            # 处理内置渠道
             if name.lower() == 'google':
                 config_data["api"]["enable_google"] = is_enable
                 target_found = True
             elif name.lower() == 'lmarena':
                 config_data["api"]["enable_lmarena"] = is_enable
                 target_found = True
-            # 处理自定义渠道
             elif name in config_data["channels"]:
                 channel_info = config_data["channels"][name]
-                # 如果是旧格式字符串，转为字典
                 if isinstance(channel_info, str):
                     url, key = channel_info.rsplit(":", 1)
                     channel_info = {"url": url, "key": key}
-                
                 channel_info["enabled"] = is_enable
                 config_data["channels"][name] = channel_info
                 target_found = True
@@ -912,9 +842,7 @@ class ToggleChannelCommand(BaseAdminCommand):
                 return True, "渠道不存在", True
 
             if target_found:
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    toml.dump(config_data, f)
-                
+                save_config_file(config_path, config_data) # 使用修复版保存
                 action = "启用" if is_enable else "禁用"
                 await self.send_text(f"✅ 渠道 `{name}` 已{action}！\n请手动重启程序以应用更改。")
                 return True, "操作成功", True
@@ -933,67 +861,46 @@ class ListChannelsCommand(BaseAdminCommand):
         try:
             import toml
             config_path = Path(__file__).parent / "config.toml"
-            
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
 
             api_config = config_data.get("api", {})
             channels_config = config_data.get("channels", {})
-
             msg_lines = ["📋 **当前渠道状态列表**", "--------------------"]
 
-            # 1. Google 官方
             enable_google = api_config.get("enable_google", True)
             status_icon = "✅" if enable_google else "❌"
             msg_lines.append(f"{status_icon} **Google** (官方Key)")
 
-            # 2. LMArena
             enable_lmarena = api_config.get("enable_lmarena", False)
             status_icon = "✅" if enable_lmarena else "❌"
             msg_lines.append(f"{status_icon} **LMArena** (免费接口)")
 
-            # 自定义渠道
             if channels_config:
                 msg_lines.append("--------------------")
                 for name, info in channels_config.items():
                     enabled = True
                     if isinstance(info, dict):
                         enabled = info.get("enabled", True)
-                    # 字符串格式默认为启用
-                    
                     icon = "✅" if enabled else "❌"
                     model_info = ""
                     if isinstance(info, dict) and info.get("model"):
                         model_info = f" ({info['model']})"
-                    
                     msg_lines.append(f"{icon} **{name}**{model_info}")
-            
             await self.send_text("\n".join(msg_lines))
             return True, "查询成功", True
-
         except Exception as e:
             logger.error(f"查询渠道列表失败: {e}")
             await self.send_text(f"❌ 查询失败：{e}")
             return False, str(e), True
 
-# --- [新] 绘图命令基类 (代码已修改) ---
+# --- 绘图命令基类 ---
 class BaseDrawCommand(BaseCommand, ABC):
-    """
-    所有绘图命令的抽象基类. 
-    封装了图片下载、API调用、重试和结果发送的通用逻辑.
-    """
     permission: str = "user"
 
     async def get_source_image_bytes(self) -> Optional[bytes]:
-        """
-        按以下顺序在消息中查找源图片:
-        1. 消息中直接发送的图片或被QQ标记为'emoji'的回复图片。
-        2. 消息文本中 @提及 的用户头像。
-        3. 发送指令用户的头像 (作为最终回退)。
-        """
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
-        # 内部函数，用于从消息段中提取和处理图片
         async def _extract_image_from_segments(segments) -> Optional[bytes]:
             if not segments:
                 return None
@@ -1015,12 +922,10 @@ class BaseDrawCommand(BaseCommand, ABC):
                             continue
             return None
 
-        # 1. 查找消息中的图片或Emoji
         image_bytes = await _extract_image_from_segments(self.message.message_segment)
         if image_bytes:
             return image_bytes
 
-        # 2. 如果没有图片，查找 @提及 的用户
         segments = self.message.message_segment
         if hasattr(segments, 'type') and segments.type == 'seglist':
             segments = segments.data
@@ -1029,23 +934,18 @@ class BaseDrawCommand(BaseCommand, ABC):
         
         for seg in segments:
             if seg.type == 'text' and '@' in seg.data:
-                # 从包含@的文本中，直接提取其中的数字ID
                 match = re.search(r'(\d+)', seg.data)
                 if match:
                     mentioned_user_id = match.group(1)
                     logger.info(f"在消息中找到@提及用户 {mentioned_user_id}，获取其头像。")
                     return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640", proxy)
 
-        # 3. 回退到发送者自己的头像
         logger.info("未找到图片、Emoji或@提及，回退到发送者头像。")
         user_id = self.message.message_info.user_info.user_id
         return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640", proxy)
 
     @abstractmethod
     async def get_prompt(self) -> Optional[str]:
-        """
-        获取用于API请求的prompt. 必须由子类实现.
-        """
         raise NotImplementedError
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
@@ -1071,20 +971,17 @@ class BaseDrawCommand(BaseCommand, ABC):
 
         await self.send_text("🤖 已提交至API…")
 
-        # 1. 准备要尝试的API端点列表
         endpoints_to_try = []
 
-        # 首先添加 LMArena (如果启用)
         if self.get_config("api.enable_lmarena", True):
             lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
-            lmarena_key = self.get_config("api.lmarena_api_key", "") # Placeholder
+            lmarena_key = self.get_config("api.lmarena_api_key", "") 
             endpoints_to_try.append({
                 "type": "lmarena",
                 "url": lmarena_url,
                 "key": lmarena_key
             })
 
-        # 添加自定义渠道 (如果启用)
         custom_channels = self.get_config("channels", {})
         for name, channel_info in custom_channels.items():
             c_url = ""
@@ -1098,7 +995,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                 c_model = channel_info.get("model")
                 c_enabled = channel_info.get("enabled", True)
             elif isinstance(channel_info, str) and ":" in channel_info:
-                # 兼容 "url:key" 字符串格式
                 c_url, c_key = channel_info.rsplit(":", 1)
             
             if c_url and c_key and c_enabled:
@@ -1109,20 +1005,16 @@ class BaseDrawCommand(BaseCommand, ABC):
                     "model": c_model
                 })
 
-        # 然后添加所有从 key_manager 获取的密钥 (包括内置和自定义渠道的)
         enable_google = self.get_config("api.enable_google", True)
-        # enable_bailili 已移除，bailili 现在作为自定义渠道处理
 
         for key_info in key_manager.get_all_keys():
             if key_info.get('status') != 'active':
                 continue
             
             key_type = key_info.get('type')
-            # 兼容旧数据：如果没有 type，根据 value 前缀判断
             if not key_type:
                 key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
 
-            # 1. Google 官方渠道
             if key_type == 'google':
                 if enable_google:
                     endpoints_to_try.append({
@@ -1131,7 +1023,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                         "key": key_info['value']
                     })
             
-            # 2. 自定义渠道 (包括 bailili)
             elif key_type in custom_channels:
                 channel_info = custom_channels[key_type]
                 c_enabled = True
@@ -1158,7 +1049,6 @@ class BaseDrawCommand(BaseCommand, ABC):
         last_error = ""
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
-        # 2. 轮询所有端点
         for i, endpoint in enumerate(endpoints_to_try):
             api_url = endpoint["url"]
             api_key = endpoint["key"]
@@ -1170,17 +1060,15 @@ class BaseDrawCommand(BaseCommand, ABC):
             request_url = api_url
 
             try:
-                # 3. 根据端点类型准备请求
-                current_payload = payload # Default payload
-                client_proxy = proxy # Use global proxy by default
+                current_payload = payload 
+                client_proxy = proxy 
                 
                 is_openai = False
                 
-                # 严格根据 URL 判断模式
                 if endpoint_type == 'lmarena':
                     is_openai = True
-                    request_url = f"{api_url}/v1/chat/completions" # LMArena SSE endpoint
-                    client_proxy = None # Disable proxy for local lmarena connection
+                    request_url = f"{api_url}/v1/chat/completions" 
+                    client_proxy = None 
                 elif "/chat/completions" in api_url:
                     is_openai = True
                     request_url = api_url
@@ -1192,11 +1080,9 @@ class BaseDrawCommand(BaseCommand, ABC):
                     continue
 
                 if is_openai:
-                    if api_key: # 只有存在key时才添加Authorization头
+                    if api_key:
                         headers["Authorization"] = f"Bearer {api_key}"
                     
-                    # 构造 OpenAI/LMArena 特定的 payload
-                    # 用户的 prompt 应该放在最后一个 message
                     user_text_prompt = ""
                     for p in parts:
                         if "text" in p:
@@ -1219,26 +1105,22 @@ class BaseDrawCommand(BaseCommand, ABC):
                         }
                     ]
 
-                    # 确定模型名称
                     model_name = endpoint.get("model")
                     if not model_name:
-                         # 默认模型
                         model_name = self.get_config("api.lmarena_model_name", "gemini-pro-vision") if endpoint_type != 'lmarena' else "gemini-3-pro-image-preview"
 
                     openai_payload = {
                         "model": model_name,
                         "messages": openai_messages,
-                        "stream": endpoint_type == 'lmarena', # LMArena需要开启stream
+                        "stream": endpoint_type == 'lmarena', 
                         "n": 1
                     }
                     current_payload = openai_payload
 
-                # 为避免日志被base64数据占满，使用安全的JSON序列化方法
                 logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {safe_json_dumps(current_payload)}")
                 
                 img_data = None
                 
-                # A. LMArena SSE (流式) 处理逻辑
                 if endpoint_type == 'lmarena':
                     try:
                         async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0) as client:
@@ -1247,7 +1129,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     raw_body = await response.aread()
                                     raise Exception(f"API请求失败, 状态码: {response.status_code} - {raw_body.decode('utf-8', 'ignore')}")
 
-                                # logger.info("LMArena 连接成功，开始接收SSE事件...")
                                 current_event = ''
                                 async for line in response.aiter_lines():
                                     line = line.strip()
@@ -1264,16 +1145,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                             break
                                         
                                         if current_event == 'status':
-                                            try:
-                                                status_data = json.loads(data_str)
-                                                status = status_data.get('status')
-                                                position = status_data.get('position')
-                                                # if status == 'queued' and position is not None:
-                                                    # await self.send_text(f"⏳ 已加入队列，当前排在第 {position} 位...")
-                                                # elif status == 'processing':
-                                                    # await self.send_text("🏃‍♂️ 开始处理，请稍候...")
-                                            except json.JSONDecodeError:
-                                                logger.warning(f"无法解析LMArena status data: {data_str}")
+                                            pass
                                         
                                         elif current_event == 'result':
                                             try:
@@ -1284,7 +1156,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                             except json.JSONDecodeError:
                                                 logger.warning(f"无法解析LMArena result data: {data_str}")
                                         
-                                        elif current_event == 'done': # 有些实现会把 [DONE] 放在 event: done 后面
+                                        elif current_event == 'done': 
                                             logger.info("LMArena SSE事件流结束。")
                                             break
                     except httpx.RequestError as e:
@@ -1294,7 +1166,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                         logger.error(f"LMArena SSE 流处理失败: {e}")
                         raise
                 
-                # B. 其他标准 POST 请求处理逻辑
                 else:
                     try:
                         async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
@@ -1312,7 +1183,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                     else:
                         raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
 
-                # C. 统一的成功处理逻辑
                 if img_data:
                     if endpoint_type != 'lmarena':
                         key_manager.record_key_usage(api_key, True)
@@ -1353,12 +1223,10 @@ class BaseDrawCommand(BaseCommand, ABC):
                         logger.error(f"发送图片失败: {e}")
                         await self.send_text("❌ 图片发送失败。" )
 
-                    return True, "绘图成功", True # 成功，终止循环
+                    return True, "绘图成功", True 
 
-                # 如果img_data为空（例如LMArena流结束但没收到图片），则会自然走到循环末尾的异常捕获
                 if not img_data:
                     raise Exception("审核不通过，未能从API响应中获取图片数据")
-
 
             except Exception as e:
                 logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
@@ -1372,7 +1240,6 @@ class BaseDrawCommand(BaseCommand, ABC):
         await self.send_text(f"❌ 生成失败 ({elapsed:.2f}s, {len(endpoints_to_try)}次尝试)\n最终错误: {last_error}")
         return True, "所有尝试均失败", True
     
-# --- [新] 具体的绘图命令 ---
 class HelpCommand(BaseCommand):
     command_name: str = "gemini_help"
     command_description: str = "显示Gemini绘图插件的帮助信息和所有可用指令。"
@@ -1400,7 +1267,6 @@ class HelpCommand(BaseCommand):
         reply_lines.append("  - 发送图片 + 指令")
         reply_lines.append("  - 直接发送指令 (使用自己头像)")
 
-        # Check for admin permission
         user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
         admin_list = self.get_config("general.admins", [])
         str_admin_list = [str(admin) for admin in admin_list]
@@ -1423,25 +1289,19 @@ class HelpCommand(BaseCommand):
         await self.send_text("\n".join(reply_lines))
         return True, "帮助信息已发送", True
 
-# --- [新] 具体的绘图命令 ---
 class CustomDrawCommand(BaseDrawCommand):
     command_name: str = "gemini_custom_draw"
     command_description: str = "使用自定义Prompt进行AI绘图"
     command_pattern: str = r".*/bnn.*"
     async def get_prompt(self) -> Optional[str]:
-        # 清理原始消息中的CQ码
         cleaned_message = re.sub(r'\[CQ:.*?\]', '', self.message.raw_message).strip()
-        
         command_pattern = "/bnn"
-        
-        # 在清理后的文本中查找指令
         command_pos = cleaned_message.find(command_pattern)
         
         if command_pos == -1:
             await self.send_text("❌ 未找到 /bnn 指令。")
             return None
             
-        # 提取指令后的文本
         prompt_text = cleaned_message[command_pos + len(command_pattern):].strip()
         
         if not prompt_text:
@@ -1450,15 +1310,22 @@ class CustomDrawCommand(BaseDrawCommand):
             
         return prompt_text
 
-# --- 插件注册 (代码已修改) ---
+# --- 插件注册 ---
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.1.0"
+    plugin_version: str = "1.2.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
     config_file_name: str = "config.toml"
+
+    config_section_descriptions = {
+        "general": "插件启用配置",
+        "proxy": "代理配置",
+        "api": "API配置",
+        "channels": "其他动态配置请向bot发送/基咪绘图帮助 设置其余配置",
+    }
 
     config_schema: dict = {
         "general": {
@@ -1473,55 +1340,54 @@ class GeminiDrawerPlugin(BasePlugin):
             "enable_google": ConfigField(type=bool, default=True, description="是否启用Google官方API"),
             "api_url": ConfigField(type=str, default="https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent", description="Google官方的Gemini API 端点"),
             "enable_lmarena": ConfigField(type=bool, default=False, description="是否启用LMArena API"),
-            "lmarena_api_url": ConfigField(type=str, default="http://host.docker.internal:5102", description="LMArena API的基础URL (例如: http://host.docker.internal:5102, 如果在Docker中运行)"),
-            "lmarena_api_key": ConfigField(type=str, default="", description="[新增]特殊的LMArena API密钥 (可选, 使用Bearer Token)"),
+            "lmarena_api_url": ConfigField(type=str, default="http://host.docker.internal:5102", description="LMArena API的基础URL"),
+            "lmarena_api_key": ConfigField(type=str, default="", description="LMArena API密钥 (可选, 使用Bearer Token)"),
             "lmarena_model_name": ConfigField(type=str, default="gemini-2.5-flash-image-preview (nano-banana)", description="LMArena 使用的模型名称")
         },
-        "channels": {},
-        "prompts": {
-            "手办化": ConfigField(type=str, default="Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue...", description="默认的手办化prompt"),
-            "手办化2": ConfigField(type=str, default="Use the nano-banana model to create a 1/7 scale commercialized figure...", description="手办化prompt版本2"),
-            "手办化3": ConfigField(type=str, default="Your primary mission is to accurately convert the subject from the user's photo into a photorealistic...", description="手办化prompt版本3"),
-            "手办化4": ConfigField(type=str, default="Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue...", description="手办化prompt版本4"),
-            "手办化5": ConfigField(type=str, default="Realistic PVC figure based on the game screenshot character...", description="手办化prompt版本5"),
-            "Q版化": ConfigField(type=str, default="((chibi style)), ((super-deformed)), ((head-to-body ratio 1:2))...", description="Q版化prompt"),
-            "cos化": ConfigField(type=str, default="Generate a highly detailed photo of a girl cosplaying this illustration, at Comiket...", description="Cosplay prompt"),
-            "ntr化": ConfigField(type=str, default="A scene in a bright, modern restaurant at night, created to replicate the original image provided...", description="NTR prompt"),
-            "自拍": ConfigField(type=str, default="selfie, best quality, from front", description="自拍 prompt"),
-        }
+        "channels": {}
     }
 
     def __init__(self, *args, **kwargs):
+        # 0. 先尝试修复已存在的配置文件（如果是旧框架生成的坏文件）
+        try:
+            config_path = Path(__file__).parent / self.config_file_name
+            if config_path.exists():
+                fix_broken_toml_config(config_path)
+        except Exception as e:
+            pass
+
+        # 1. 调用父类初始化（如果文件不存在，这里可能会创建它）
         super().__init__(*args, **kwargs)
-        # Manually trigger config migration on plugin initialization
+        
+        # 2. 再次尝试修复（如果上一步创建了坏文件，这里修复它）
+        try:
+            config_path = Path(__file__).parent / self.config_file_name
+            if config_path.exists():
+                fix_broken_toml_config(config_path)
+        except Exception:
+            pass
+
+        # 3. 正常执行数据迁移
         self._migrate_config()
 
     def _migrate_config(self):
-        """
-        Compares the config.toml with the schema and adds missing fields 
-        without overwriting existing user values.
-        """
         try:
             import toml
         except ImportError:
-            logger.error("Config Migration Failed: `toml` library not found. Please install it via `pip install toml` to enable automatic config updates.")
+            logger.error("Config Migration Failed: `toml` library not found.")
             return
 
         config_path = Path(__file__).parent / self.config_file_name
         
         if not config_path.exists():
-            # If the file doesn't exist, the framework will create it with defaults.
-            # No migration needed.
             return
 
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
 
-            # Flag to track if changes were made
             original_config_str = toml.dumps(config_data)
 
-            # Helper function to recursively check and update
             def check_and_update(schema_level, config_level):
                 for key, field in schema_level.items():
                     if isinstance(field, ConfigField):
@@ -1537,45 +1403,35 @@ class GeminiDrawerPlugin(BasePlugin):
             new_config_str = toml.dumps(config_data)
 
             if original_config_str != new_config_str:
-                with open(config_path, 'w', encoding='utf-8') as f:
-                    toml.dump(config_data, f)
-                logger.info("Config migration successful: config.toml has been updated with new fields.")
+                save_config_file(config_path, config_data) # 使用修复版保存
+                logger.info("Config migration successful: config.toml has been updated.")
 
         except Exception as e:
             logger.error(f"Error during config migration: {e}")
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
-        """动态注册所有命令组件"""
         components: List[Tuple[ComponentInfo, Type]] = [
-            # 帮助命令
             (HelpCommand.get_command_info(), HelpCommand),
-            # Key管理命令
             (ChannelAddKeyCommand.get_command_info(), ChannelAddKeyCommand),
             (ChannelListKeysCommand.get_command_info(), ChannelListKeysCommand),
-            (ChannelResetKeyCommand.get_command_info(), ChannelResetKeyCommand), # 新增
-            (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), # 新增
-            # Prompt管理命令
+            (ChannelResetKeyCommand.get_command_info(), ChannelResetKeyCommand), 
+            (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), 
             (AddPromptCommand.get_command_info(), AddPromptCommand),
             (DeletePromptCommand.get_command_info(), DeletePromptCommand),
-            # 渠道管理命令
             (AddChannelCommand.get_command_info(), AddChannelCommand),
             (DeleteChannelCommand.get_command_info(), DeleteChannelCommand),
             (ToggleChannelCommand.get_command_info(), ToggleChannelCommand),
             (ListChannelsCommand.get_command_info(), ListChannelsCommand),
-            # 自定义绘图命令
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
         ]
 
-        # 从已加载的配置中动态创建绘图命令，而不是从静态的schema
         prompts_config = self.get_config("prompts", {})
         for prompt_name, _ in prompts_config.items():
-            # 使用闭包来捕获正确的 prompt_name
             def create_get_prompt(p_name):
                 async def get_prompt(self_command) -> Optional[str]:
                     return self_command.get_config(f"prompts.{p_name}")
                 return get_prompt
 
-            # 动态创建命令类
             CommandClass = type(
                 f"Dynamic{prompt_name}Command",
                 (BaseDrawCommand,),

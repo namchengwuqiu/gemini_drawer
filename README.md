@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.1.9
+> **Version:** 1.2.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片。
 
@@ -115,7 +115,6 @@ pip install -r requirements.txt
 
 - **保留名称**:
     - `google`: 控制配置文件中 `[api]` 下的所有 Google 官方 Key。
-    - `bailili`: 控制配置文件中 `[api]` 下的所有 Bailili 中转 Key。
     - `lmarena`: 控制 LMArena 免费接口。
 - **自定义名称**: 使用您通过 `/添加渠道` 设置的名称（例如 `PockGo`）。
 
@@ -131,10 +130,10 @@ pip install -r requirements.txt
 **示例**：
 ```toml
 [prompts]
-手办化 = "Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue..."
-Q版化 = "((chibi style)), ((super-deformed)), ((head-to-body ratio 1:2))..."
-cos化 = "Generate a highly detailed photo of a girl cosplaying this illustration, at Comiket..."
-自拍 = "selfie, best quality, from front"
+"手办化" = "Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue..."
+"Q版化" = "((chibi style)), ((super-deformed)), ((head-to-body ratio 1:2))..."
+"cos化" = "Generate a highly detailed photo of a girl cosplaying this illustration, at Comiket..."
+"自拍" = "selfie, best quality, from front"
 ```
 
 #### **如何新增一个指令？**
@@ -170,4 +169,4 @@ cos化 = "Generate a highly detailed photo of a girl cosplaying this illustratio
         -   VC-AI: [https://newapi.sisuo.de/register?aff=ugef](https://newapi.sisuo.de/register?aff=ugef)
         -   *(请注意，第三方服务可能随时变更)*
 
-获取 Key 后，请使用管理员指令 `/手办化添加key {您的KEY}` 将其添加至插件。插件会根据 Key 的格式自动判断其类型 (Google or 第三方)。
+获取 Key 后，请使用管理员指令 `/渠道添加key {渠道} {key}` 将其添加至插件。插件会根据 Key 的格式自动判断其类型 (Google or 第三方)。
