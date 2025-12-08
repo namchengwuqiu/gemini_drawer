@@ -297,7 +297,7 @@ class KeyManager:
             if key_value in existing_keys:
                 duplicate_count += 1
             else:
-                key_obj = {"value": key_value, "type": key_type, "status": "active", "error_count": 0, "last_used": None}
+                key_obj = {"value": key_value, "type": key_type, "status": "active", "error_count": 0, "last_used": None, "max_errors": 5}
                 self.config['keys'].append(key_obj)
                 added_count += 1
         self.save_config(self.config)
@@ -332,7 +332,9 @@ class KeyManager:
                     key_obj['error_count'] = 0
                 else:
                     key_obj['error_count'] = key_obj.get('error_count', 0) + 1
-                    if force_disable or key_obj['error_count'] >= 5:
+                    max_errors = key_obj.get('max_errors', 5)
+                    # 当 max_errors 不为 -1 (无限) 时，才检查是否禁用
+                    if max_errors != -1 and (force_disable or key_obj['error_count'] >= max_errors):
                         if key_obj['status'] == 'active':
                             key_obj['status'] = 'disabled'
                             reason = "配额耗尽" if force_disable else "错误次数过多"
@@ -498,7 +500,9 @@ class ChannelListKeysCommand(BaseAdminCommand):
                 status_icon = "✅" if k['status'] == 'active' else "❌"
                 masked_key = k['value'][:8] + "..." + k['value'][-4:]
                 err_info = f"(错误: {k.get('error_count', 0)})" if k.get('error_count', 0) > 0 else ""
-                msg_lines.append(f"  {i+1}. {status_icon} `{masked_key}` {err_info}")
+                max_errors = k.get('max_errors', 5)
+                limit_info = f" [上限: {'∞' if max_errors == -1 else max_errors}]"
+                msg_lines.append(f"  {i+1}. {status_icon} `{masked_key}`{limit_info} {err_info}")
             msg_lines.append("")
 
         await self.send_text("\n".join(msg_lines))
@@ -539,6 +543,46 @@ class ChannelResetKeyCommand(BaseAdminCommand):
             else:
                 await self.send_text(f"ℹ️ 渠道 `{channel_name}` 没有需要重置的 Key。")
         return True, "操作完成", True
+
+class ChannelSetKeyErrorLimitCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_set_key_error_limit"
+    command_description: str = "设置Key的错误禁用上限 (格式: /渠道设置错误上限 <渠道> <序号> <次数> [-1为永不禁用])"
+    command_pattern: str = r"^/渠道设置错误上限"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/渠道设置错误上限"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        parts = content.split()
+        
+        if len(parts) != 3:
+            await self.send_text("❌ 参数错误！\n格式：`/渠道设置错误上限 <渠道名称> <序号> <次数>`\n例如：`/渠道设置错误上限 google 1 -1` (-1代表永不禁用)")
+            return True, "参数不足", True
+
+        channel_name, index_str, limit_str = parts
+        
+        try:
+            index = int(index_str)
+            limit = int(limit_str)
+        except ValueError:
+            await self.send_text("❌ 序号和次数必须是数字！")
+            return True, "参数类型错误", True
+
+        # Operate directly on the key_manager's config
+        keys_list = key_manager.config.get('keys', [])
+        target_keys_indices = [i for i, key in enumerate(keys_list) if key.get('type') == channel_name]
+
+        if index < 1 or index > len(target_keys_indices):
+            await self.send_text(f"❌ 渠道 `{channel_name}` 不存在第 `{index}` 个 Key。")
+            return True, "序号无效", True
+        
+        real_index = target_keys_indices[index - 1]
+        keys_list[real_index]['max_errors'] = limit
+        
+        key_manager.save_config(key_manager.config)
+
+        limit_text = "永不禁用" if limit == -1 else f"{limit}次"
+        await self.send_text(f"✅ 设置成功！\n渠道 `{channel_name}` 的第 `{index}` 个 Key 的错误上限已设置为: **{limit_text}**。")
+        return True, "设置成功", True
 
 # --- 管理命令 (Prompt管理) ---
 class AddPromptCommand(BaseAdminCommand):
@@ -1284,6 +1328,7 @@ class HelpCommand(BaseCommand):
             reply_lines.append("  - `/渠道添加key`: 添加渠道API Key")
             reply_lines.append("  - `/渠道key列表`: 查看各渠道Key状态")
             reply_lines.append("  - `/渠道重置key`: 重置指定渠道的Key")
+            reply_lines.append("  - `/渠道设置错误上限`: 设置Key的错误禁用上限")
             reply_lines.append("  - `/添加提示词`: 添加自定义绘图风格")
             reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
             reply_lines.append("  - `/添加渠道`: 添加自定义API渠道")
@@ -1419,7 +1464,8 @@ class GeminiDrawerPlugin(BasePlugin):
             (HelpCommand.get_command_info(), HelpCommand),
             (ChannelAddKeyCommand.get_command_info(), ChannelAddKeyCommand),
             (ChannelListKeysCommand.get_command_info(), ChannelListKeysCommand),
-            (ChannelResetKeyCommand.get_command_info(), ChannelResetKeyCommand), 
+            (ChannelResetKeyCommand.get_command_info(), ChannelResetKeyCommand),
+            (ChannelSetKeyErrorLimitCommand.get_command_info(), ChannelSetKeyErrorLimitCommand),
             (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), 
             (AddPromptCommand.get_command_info(), AddPromptCommand),
             (DeletePromptCommand.get_command_info(), DeletePromptCommand),
