@@ -1321,10 +1321,9 @@ class GeminiDrawerPlugin(BasePlugin):
     config_file_name: str = "config.toml"
 
     config_section_descriptions = {
-        "general": "插件启用配置",
+        "general": "插件启用配置，其他动态配置请向bot发送/基咪绘图帮助 设置其余配置",
         "proxy": "代理配置",
         "api": "API配置",
-        "channels": "其他动态配置请向bot发送/基咪绘图帮助 设置其余配置",
     }
 
     config_schema: dict = {
@@ -1343,8 +1342,7 @@ class GeminiDrawerPlugin(BasePlugin):
             "lmarena_api_url": ConfigField(type=str, default="http://host.docker.internal:5102", description="LMArena API的基础URL"),
             "lmarena_api_key": ConfigField(type=str, default="", description="LMArena API密钥 (可选, 使用Bearer Token)"),
             "lmarena_model_name": ConfigField(type=str, default="gemini-2.5-flash-image-preview (nano-banana)", description="LMArena 使用的模型名称")
-        },
-        "channels": {}
+        }
     }
 
     def __init__(self, *args, **kwargs):
