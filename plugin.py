@@ -129,7 +129,8 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
         if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
             message = response_data["choices"][0].get("message")
             if message and "content" in message and isinstance(message["content"], str):
-                match_url = re.search(r"!\[.*?\]\((.*?)\)", message["content"])
+                content_text = message["content"]
+                match_url = re.search(r"!\[.*?\]\((.*?)\)", content_text)
                 if match_url:
                     image_url = match_url.group(1)
                     log_url = image_url
@@ -138,7 +139,14 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                     logger.info(f"从LMArena响应中提取到图片URL: {log_url}")
                     return image_url
 
-                match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", message["content"])
+                # 匹配裸露的HTTP/HTTPS URL
+                match_plain_url = re.search(r"https?://[^\s]+", content_text)
+                if match_plain_url:
+                    image_url = match_plain_url.group(0)
+                    logger.info(f"从响应中提取到裸图片URL: {image_url}")
+                    return image_url
+
+                match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
                 if match_b64:
                     return match_b64.group(1)
 
@@ -1113,7 +1121,6 @@ class BaseDrawCommand(BaseCommand, ABC):
                         "model": model_name,
                         "messages": openai_messages,
                         "stream": endpoint_type == 'lmarena', 
-                        "n": 1
                     }
                     current_payload = openai_payload
 
