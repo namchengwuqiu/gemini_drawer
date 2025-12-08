@@ -127,16 +127,28 @@ def safe_json_dumps(obj: Any) -> str:
 async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
     try:
         if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
-            message = response_data["choices"][0].get("message")
-            if message and "content" in message and isinstance(message["content"], str):
-                content_text = message["content"]
+            choice = response_data["choices"][0]
+            content_text = None
+
+            # Handle streaming response with 'delta'
+            delta = choice.get("delta")
+            if delta and "content" in delta and isinstance(delta["content"], str):
+                content_text = delta["content"]
+            
+            # Handle non-streaming response with 'message'
+            if not content_text:
+                message = choice.get("message")
+                if message and "content" in message and isinstance(message["content"], str):
+                    content_text = message["content"]
+
+            if content_text:
                 match_url = re.search(r"!\[.*?\]\((.*?)\)", content_text)
                 if match_url:
                     image_url = match_url.group(1)
                     log_url = image_url
                     if len(log_url) > 100 and "base64" in log_url:
                         log_url = log_url[:50] + "..." + log_url[-20:]
-                    logger.info(f"从LMArena响应中提取到图片URL: {log_url}")
+                    logger.info(f"从响应中提取到图片URL: {log_url}")
                     return image_url
 
                 # 匹配裸露的HTTP/HTTPS URL
@@ -1180,36 +1192,27 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     raw_body = await response.aread()
                                     raise Exception(f"API请求失败, 状态码: {response.status_code} - {raw_body.decode('utf-8', 'ignore')}")
 
-                                current_event = ''
                                 async for line in response.aiter_lines():
                                     line = line.strip()
                                     if not line:
                                         continue
                                     
-                                    if line.startswith('event:'):
-                                        current_event = line.replace('event:', '').strip()
-                                    elif line.startswith('data:'):
+                                    if line.startswith('data:'):
                                         data_str = line.replace('data:', '').strip()
 
-                                        if data_str == "[DONE]":
-                                            logger.info("LMArena SSE事件流结束 (DONE)。")
+                                        if data_str == "DONE" or data_str == "[DONE]":
+                                            logger.info(f"LMArena SSE事件流结束 ({data_str})。")
                                             break
                                         
-                                        if current_event == 'status':
-                                            pass
-                                        
-                                        elif current_event == 'result':
-                                            try:
-                                                result_data = json.loads(data_str)
-                                                if result_data.get('status') == 'completed' and result_data.get('image'):
-                                                    img_data = result_data['image']
-                                                    logger.info("从LMArena SSE 'result'事件中成功提取图片数据。")
-                                            except json.JSONDecodeError:
-                                                logger.warning(f"无法解析LMArena result data: {data_str}")
-                                        
-                                        elif current_event == 'done': 
-                                            logger.info("LMArena SSE事件流结束。")
-                                            break
+                                        try:
+                                            response_data = json.loads(data_str)
+                                            extracted_data = await extract_image_data(response_data)
+                                            if extracted_data:
+                                                img_data = extracted_data
+                                                logger.info("从LMArena SSE流中成功提取图片数据。")
+                                                break
+                                        except json.JSONDecodeError:
+                                            logger.warning(f"无法解析LMArena SSE data: '{data_str}', 已跳过。")
                     except httpx.RequestError as e:
                         logger.error(f"LMArena SSE 请求错误: {e}")
                         raise
