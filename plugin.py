@@ -18,6 +18,7 @@ from src.plugin_system import (
     ComponentInfo,
     ConfigField,
     BaseCommand,
+    ReplyContentType,
 )
 from src.common.logger import get_logger
 
@@ -386,6 +387,114 @@ class KeyManager:
 # 初始化 KeyManager
 key_manager = KeyManager()
 
+# --- Data Manager ---
+class DataManager:
+    def __init__(self, data_file_path: Path = None):
+        if data_file_path is None:
+            self.plugin_dir = Path(__file__).parent
+            self.data_dir = self.plugin_dir / "data"
+            self.data_dir.mkdir(exist_ok=True)
+            self.data_file = self.data_dir / "data.json"
+        else:
+            self.data_file = data_file_path
+            self.plugin_dir = self.data_file.parent.parent
+            
+        self.data = self._load_data()
+        self._migrate_from_toml()
+
+    def _load_data(self) -> Dict[str, Any]:
+        if not self.data_file.exists():
+            return {"prompts": {}, "channels": {}}
+        try:
+            with open(self.data_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load data.json: {e}")
+            return {"prompts": {}, "channels": {}}
+
+    def save_data(self):
+        try:
+            with open(self.data_file, 'w', encoding='utf-8') as f:
+                json.dump(self.data, f, indent=4, ensure_ascii=False)
+        except Exception as e:
+            logger.error(f"Failed to save data.json: {e}")
+
+    def _migrate_from_toml(self):
+        config_path = self.plugin_dir / "config.toml"
+        if not config_path.exists():
+            return
+
+        try:
+            import toml
+            with open(config_path, 'r', encoding='utf-8') as f:
+                config_data = toml.load(f)
+            
+            changed = False
+            
+            # Migrate Prompts
+            if "prompts" in config_data:
+                for name, prompt in config_data["prompts"].items():
+                    if name not in self.data["prompts"]:
+                        self.data["prompts"][name] = prompt
+                        changed = True
+                del config_data["prompts"]
+
+            # Migrate Channels
+            if "channels" in config_data:
+                for name, info in config_data["channels"].items():
+                    if name not in self.data["channels"]:
+                        self.data["channels"][name] = info
+                        changed = True
+                del config_data["channels"]
+
+            if changed:
+                self.save_data()
+                save_config_file(config_path, config_data)
+                logger.info("Successfully migrated prompts and channels from config.toml to data/data.json")
+
+        except Exception as e:
+            logger.error(f"Migration from TOML failed: {e}")
+
+    def get_prompts(self) -> Dict[str, str]:
+        return self.data.get("prompts", {})
+
+    def add_prompt(self, name: str, prompt: str):
+        if "prompts" not in self.data:
+            self.data["prompts"] = {}
+        self.data["prompts"][name] = prompt
+        self.save_data()
+
+    def delete_prompt(self, name: str) -> bool:
+        if name in self.data.get("prompts", {}):
+            del self.data["prompts"][name]
+            self.save_data()
+            return True
+        return False
+
+    def get_channels(self) -> Dict[str, Any]:
+        return self.data.get("channels", {})
+
+    def add_channel(self, name: str, info: Dict[str, Any]):
+        if "channels" not in self.data:
+            self.data["channels"] = {}
+        self.data["channels"][name] = info
+        self.save_data()
+
+    def delete_channel(self, name: str) -> bool:
+        if name in self.data.get("channels", {}):
+            del self.data["channels"][name]
+            self.save_data()
+            return True
+        return False
+        
+    def update_channel(self, name: str, info: Dict[str, Any]):
+         if "channels" not in self.data:
+            self.data["channels"] = {}
+         self.data["channels"][name] = info
+         self.save_data()
+
+data_manager = DataManager()
+
 # --- 图像工具 ---
 async def download_image(url: str, proxy: Optional[str]) -> Optional[bytes]:
     try:
@@ -472,7 +581,7 @@ class ChannelAddKeyCommand(BaseAdminCommand):
         new_keys = parts[1:]
 
         valid_channels = ['google']
-        custom_channels = self.get_config("channels", {})
+        custom_channels = data_manager.get_channels()
         valid_channels.extend(custom_channels.keys())
         
         if channel_name not in valid_channels:
@@ -617,23 +726,13 @@ class AddPromptCommand(BaseAdminCommand):
             return True, "参数不全", True
 
         try:
-            import toml
-            config_path = Path(__file__).parent / "config.toml"
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = toml.load(f)
-            if "prompts" not in config_data:
-                config_data["prompts"] = {}
-            if name in config_data["prompts"]:
+            if name in data_manager.get_prompts():
                 await self.send_text(f"❌ 添加失败：功能名称 `{name}` 已存在，请使用其他名称。")
                 return True, "名称重复", True
 
-            config_data["prompts"][name] = prompt
-            save_config_file(config_path, config_data) # 使用修复版保存
-            await self.send_text(f"✅ 提示词 `{name}` 添加成功！\n请手动重启程序以应用更改。")
+            data_manager.add_prompt(name, prompt)
+            await self.send_text(f"✅ 提示词 `{name}` 添加成功！")
             return True, "添加成功", True
-        except ImportError:
-            await self.send_text("❌ 错误：`toml` 库未安装，无法修改配置文件。")
-            return False, "缺少toml库", True
         except Exception as e:
             logger.error(f"添加提示词失败: {e}")
             await self.send_text(f"❌ 操作失败，发生内部错误：{e}")
@@ -652,19 +751,8 @@ class DeletePromptCommand(BaseAdminCommand):
             return True, "缺少参数", True
 
         try:
-            import toml
-            config_path = Path(__file__).parent / "config.toml"
-            if not config_path.exists():
-                await self.send_text("❌ 配置文件 `config.toml` 不存在。")
-                return True, "配置文件不存在", True
-
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = toml.load(f)
-
-            if "prompts" in config_data and name in config_data["prompts"]:
-                del config_data["prompts"][name]
-                save_config_file(config_path, config_data) # 使用修复版保存
-                await self.send_text(f"✅ 提示词 `{name}` 删除成功！\n请手动重启程序以应用更改。")
+            if data_manager.delete_prompt(name):
+                await self.send_text(f"✅ 提示词 `{name}` 删除成功！")
                 return True, "删除成功", True
             else:
                 await self.send_text(f"❌ 未在配置文件中找到名为 `{name}` 的提示词。")
@@ -743,14 +831,6 @@ class AddChannelCommand(BaseAdminCommand):
                 await self.send_text("❌ 名称和API地址不能为空！")
                 return True, "参数不全", True
 
-            import toml
-            config_path = Path(__file__).parent / "config.toml"
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = toml.load(f)
-
-            if "channels" not in config_data:
-                config_data["channels"] = {}
-
             channel_info = {
                 "url": url,
                 "enabled": True
@@ -758,8 +838,7 @@ class AddChannelCommand(BaseAdminCommand):
             if model:
                 channel_info["model"] = model
 
-            config_data["channels"][name] = channel_info
-            save_config_file(config_path, config_data) # 使用修复版保存
+            data_manager.add_channel(name, channel_info)
 
             msg = f"✅ 自定义渠道 `{name}` 添加成功！\n"
             msg += f"- 类型: {'OpenAI' if is_openai else 'Gemini'}\n"
@@ -790,14 +869,9 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
 
         channel_name = parts[0]
         new_model = parts[1]
-        import toml
-        config_path = Path(__file__).parent / "config.toml"
         
         try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = toml.load(f)
-            
-            channels = config_data.get("channels", {})
+            channels = data_manager.get_channels()
             if channel_name not in channels:
                 await self.send_text(f"❌ 未找到渠道 `{channel_name}`！\n请先使用 `/添加渠道` 创建该渠道。")
                 return True, "渠道不存在", True
@@ -820,9 +894,7 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
                         channel_info["url"] = new_url
                         msg += f"- URL已自动更新: `{new_url}`\n"
 
-            channels[channel_name] = channel_info
-            config_data["channels"] = channels
-            save_config_file(config_path, config_data) # 使用修复版保存
+            data_manager.update_channel(channel_name, channel_info)
                 
             msg += "\n⚠️ **注意**：请**重启Bot**以应用更改！"
             await self.send_text(msg)
@@ -845,15 +917,8 @@ class DeleteChannelCommand(BaseAdminCommand):
             return True, "缺少参数", True
 
         try:
-            import toml
-            config_path = Path(__file__).parent / "config.toml"
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = toml.load(f)
-
-            if "channels" in config_data and name in config_data["channels"]:
-                del config_data["channels"][name]
-                save_config_file(config_path, config_data) # 使用修复版保存
-                await self.send_text(f"✅ 渠道 `{name}` 删除成功！\n请手动重启程序以应用更改。")
+            if data_manager.delete_channel(name):
+                await self.send_text(f"✅ 渠道 `{name}` 删除成功！")
                 return True, "删除成功", True
             else:
                 await self.send_text(f"❌ 未找到名为 `{name}` 的渠道。")
@@ -878,37 +943,41 @@ class ToggleChannelCommand(BaseAdminCommand):
             return True, "缺少参数", True
 
         try:
-            import toml
-            config_path = Path(__file__).parent / "config.toml"
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = toml.load(f)
-
-            if "api" not in config_data: config_data["api"] = {}
-            if "channels" not in config_data: config_data["channels"] = {}
-
+            channels = data_manager.get_channels()
             target_found = False
-            if name.lower() == 'google':
-                config_data["api"]["enable_google"] = is_enable
-                target_found = True
-            elif name.lower() == 'lmarena':
-                config_data["api"]["enable_lmarena"] = is_enable
-                target_found = True
-            elif name in config_data["channels"]:
-                channel_info = config_data["channels"][name]
+            
+            # Global config handling
+            if name.lower() in ['google', 'lmarena']:
+                 import toml
+                 config_path = Path(__file__).parent / "config.toml"
+                 with open(config_path, 'r', encoding='utf-8') as f:
+                     config_data = toml.load(f)
+                 
+                 if "api" not in config_data: config_data["api"] = {}
+                 
+                 if name.lower() == 'google':
+                     config_data["api"]["enable_google"] = is_enable
+                 else:
+                     config_data["api"]["enable_lmarena"] = is_enable
+                 
+                 save_config_file(config_path, config_data)
+                 target_found = True
+            
+            elif name in channels:
+                channel_info = channels[name]
                 if isinstance(channel_info, str):
                     url, key = channel_info.rsplit(":", 1)
                     channel_info = {"url": url, "key": key}
                 channel_info["enabled"] = is_enable
-                config_data["channels"][name] = channel_info
+                data_manager.update_channel(name, channel_info)
                 target_found = True
             else:
                 await self.send_text(f"❌ 未找到名为 `{name}` 的渠道。")
                 return True, "渠道不存在", True
 
             if target_found:
-                save_config_file(config_path, config_data) # 使用修复版保存
                 action = "启用" if is_enable else "禁用"
-                await self.send_text(f"✅ 渠道 `{name}` 已{action}！\n请手动重启程序以应用更改。")
+                await self.send_text(f"✅ 渠道 `{name}` 已{action}！")
                 return True, "操作成功", True
 
         except Exception as e:
@@ -929,7 +998,7 @@ class ListChannelsCommand(BaseAdminCommand):
                 config_data = toml.load(f)
 
             api_config = config_data.get("api", {})
-            channels_config = config_data.get("channels", {})
+            channels_config = data_manager.get_channels()
             msg_lines = ["📋 **当前渠道状态列表**", "--------------------"]
 
             enable_google = api_config.get("enable_google", True)
@@ -1046,7 +1115,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                 "key": lmarena_key
             })
 
-        custom_channels = self.get_config("channels", {})
+        custom_channels = data_manager.get_channels()
         for name, channel_info in custom_channels.items():
             c_url = ""
             c_key = ""
@@ -1131,7 +1200,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                 
                 if endpoint_type == 'lmarena':
                     is_openai = True
-                    request_url = f"{api_url}/v1/chat/completions" 
+                    request_url = f"{api_url}" 
                     client_proxy = None 
                 elif "/chat/completions" in api_url:
                     is_openai = True
@@ -1158,15 +1227,15 @@ class BaseDrawCommand(BaseCommand, ABC):
                             "role": "user",
                             "content": [
                                 {
+                                    "type": "text",
+                                    "text": user_text_prompt
+                                },
+                                {
                                     "type": "image_url",
                                     "image_url": { "url": f"data:{mime_type};base64,{base64_img}" }
                                 },
-                                {
-                                    "type": "text",
-                                    "text": user_text_prompt
-                                }
                             ]
-                        }
+                        },
                     ]
 
                     model_name = endpoint.get("model")
@@ -1176,7 +1245,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                     openai_payload = {
                         "model": model_name,
                         "messages": openai_messages,
-                        "stream": endpoint_type == 'lmarena', 
+                        "stream": endpoint_type == 'lmarena',
                     }
                     current_payload = openai_payload
 
@@ -1195,6 +1264,13 @@ class BaseDrawCommand(BaseCommand, ABC):
                                 async for line in response.aiter_lines():
                                     line = line.strip()
                                     if not line:
+                                        continue
+
+                                    if line.startswith(':'):
+                                        if 'keep-alive' in line:
+                                            logger.info("Received SSE keep-alive.")
+                                        else:
+                                            logger.info(f"Received SSE comment: {line}")
                                         continue
                                     
                                     if line.startswith('data:'):
@@ -1301,47 +1377,66 @@ class HelpCommand(BaseCommand):
     permission: str = "user"
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
-        prompts_config = self.get_config("prompts", {})
+        prompts_config = data_manager.get_prompts()
+        bot_name = "Gemini Drawer" # 发送人名称
         
-        reply_lines = ["🎨 Gemini 绘图插件帮助 🎨"]
-        reply_lines.append("--------------------")
-        reply_lines.append("✨ 用户指令 ✨")
+        # 1. 头部信息
+        header_text = "🎨 Gemini 绘图插件帮助 🎨\n"
+        header_text += "本插件基于 Google Gemini 系列模型，提供强大的图片二次创作能力。\n"
+        header_text += "--------------------\n"
+        header_text += "Tip: 管理员可以使用 /添加提示词 可以动态添加新指令哦！"
+        header_content = [(ReplyContentType.TEXT, header_text)]
+
+        # 2. 用户指令与Prompts
+        user_text = "✨ 用户指令 ✨\n--------------------\n"
         
         if prompts_config:
-            reply_lines.append("【预设风格】")
-            preset_commands = [f"  - `/{name}`" for name in prompts_config.keys()]
-            reply_lines.extend(preset_commands)
+            user_text += "【预设风格】(点击指令即可复制)\n"
+            sorted_prompts = sorted(prompts_config.keys())
+            # 使用列表每行展示一个，清晰明了
+            user_text += "\n".join([f"▪️ /{name}" for name in sorted_prompts])
+            user_text += "\n\n"
         
-        reply_lines.append("\n【自定义风格】")
-        reply_lines.append(f"  - `/bnn {{prompt}}`: 使用你的自定义prompt进行绘图。")
+        user_text += "【自定义风格】\n"
+        user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图。\n\n"
 
-        reply_lines.append("\\n【使用方法】")
-        reply_lines.append("  - 回复图片 + 指令")
-        reply_lines.append("  - @用户 + 指令")
-        reply_lines.append("  - 发送图片 + 指令")
-        reply_lines.append("  - 直接发送指令 (使用自己头像)")
+        user_text += "【使用方法】\n"
+        user_text += "1. 回复图片 + 指令\n"
+        user_text += "2. @用户 + 指令\n"
+        user_text += "3. 发送图片 + 指令\n"
+        user_text += "4. 直接发送指令 (使用自己头像)"
+        
+        user_content = [(ReplyContentType.TEXT, user_text)]
+        
+        nodes_to_send = [
+            ("1", bot_name, header_content),
+            ("1", bot_name, user_content)
+        ]
 
+        # 3. 管理员指令
         user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
         admin_list = self.get_config("general.admins", [])
         str_admin_list = [str(admin) for admin in admin_list]
 
         if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
-            reply_lines.append("\n--------------------")
-            reply_lines.append("🔑 管理员指令 🔑")
-            reply_lines.append("  - `/渠道添加key`: 添加渠道API Key")
-            reply_lines.append("  - `/渠道key列表`: 查看各渠道Key状态")
-            reply_lines.append("  - `/渠道重置key`: 重置指定渠道的Key")
-            reply_lines.append("  - `/渠道设置错误上限`: 设置Key的错误禁用上限")
-            reply_lines.append("  - `/添加提示词`: 添加自定义绘图风格")
-            reply_lines.append("  - `/删除提示词`: 删除自定义绘图风格")
-            reply_lines.append("  - `/添加渠道`: 添加自定义API渠道")
-            reply_lines.append("  - `/删除渠道`: 删除自定义API渠道")
-            reply_lines.append("  - `/渠道修改模型`: 修改渠道模型")
-            reply_lines.append("  - `/启用渠道`: 启用指定渠道")
-            reply_lines.append("  - `/禁用渠道`: 禁用指定渠道")
-            reply_lines.append("  - `/渠道列表`: 查看所有渠道状态")
+            admin_text = "🔑 管理员指令 🔑\n--------------------\n"
+            admin_text += "▪️ /渠道添加key: 添加渠道API Key\n"
+            admin_text += "▪️ /渠道key列表: 查看各渠道Key状态\n"
+            admin_text += "▪️ /渠道重置key: 重置指定渠道的Key\n"
+            admin_text += "▪️ /渠道设置错误上限: 设置Key的错误禁用上限\n"
+            admin_text += "▪️ /添加提示词 {名称}:{prompt}: 动态添加绘图风格\n"
+            admin_text += "▪️ /删除提示词 {名称}: 删除绘图风格\n"
+            admin_text += "▪️ /添加渠道: 添加自定义API渠道\n"
+            admin_text += "▪️ /删除渠道: 删除自定义API渠道\n"
+            admin_text += "▪️ /渠道修改模型: 修改渠道模型\n"
+            admin_text += "▪️ /启用渠道: 启用指定渠道\n"
+            admin_text += "▪️ /禁用渠道: 禁用指定渠道\n"
+            admin_text += "▪️ /渠道列表: 查看所有渠道状态"
             
-        await self.send_text("\n".join(reply_lines))
+            admin_content = [(ReplyContentType.TEXT, admin_text)]
+            nodes_to_send.append(("1", bot_name, admin_content))
+
+        await self.send_forward(nodes_to_send)
         return True, "帮助信息已发送", True
 
 class CustomDrawCommand(BaseDrawCommand):
@@ -1364,6 +1459,51 @@ class CustomDrawCommand(BaseDrawCommand):
             return None
             
         return prompt_text
+
+class UniversalPromptCommand(BaseDrawCommand):
+    command_name: str = "gemini_universal_prompt"
+    command_description: str = "通用动态绘图指令"
+    # 匹配包含 " /指令" 或以 "/指令" 开头的消息 (避免匹配 http://)
+    command_pattern: str = r".*(?:^|\s)/[^/]+.*"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.current_prompt_content = None
+
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        # 匹配指令名称
+        import re
+        msg = self.message.raw_message
+        logger.info(f"[Universal] 收到指令: {msg}")
+        
+        # 查找所有可能的指令 (必须是 /开头，前有空格或为首字符)
+        potential_cmds = re.findall(r"(?:^|\s)/([^/\s]+)(?:$|\s)", msg)
+        if not potential_cmds:
+             return False, None, False
+        
+        prompts = data_manager.get_prompts()
+        found_cmd = None
+        
+        # 遍历找到的指令，看哪个是有效的 Prompt
+        for cmd in potential_cmds:
+            if cmd in prompts:
+                found_cmd = cmd
+                break
+        
+        if not found_cmd:
+            logger.info(f"[Universal] 未在消息中找到有效的 Prompt 指令。")
+            return False, None, False
+            
+        # 是我的指令！
+        logger.info(f"[Universal] 找到 Prompt: {found_cmd}，准备执行。")
+        self.current_prompt_content = prompts[found_cmd]
+        
+        # 调用父类 execute (BaseDrawCommand)
+        return await super().execute()
+
+    async def get_prompt(self) -> Optional[str]:
+        return self.current_prompt_content
+
 
 # --- 插件注册 ---
 @register_plugin
@@ -1477,26 +1617,10 @@ class GeminiDrawerPlugin(BasePlugin):
             (ToggleChannelCommand.get_command_info(), ToggleChannelCommand),
             (ListChannelsCommand.get_command_info(), ListChannelsCommand),
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
+            (UniversalPromptCommand.get_command_info(), UniversalPromptCommand),
         ]
 
-        prompts_config = self.get_config("prompts", {})
-        for prompt_name, _ in prompts_config.items():
-            def create_get_prompt(p_name):
-                async def get_prompt(self_command) -> Optional[str]:
-                    return self_command.get_config(f"prompts.{p_name}")
-                return get_prompt
-
-            CommandClass = type(
-                f"Dynamic{prompt_name}Command",
-                (BaseDrawCommand,),
-                {
-                    "command_name": f"gemini_{prompt_name}",
-                    "command_description": f"将图片{prompt_name}",
-                    "command_pattern": f".*/{prompt_name}(?:$|\\s)",
-                    "get_prompt": create_get_prompt(prompt_name)
-                }
-            )
-            
-            components.append((CommandClass.get_command_info(), CommandClass))
-
+        # prompts_config = data_manager.get_prompts()
+        # 动态指令现已由 UniversalPromptCommand 统一接管，实现热重载支持
+        
         return components

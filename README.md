@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.2.2
+> **Version:** 1.2.5
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片。
 
@@ -53,8 +53,8 @@ pip install -r requirements.txt
 | `/渠道key列表`                           | **[改]** 查看各渠道 Key 的状态。                                   |
 | `/渠道重置key [渠道] [序号]`             | **[新]** 重置指定渠道的特定 Key、全部 Key 或所有渠道的 Key。       |
 | `/渠道设置错误上限 {渠道} {序号} {次数}` | **[新]** 设置指定Key的错误禁用上限 (-1为永不禁用)。                |
-| `/添加提示词 {名称}:{prompt}`            | **[新]** 动态添加一个绘图指令，加载需重启。                        |
-| `/删除提示词 {名称}`                     | **[新]** 动态删除一个绘图指令，加载需重启。                        |
+| `/添加提示词 {名称}:{prompt}`            | **[新]** 动态添加一个绘图指令，**即时生效**。                      |
+| `/删除提示词 {名称}`                     | **[新]** 动态删除一个绘图指令，**即时生效**。                      |
 | `/添加渠道 {名称}:{API地址}[:{模型}]`    | **[改]** 动态添加一个自定义 API 渠道。支持 OpenAI 和 Gemini 格式。 |
 | `/渠道修改模型 {名称} {新模型}`          | **[新]** 修改指定渠道的模型名称，加载需重启。                      |
 | `/删除渠道 {名称}`                       | **[新]** 动态删除一个自定义 API 渠道。                             |
@@ -101,9 +101,8 @@ pip install -r requirements.txt
 - `lmarena_api_key` (字符串, 默认 `""`): **[新增]** LMArena API 的密钥 (可选, 使用 Bearer Token)。
 - `lmarena_model_name` (字符串, 默认 `gemini-2.5-flash-image-preview (nano-banana)`): **[新增]** LMArena 使用的模型名称。
 
-### `[channels]` - 自定义渠道配置 (config.toml)
-
-自定义渠道的配置现在只包含 URL 和 Model。Key 统一存储在 `data/keys.json` 中。
+### 自定义渠道配置
+自定义渠道的配置数据存储于 `data/data.json` 中，建议使用管理员指令进行管理。
 
 **支持的 URL 格式 (严格校验)**：
 
@@ -117,7 +116,7 @@ pip install -r requirements.txt
     *   Model: 包含在 URL 中，无需额外指定。
     *   指令示例: `/添加渠道 MyGemini:https://.../models/gemini-1.5-flash:generateContent`
 
-- 格式: `名称 = { url = "API地址", model = "模型名称(可选)", enabled = true }`
+- **手动配置**: 如果需要手动修改，请编辑 `data/data.json` 文件里的 `channels` 字段。
 
 ### 渠道管理
 
@@ -130,33 +129,32 @@ pip install -r requirements.txt
 
 更改后需重启程序生效。
 
-### `[prompts]` - 核心：动态指令配置
+### 动态指令配置 (Prompts)
 
-**这是插件最核心的配置部分。** 你在这里定义的每一个键值对，都会自动成为一个新的绘图指令，仓库中prompts.text文件已经定义了一些常用的指令，你可以根据需要自行复制添加。
+**这是插件最核心的配置部分。** 这里定义的每一个键值对，都会自动成为一个新的绘图指令。数据存储于 `data/data.json` 中。
+仓库中 `prompts.text` 文件已经定义了一些常用的指令，建议直接使用管理员指令 `/添加提示词` 进行添加。
 
-- **键（Key）**: 将作为机器人的指令名。例如，键为 `手办化`，对应的指令就是 `/手办化`。
-- **值（Value）**: 调用该指令时，发送给 Gemini API 的 prompt 文本。
+- **指令名**: 将作为机器人的指令名。例如，为 `手办化`，对应的指令就是 `/手办化`。
+- **Prompt**: 调用该指令时，发送给 Gemini API 的 prompt 文本。
 
-**示例**：
-```toml
-[prompts]
-"手办化" = "Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue..."
-"Q版化" = "((chibi style)), ((super-deformed)), ((head-to-body ratio 1:2))..."
-"cos化" = "Generate a highly detailed photo of a girl cosplaying this illustration, at Comiket..."
-"自拍" = "selfie, best quality, from front"
+**示例** (data.json):
+```json
+"prompts": {
+    "手办化": "Please accurately transform the main subject in this photo into a realistic, masterpiece-like 1/7 scale PVC statue...",
+    "Q版化": "((chibi style)), ((super-deformed)), ((head-to-body ratio 1:2))...",
+    "cos化": "Generate a highly detailed photo of a girl cosplaying this illustration, at Comiket...",
+    "自拍": "selfie, best quality, from front"
+}
 ```
 
 #### **如何新增一个指令？**
 
-非常简单，只需在此部分添加一行即可。例如，你想新增一个 `/水彩画` 的指令：
+推荐使用管理员指令进行操作：
+- **新增**: `/添加提示词 水彩画:watercolor painting style, vibrant colors, masterpiece` (即时生效)
+- **删除**: `/删除提示词 水彩画` (即时生效)
+- **使用**: `/水彩画`
 
-1.  打开 `config.toml` 文件。
-2.  在 `[prompts]` 部分下，添加一行：
-    ```toml
-    水彩画 = "watercolor painting style, vibrant colors, masterpiece"
-    ```
-3.  重启机器人。
-4.  现在你就可以使用 `/水彩画` 指令了！
+如果需要手动批量添加，可以编辑 `data/data.json` 并重启机器人。
 
 ---
 
