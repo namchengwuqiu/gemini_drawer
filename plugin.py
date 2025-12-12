@@ -1504,8 +1504,8 @@ class TextToImageCommand(BaseDrawCommand):
 class UniversalPromptCommand(BaseDrawCommand):
     command_name: str = "gemini_universal_prompt"
     command_description: str = "通用动态绘图指令"
-    # 匹配包含 " /指令" 或以 "/指令" 开头的消息 (避免匹配 http://)
-    command_pattern: str = r".*(?:^|\s)/[^/]+.*"
+    # 匹配包含 " /指令" 或以 "/指令" 开头的消息，支持 ] 结尾的前缀
+    command_pattern: str = r".*(?:^|[\s\]])/([^/]+).*"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1517,8 +1517,8 @@ class UniversalPromptCommand(BaseDrawCommand):
         msg = self.message.raw_message
         logger.info(f"[Universal] 收到指令: {msg}")
         
-        # 查找所有可能的指令 (必须是 /开头，前有空格或为首字符)
-        potential_cmds = re.findall(r"(?:^|\s)/([^/\s]+)(?:$|\s)", msg)
+        # 查找所有可能的指令 (必须是 /开头，前有空格、首字符或])
+        potential_cmds = re.findall(r"(?:^|[\s\]])/([^/\s]+)(?:$|[\s\[])", msg)
         if not potential_cmds:
              return False, None, False
         
@@ -1550,7 +1550,7 @@ class UniversalPromptCommand(BaseDrawCommand):
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.2.0"
+    plugin_version: str = "1.2.6"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
