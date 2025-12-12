@@ -1479,16 +1479,21 @@ class CustomDrawCommand(BaseDrawCommand):
 class TextToImageCommand(BaseDrawCommand):
     command_name: str = "gemini_text_draw"
     command_description: str = "文生图：根据文字描述生成图片 (格式: /绘图 描述词)"
-    command_pattern: str = r"^/绘图"
+    # 匹配包含 " /绘图" 或以 "/绘图" 开头的消息，支持中间出现
+    command_pattern: str = r".*(?:^|\s)/绘图.*"
     allow_text_only: bool = True # 允许仅文本输入
 
     async def get_prompt(self) -> Optional[str]:
-        # 提取指令后的内容作为 Prompt
-        command_prefix = "/绘图"
-        msg = self.message.raw_message.strip()
+        # 使用正则提取指令后的内容
+        import re
+        msg = self.message.raw_message
         
-        # 简单处理：去掉指令前缀
-        prompt = msg.replace(command_prefix, "", 1).strip()
+        # 查找 /绘图 及其后面的内容
+        match = re.search(r"(?:^|\s)/绘图\s*(.*)", msg, re.DOTALL)
+        if not match:
+             return None
+             
+        prompt = match.group(1).strip()
         
         if not prompt:
             await self.send_text("❌ 请输入绘图描述！\n例如：`/绘图 一只可爱的小猫`")
