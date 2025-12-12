@@ -1073,6 +1073,11 @@ class BaseDrawCommand(BaseCommand, ABC):
                     logger.info(f"在消息中找到@提及用户 {mentioned_user_id}，获取其头像。")
                     return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640", proxy)
 
+        # [修改] 如果允许纯文本且未找到显式图片，则直接返回 None，不使用头像回退
+        if self.allow_text_only:
+            logger.info("允许纯文本模式且未找到图片，跳过自动获取头像。")
+            return None
+
         logger.info("未找到图片、Emoji或@提及，回退到发送者头像。")
         user_id = self.message.message_info.user_info.user_id
         return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640", proxy)
@@ -1080,6 +1085,9 @@ class BaseDrawCommand(BaseCommand, ABC):
     @abstractmethod
     async def get_prompt(self) -> Optional[str]:
         raise NotImplementedError
+
+    # 新增属性：是否允许仅文本输入
+    allow_text_only: bool = False
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
@@ -1090,16 +1098,21 @@ class BaseDrawCommand(BaseCommand, ABC):
         if not prompt:
             return True, "无效的Prompt", True
 
-        await self.send_text("🎨 正在获取图片和指令…")
+        await self.send_text("🎨 正在获取图片和指令…" if not self.allow_text_only else "🎨 正在提交绘图指令…")
         image_bytes = await self.get_source_image_bytes()
-        if not image_bytes:
+        
+        if not image_bytes and not self.allow_text_only:
             await self.send_text("❌ 未找到可供处理的图片或图片处理失败。" )
             return True, "缺少图片或处理失败", True
         
-        image_bytes = convert_if_gif(image_bytes)
-        base64_img = base64.b64encode(image_bytes).decode('utf-8')
-        mime_type = get_image_mime_type(image_bytes)
-        parts = [{"inline_data": {"mime_type": mime_type, "data": base64_img}}, {"text": prompt}]
+        parts = []
+        if image_bytes:
+            image_bytes = convert_if_gif(image_bytes)
+            base64_img = base64.b64encode(image_bytes).decode('utf-8')
+            mime_type = get_image_mime_type(image_bytes)
+            parts.append({"inline_data": {"mime_type": mime_type, "data": base64_img}})
+        
+        parts.append({"text": prompt})
         payload = {"contents": [{"parts": parts}]}
 
         await self.send_text("🤖 已提交至API…")
@@ -1229,14 +1242,16 @@ class BaseDrawCommand(BaseCommand, ABC):
                                 {
                                     "type": "text",
                                     "text": user_text_prompt
-                                },
-                                {
-                                    "type": "image_url",
-                                    "image_url": { "url": f"data:{mime_type};base64,{base64_img}" }
-                                },
+                                }
                             ]
                         },
                     ]
+                    
+                    if image_bytes: # 只有存在图片时才添加图片部分
+                        openai_messages[0]["content"].append({
+                            "type": "image_url",
+                            "image_url": { "url": f"data:{mime_type};base64,{base64_img}" }
+                        })
 
                     model_name = endpoint.get("model")
                     if not model_name:
@@ -1398,6 +1413,7 @@ class HelpCommand(BaseCommand):
             user_text += "\n\n"
         
         user_text += "【自定义风格】\n"
+        user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片。\n"
         user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图。\n\n"
 
         user_text += "【使用方法】\n"
@@ -1459,6 +1475,26 @@ class CustomDrawCommand(BaseDrawCommand):
             return None
             
         return prompt_text
+
+class TextToImageCommand(BaseDrawCommand):
+    command_name: str = "gemini_text_draw"
+    command_description: str = "文生图：根据文字描述生成图片 (格式: /绘图 描述词)"
+    command_pattern: str = r"^/绘图"
+    allow_text_only: bool = True # 允许仅文本输入
+
+    async def get_prompt(self) -> Optional[str]:
+        # 提取指令后的内容作为 Prompt
+        command_prefix = "/绘图"
+        msg = self.message.raw_message.strip()
+        
+        # 简单处理：去掉指令前缀
+        prompt = msg.replace(command_prefix, "", 1).strip()
+        
+        if not prompt:
+            await self.send_text("❌ 请输入绘图描述！\n例如：`/绘图 一只可爱的小猫`")
+            return None
+            
+        return prompt
 
 class UniversalPromptCommand(BaseDrawCommand):
     command_name: str = "gemini_universal_prompt"
@@ -1617,6 +1653,7 @@ class GeminiDrawerPlugin(BasePlugin):
             (ToggleChannelCommand.get_command_info(), ToggleChannelCommand),
             (ListChannelsCommand.get_command_info(), ListChannelsCommand),
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
+            (TextToImageCommand.get_command_info(), TextToImageCommand),
             (UniversalPromptCommand.get_command_info(), UniversalPromptCommand),
         ]
 
