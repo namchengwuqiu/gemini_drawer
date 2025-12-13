@@ -1409,7 +1409,7 @@ class HelpCommand(BaseCommand):
             user_text += "【预设风格】(点击指令即可复制)\n"
             sorted_prompts = sorted(prompts_config.keys())
             # 使用列表每行展示一个，清晰明了
-            user_text += "\n".join([f"▪️ /{name}" for name in sorted_prompts])
+            user_text += "\n".join([f"▪️ /! {name}" for name in sorted_prompts])
             user_text += "\n\n"
         
         user_text += "【自定义风格】\n"
@@ -1503,9 +1503,9 @@ class TextToImageCommand(BaseDrawCommand):
 
 class UniversalPromptCommand(BaseDrawCommand):
     command_name: str = "gemini_universal_prompt"
-    command_description: str = "通用动态绘图指令"
-    # 匹配包含 " /指令" 或以 "/指令" 开头的消息，支持 ] 结尾的前缀
-    command_pattern: str = r".*(?:^|[\s\]])/([^/]+).*"
+    command_description: str = "通用动态绘图指令 (格式: /! 指令名)"
+    # 匹配包含 " /!" 或以 "/!" 开头的消息，支持 ] 结尾的前缀
+    command_pattern: str = r".*(?:^|[\s\]])/!.*"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1517,27 +1517,24 @@ class UniversalPromptCommand(BaseDrawCommand):
         msg = self.message.raw_message
         logger.info(f"[Universal] 收到指令: {msg}")
         
-        # 查找所有可能的指令 (必须是 /开头，前有空格、首字符或])
-        potential_cmds = re.findall(r"(?:^|[\s\]])/([^/\s]+)(?:$|[\s\[])", msg)
-        if not potential_cmds:
+        # 查找 /! 后的指令名
+        # 匹配规则: (开头或空格或]) + /! + 空格(可选) + (指令名) + (结尾或空格或[)
+        match = re.search(r"(?:^|[\s\]])/!\s*([^/\s]+)(?:$|[\s\[])", msg)
+        
+        if not match:
              return False, None, False
         
+        cmd_name = match.group(1)
         prompts = data_manager.get_prompts()
-        found_cmd = None
         
-        # 遍历找到的指令，看哪个是有效的 Prompt
-        for cmd in potential_cmds:
-            if cmd in prompts:
-                found_cmd = cmd
-                break
-        
-        if not found_cmd:
-            logger.info(f"[Universal] 未在消息中找到有效的 Prompt 指令。")
-            return False, None, False
+        if cmd_name not in prompts:
+            logger.info(f"[Universal] 未找到 Prompt: {cmd_name}")
+            await self.send_text(f"❌ 未找到指令: {cmd_name}\n请使用 `/添加提示词 {cmd_name}:内容` 添加。")
+            return True, f"未找到指令: {cmd_name}", False
             
         # 是我的指令！
-        logger.info(f"[Universal] 找到 Prompt: {found_cmd}，准备执行。")
-        self.current_prompt_content = prompts[found_cmd]
+        logger.info(f"[Universal] 找到 Prompt: {cmd_name}，准备执行。")
+        self.current_prompt_content = prompts[cmd_name]
         
         # 调用父类 execute (BaseDrawCommand)
         return await super().execute()
