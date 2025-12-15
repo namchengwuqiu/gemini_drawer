@@ -1082,6 +1082,36 @@ class BaseDrawCommand(BaseCommand, ABC):
                 logger.warning(f"撤回消息失败 {mid}: {e}")
         return recalled_count
 
+    async def _notify_success(self, elapsed: float) -> None:
+        """成功生成后通知用户：使用戳一戳或文本消息"""
+        use_poke = self.get_config("behavior.success_notify_poke", True)
+        
+        if use_poke:
+            # 获取触发命令的用户ID
+            try:
+                user_id = None
+                if hasattr(self.message, 'message_info') and self.message.message_info:
+                    user_info = getattr(self.message.message_info, 'user_info', None)
+                    if user_info:
+                        user_id = getattr(user_info, 'user_id', None)
+                
+                if user_id:
+                    logger.info(f"[通知] 使用戳一戳通知用户 {user_id}")
+                    await self.send_command(
+                        "SEND_POKE",
+                        {"qq_id": str(user_id)},
+                        display_message=f"✅ 生成完成 ({elapsed:.2f}s)",
+                        storage_message=False
+                    )
+                    return
+                else:
+                    logger.warning("[通知] 无法获取用户ID，回退到文本通知")
+            except Exception as e:
+                logger.warning(f"[通知] 戳一戳失败，回退到文本通知: {e}")
+        
+        # 回退到文本消息
+        await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
+
     async def get_source_image_bytes(self) -> Optional[bytes]:
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
@@ -1409,7 +1439,8 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     stream_id=stream_id,
                                     storage_message=False
                                 )
-                                await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
+                                # 成功后通知用户：使用戳一戳或文本消息
+                                await self._notify_success(elapsed)
                             else:
                                 raise Exception("图片下载或转换失败")
                         else:
@@ -1704,6 +1735,7 @@ class GeminiDrawerPlugin(BasePlugin):
         },
         "behavior": {
             "auto_recall_status": ConfigField(type=bool, default=True, description="是否自动撤回绘图过程中的状态提示消息（如'🎨 正在提交绘图指令…'）"),
+            "success_notify_poke": ConfigField(type=bool, default=True, description="生成成功后使用戳一戳通知用户（替代文字消息'✅ 生成完成'）"),
         }
     }
 
