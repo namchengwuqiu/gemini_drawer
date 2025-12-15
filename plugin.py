@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+import time
 import base64
 from pathlib import Path
 from typing import List, Tuple, Type, Optional, Dict, Any
@@ -20,6 +21,7 @@ from src.plugin_system import (
     BaseCommand,
     ReplyContentType,
 )
+from src.plugin_system.apis import message_api
 from src.common.logger import get_logger
 
 # 日志记录器
@@ -1031,6 +1033,55 @@ class ListChannelsCommand(BaseAdminCommand):
 class BaseDrawCommand(BaseCommand, ABC):
     permission: str = "user"
 
+    # 新增属性：是否允许仅文本输入
+    allow_text_only: bool = False
+
+    def _get_current_chat_id(self) -> Optional[str]:
+        """获取当前聊天的 chat_id（使用 stream_id）"""
+        try:
+            chat_stream = self.message.chat_stream
+            if chat_stream:
+                # 优先使用 stream_id，这是框架内部统一使用的聊天标识
+                stream_id = getattr(chat_stream, 'stream_id', None)
+                if stream_id:
+                    logger.debug(f"使用 stream_id 作为 chat_id: {stream_id}")
+                    return stream_id
+                
+                # 备选：尝试构造 platform:group_id 或 platform:user_id
+                group_info = getattr(chat_stream, 'group_info', None)
+                if group_info and hasattr(group_info, 'group_id') and group_info.group_id:
+                    chat_id = f"{chat_stream.platform}:{group_info.group_id}"
+                    logger.debug(f"使用 group_id 构造 chat_id: {chat_id}")
+                    return chat_id
+                    
+                user_info = getattr(chat_stream, 'user_info', None)
+                if user_info and hasattr(user_info, 'user_id') and user_info.user_id:
+                    chat_id = f"{chat_stream.platform}:{user_info.user_id}"
+                    logger.debug(f"使用 user_id 构造 chat_id: {chat_id}")
+                    return chat_id
+            return None
+        except Exception as e:
+            logger.warning(f"获取 chat_id 失败: {e}")
+            return None
+
+    async def _safe_recall(self, message_ids: List[str]) -> int:
+        """安全地撤回消息列表，返回成功撤回的数量"""
+        recalled_count = 0
+        for mid in message_ids:
+            try:
+                result = await self.send_command(
+                    "DELETE_MSG",
+                    {"message_id": str(mid)},
+                    display_message="",
+                    storage_message=False
+                )
+                if result:
+                    recalled_count += 1
+                    logger.debug(f"成功撤回消息: {mid}")
+            except Exception as e:
+                logger.warning(f"撤回消息失败 {mid}: {e}")
+        return recalled_count
+
     async def get_source_image_bytes(self) -> Optional[bytes]:
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
@@ -1086,13 +1137,12 @@ class BaseDrawCommand(BaseCommand, ABC):
     async def get_prompt(self) -> Optional[str]:
         raise NotImplementedError
 
-    # 新增属性：是否允许仅文本输入
-    allow_text_only: bool = False
-
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
         start_time = datetime.now()
+        # 记录状态消息发送开始时间（用于撤回）
+        status_msg_start_time = time.time()
 
         prompt = await self.get_prompt()
         if not prompt:
@@ -1368,6 +1418,8 @@ class BaseDrawCommand(BaseCommand, ABC):
                         logger.error(f"发送图片失败: {e}")
                         await self.send_text("❌ 图片发送失败。" )
 
+                    # 撤回状态消息
+                    await self._recall_status_messages(status_msg_start_time)
                     return True, "绘图成功", True 
 
                 if not img_data:
@@ -1383,7 +1435,81 @@ class BaseDrawCommand(BaseCommand, ABC):
 
         elapsed = (datetime.now() - start_time).total_seconds()
         await self.send_text(f"❌ 生成失败 ({elapsed:.2f}s, {len(endpoints_to_try)}次尝试)\n最终错误: {last_error}")
+        # 撤回状态消息
+        await self._recall_status_messages(status_msg_start_time)
         return True, "所有尝试均失败", True
+
+    async def _recall_status_messages(self, status_msg_start_time: float) -> None:
+        """撤回绘图过程中发送的状态消息"""
+        logger.info(f"[撤回] 开始检查是否需要撤回状态消息，start_time={status_msg_start_time}")
+        
+        auto_recall = self.get_config("behavior.auto_recall_status", True)
+        logger.info(f"[撤回] auto_recall_status 配置值: {auto_recall}")
+        if not auto_recall:
+            logger.info("[撤回] 配置禁用了自动撤回，跳过")
+            return
+        
+        try:
+            chat_id = self._get_current_chat_id()
+            logger.info(f"[撤回] 获取到 chat_id: {chat_id}")
+            if not chat_id:
+                logger.warning("[撤回] 无法获取 chat_id，跳过状态消息撤回")
+                return
+            
+            # 等待2秒让平台消息ID同步更新到数据库
+            logger.info("[撤回] 等待2秒让平台消息ID同步...")
+            await asyncio.sleep(2)
+            
+            current_time = time.time()
+            logger.info(f"[撤回] 查询时间范围: {status_msg_start_time} 到 {current_time}")
+            
+            bot_messages = message_api.get_messages_by_time_in_chat(
+                chat_id=chat_id,
+                start_time=status_msg_start_time - 5,  # 留5秒缓冲
+                end_time=current_time + 5,
+                limit=20,
+                limit_mode="latest",
+                filter_mai=False  # 不过滤机器人消息
+            )
+            logger.info(f"[撤回] 查询到 {len(bot_messages)} 条消息")
+            
+            # 状态消息的特征前缀
+            status_prefixes = ("🎨 ", "🤖 ", "✅ ", "❌ ")
+            
+            # 筛选需要撤回的消息（只保留有效的平台消息ID）
+            to_recall = []
+            skipped_internal_ids = []
+            for msg in bot_messages:
+                msg_time = getattr(msg, 'time', 0)
+                content = getattr(msg, 'processed_plain_text', '')
+                msg_id = getattr(msg, 'message_id', None)
+                user_id = getattr(msg.user_info, 'user_id', None) if hasattr(msg, 'user_info') else None
+                logger.info(f"[撤回] 检查消息: time={msg_time}, user={user_id}, content={content[:50] if content else 'None'}..., id={msg_id}")
+                
+                if msg_time >= status_msg_start_time - 1:  # 1秒容差
+                    if content.startswith(status_prefixes):
+                        if msg_id:
+                            # 跳过内部ID（send_api_xxx），这些不是有效的平台消息ID
+                            if str(msg_id).startswith('send_api_'):
+                                skipped_internal_ids.append(str(msg_id))
+                                logger.warning(f"[撤回] 跳过内部ID（平台ID未同步）: {content[:30]}..., id={msg_id}")
+                            else:
+                                to_recall.append(str(msg_id))
+                                logger.info(f"[撤回] 找到待撤回消息: {content[:30]}..., id={msg_id}")
+            
+            if skipped_internal_ids:
+                logger.warning(f"[撤回] 跳过了 {len(skipped_internal_ids)} 条内部ID消息（平台ID未及时同步）")
+            
+            logger.info(f"[撤回] 共找到 {len(to_recall)} 条待撤回消息")
+            if to_recall:
+                recalled = await self._safe_recall(to_recall)
+                logger.info(f"[撤回] 撤回了 {recalled}/{len(to_recall)} 条状态消息")
+            else:
+                logger.info("[撤回] 没有找到需要撤回的消息")
+        except Exception as e:
+            import traceback
+            logger.warning(f"[撤回] 撤回状态消息时出错: {e}")
+            logger.warning(f"[撤回] 详细错误: {traceback.format_exc()}")
     
 class HelpCommand(BaseCommand):
     command_name: str = "gemini_help"
@@ -1575,6 +1701,9 @@ class GeminiDrawerPlugin(BasePlugin):
             "lmarena_api_url": ConfigField(type=str, default="http://host.docker.internal:5102", description="LMArena API的基础URL"),
             "lmarena_api_key": ConfigField(type=str, default="", description="LMArena API密钥 (可选, 使用Bearer Token)"),
             "lmarena_model_name": ConfigField(type=str, default="gemini-2.5-flash-image-preview (nano-banana)", description="LMArena 使用的模型名称")
+        },
+        "behavior": {
+            "auto_recall_status": ConfigField(type=bool, default=True, description="是否自动撤回绘图过程中的状态提示消息（如'🎨 正在提交绘图指令…'）"),
         }
     }
 
