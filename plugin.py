@@ -1661,8 +1661,9 @@ class TextToImageCommand(BaseDrawCommand):
 class UniversalPromptCommand(BaseDrawCommand):
     command_name: str = "gemini_universal_prompt"
     command_description: str = "通用动态绘图指令 (格式: /+ 指令名)"
-    # 匹配包含 " /+" 或以 "/+" 开头的消息，支持 ] 结尾的前缀
-    command_pattern: str = r".*(?:^|[\s\]])/\+.*"
+    # 1. 恢复开头的 .* (允许 @用户 等前缀)
+    # 2. 使用 /[+] 强制匹配字面量加号 (防止 + 被误读为正则量词，确保不会拦截 /tts)
+    command_pattern: str = r".*(?:^|[\s\]])/[+].*"
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
