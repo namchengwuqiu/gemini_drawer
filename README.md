@@ -121,7 +121,6 @@ pip install -r requirements.txt
 - `/+ <指令名>`: 调用已添加的提示词进行绘图（如 `/+ 黄游`）。
 - `/添加提示词 <指令名>:<提示词>`: 添加一个新的绘图指令。
 - `/删除提示词 <指令名>`: 删除一个绘图指令。
-- `/提示词列表`: 查看当前所有可用的绘图指令。
 - `/添加渠道 <名称>:<URL>:<模型>:<类型>`: 添加一个新的 API 渠道。
 - `/删除渠道 <名称>`: 删除一个渠道。
 - `/渠道列表`: 查看所有渠道及其状态。
@@ -168,7 +167,7 @@ pip install -r requirements.txt
 本插件支持三种类型的后端，并会自动轮询尝试：
 
 1.  **LMArena (本地/自部署)**
-    - **特点**: 速度最快，无审查，推荐首选。需要在本地或服务器上自行部署 [LMArena Bridge](https://github.com/lunamidori5/LMArena)。
+    - **特点**: 免费，需要在本地或服务器上自行部署 [LMArenaImagenAutomator](https://github.com/foxhui/LMArenaImagenAutomator)。
     - **配置**: 在 `config.toml` 的 `[api]` 部分填入 `lmarena_api_url`。
 
 2.  **Google 官方 Key**
