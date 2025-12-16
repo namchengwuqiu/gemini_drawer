@@ -1112,6 +1112,29 @@ class BaseDrawCommand(BaseCommand, ABC):
         # 回退到文本消息
         await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
 
+    async def _notify_start(self) -> None:
+        """开始处理时通知用户：使用戳一戳"""
+        try:
+            user_id = None
+            if hasattr(self.message, 'message_info') and self.message.message_info:
+                user_info = getattr(self.message.message_info, 'user_info', None)
+                if user_info:
+                    user_id = getattr(user_info, 'user_id', None)
+            
+            if user_id:
+                logger.info(f"[通知] 使用戳一戳通知用户开始处理 {user_id}")
+                await self.send_command(
+                    "SEND_POKE",
+                    {"qq_id": str(user_id)},
+                    display_message="🎨 开始处理...",
+                    storage_message=False
+                )
+                return
+            else:
+                logger.warning("[通知] 无法获取用户ID，跳过戳一戳")
+        except Exception as e:
+            logger.warning(f"[通知] 戳一戳失败: {e}")
+
     async def get_source_image_bytes(self) -> Optional[bytes]:
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
@@ -1178,7 +1201,7 @@ class BaseDrawCommand(BaseCommand, ABC):
         if not prompt:
             return True, "无效的Prompt", True
 
-        await self.send_text("🎨 正在获取图片和指令…" if not self.allow_text_only else "🎨 正在提交绘图指令…")
+        await self._notify_start()
         image_bytes = await self.get_source_image_bytes()
         
         if not image_bytes and not self.allow_text_only:
@@ -1195,7 +1218,7 @@ class BaseDrawCommand(BaseCommand, ABC):
         parts.append({"text": prompt})
         payload = {"contents": [{"parts": parts}]}
 
-        await self.send_text("🤖 已提交至API…")
+
 
         endpoints_to_try = []
 
@@ -1465,10 +1488,63 @@ class BaseDrawCommand(BaseCommand, ABC):
                 await asyncio.sleep(1)
 
         elapsed = (datetime.now() - start_time).total_seconds()
-        await self.send_text(f"❌ 生成失败 ({elapsed:.2f}s, {len(endpoints_to_try)}次尝试)\n最终错误: {last_error}")
+        # 发送失败消息并在5秒后撤回
+        fail_msg = f"❌ 生成失败 ({elapsed:.2f}s, {len(endpoints_to_try)}次尝试)\n最终错误: {last_error}"
+        
+        # 记录发送失败消息前的时间戳（用于后续查询）
+        fail_msg_send_time = time.time()
+        await self.send_text(fail_msg)
+        
+        # 启动异步任务：5秒后撤回失败消息
+        asyncio.create_task(self._delayed_recall_fail_message(fail_msg_send_time, fail_msg))
+        
         # 撤回状态消息
         await self._recall_status_messages(status_msg_start_time)
         return True, "所有尝试均失败", True
+
+    async def _delayed_recall_fail_message(self, fail_msg_send_time: float, fail_msg_content: str) -> None:
+        """延迟5秒后撤回失败消息"""
+        try:
+            # 等待5秒
+            await asyncio.sleep(5)
+            
+            chat_id = self._get_current_chat_id()
+            if not chat_id:
+                logger.warning("[失败消息撤回] 无法获取 chat_id，跳过撤回")
+                return
+            
+            # 再等待1秒让平台消息ID同步
+            await asyncio.sleep(1)
+            
+            current_time = time.time()
+            bot_messages = message_api.get_messages_by_time_in_chat(
+                chat_id=chat_id,
+                start_time=fail_msg_send_time - 2,  # 留2秒缓冲
+                end_time=current_time + 5,
+                limit=10,
+                limit_mode="latest",
+                filter_mai=False
+            )
+            
+            # 查找匹配的失败消息
+            for msg in bot_messages:
+                content = getattr(msg, 'processed_plain_text', '')
+                msg_id = getattr(msg, 'message_id', None)
+                msg_time = getattr(msg, 'time', 0)
+                
+                # 检查是否是我们发送的失败消息（以 ❌ 生成失败 开头）
+                if content.startswith("❌ 生成失败") and msg_time >= fail_msg_send_time - 2:
+                    if msg_id and not str(msg_id).startswith('send_api_'):
+                        logger.info(f"[失败消息撤回] 找到失败消息，准备撤回: {msg_id}")
+                        await self._safe_recall([str(msg_id)])
+                        logger.info(f"[失败消息撤回] 成功撤回失败消息")
+                        return
+                    else:
+                        logger.warning(f"[失败消息撤回] 找到消息但ID无效: {msg_id}")
+            
+            logger.warning("[失败消息撤回] 未找到匹配的失败消息")
+        except Exception as e:
+            logger.warning(f"[失败消息撤回] 撤回失败消息时出错: {e}")
 
     async def _recall_status_messages(self, status_msg_start_time: float) -> None:
         """撤回绘图过程中发送的状态消息"""
@@ -1505,7 +1581,7 @@ class BaseDrawCommand(BaseCommand, ABC):
             logger.info(f"[撤回] 查询到 {len(bot_messages)} 条消息")
             
             # 状态消息的特征前缀
-            status_prefixes = ("🎨 ", "🤖 ", "✅ ", "❌ ")
+            status_prefixes = ("戳一戳", "✅ ")
             
             # 筛选需要撤回的消息（只保留有效的平台消息ID）
             to_recall = []
