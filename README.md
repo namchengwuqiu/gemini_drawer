@@ -147,7 +147,7 @@ pip install -r requirements.txt
 **[prompts] 配置详解**
 
 **这是插件最核心的配置部分。** 这里定义的每一个键值对，都会自动成为一个新的绘图指令。数据存储于 `data/data.json` 中。
-仓库中 `prompts.text` 文件已经定义了一些常用的指令，建议直接使用管理员指令 `/添加提示词` 进行添加。
+仓库中 `prompts.text` 文件已经定义了一些常用的指令，建议直接使用管理员指令 `/添加提示词` 进行添加。推荐直接访问网站[大香蕉](https://nanobanana-website.vercel.app)查看更多提示词
 
 - **指令名**: 将作为机器人的指令名。例如，为 `手办化`，对应的指令就是 `/+手办化`。
 - **Prompt**: 调用该指令时，发送给 Gemini API 的 prompt 文本。
