@@ -778,7 +778,8 @@ class AddChannelCommand(BaseAdminCommand):
             "1. **OpenAI格式** (必须指定模型)：\n"
             "   `/添加渠道 名称:https://.../v1/chat/completions:模型名称`\n"
             "2. **Gemini格式** (模型在URL中)：\n"
-            "   `/添加渠道 名称:https://.../models/模型名称:generateContent`"
+            "   `/添加渠道 名称:https://.../models/模型名称:generateContent`\n"
+            "\n默认不使用流式请求，如需开启可用 `/渠道设置流式 名称 true`"
         )
         if not rest:
             await self.send_text(help_msg)
@@ -835,7 +836,8 @@ class AddChannelCommand(BaseAdminCommand):
 
             channel_info = {
                 "url": url,
-                "enabled": True
+                "enabled": True,
+                "stream": False
             }
             if model:
                 channel_info["model"] = model
@@ -1015,18 +1017,66 @@ class ListChannelsCommand(BaseAdminCommand):
                 msg_lines.append("--------------------")
                 for name, info in channels_config.items():
                     enabled = True
+                    stream = False
                     if isinstance(info, dict):
                         enabled = info.get("enabled", True)
+                        stream = info.get("stream", False)
                     icon = "✅" if enabled else "❌"
                     model_info = ""
+                    stream_info = " [流式]" if stream else ""
                     if isinstance(info, dict) and info.get("model"):
                         model_info = f" ({info['model']})"
-                    msg_lines.append(f"{icon} **{name}**{model_info}")
+                    msg_lines.append(f"{icon} **{name}**{model_info}{stream_info}")
             await self.send_text("\n".join(msg_lines))
             return True, "查询成功", True
         except Exception as e:
             logger.error(f"查询渠道列表失败: {e}")
             await self.send_text(f"❌ 查询失败：{e}")
+            return False, str(e), True
+
+class ChannelSetStreamCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_set_stream"
+    command_description: str = "设置渠道是否使用流式请求"
+    command_pattern: str = r"^/渠道设置流式"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/渠道设置流式"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        parts = content.split()
+        
+        if len(parts) != 2:
+            await self.send_text(
+                "❌ 参数错误！\n"
+                "格式：`/渠道设置流式 <渠道名称> <true|false>`\n"
+                "例如：`/渠道设置流式 PockGo true`"
+            )
+            return True, "参数不足", True
+
+        channel_name, stream_str = parts
+        stream_value = stream_str.lower() in ['true', '1', 'yes', '是', '开启', '启用']
+        
+        try:
+            channels = data_manager.get_channels()
+            
+            if channel_name not in channels:
+                await self.send_text(f"❌ 未找到名为 `{channel_name}` 的自定义渠道。\n注意：Google 和 LMArena 渠道的流式设置是固定的。")
+                return True, "渠道不存在", True
+            
+            channel_info = channels[channel_name]
+            if isinstance(channel_info, str):
+                url, key = channel_info.rsplit(":", 1)
+                channel_info = {"url": url, "key": key}
+            
+            channel_info["stream"] = stream_value
+            data_manager.update_channel(channel_name, channel_info)
+            
+            status_text = "启用" if stream_value else "禁用"
+            await self.send_text(f"✅ 渠道 `{channel_name}` 的流式请求已{status_text}！")
+            return True, "设置成功", True
+            
+        except Exception as e:
+            logger.error(f"设置渠道流式模式失败: {e}")
+            await self.send_text(f"❌ 设置失败：{e}")
             return False, str(e), True
 
 # --- 绘图命令基类 ---
@@ -1228,7 +1278,8 @@ class BaseDrawCommand(BaseCommand, ABC):
             endpoints_to_try.append({
                 "type": "lmarena",
                 "url": lmarena_url,
-                "key": lmarena_key
+                "key": lmarena_key,
+                "stream": True
             })
 
         custom_channels = data_manager.get_channels()
@@ -1247,11 +1298,13 @@ class BaseDrawCommand(BaseCommand, ABC):
                 c_url, c_key = channel_info.rsplit(":", 1)
             
             if c_url and c_key and c_enabled:
+                c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
                 endpoints_to_try.append({
                     "type": f"custom_{name}",
                     "url": c_url,
                     "key": c_key,
-                    "model": c_model
+                    "model": c_model,
+                    "stream": c_stream
                 })
 
         enable_google = self.get_config("api.enable_google", True)
@@ -1284,11 +1337,13 @@ class BaseDrawCommand(BaseCommand, ABC):
                     c_enabled = channel_info.get("enabled", True)
                 
                 if c_enabled and c_url:
+                    c_stream = channel_info.get("stream", False)
                     endpoints_to_try.append({
                         "type": f"custom_{key_type}",
                         "url": c_url,
                         "key": key_info['value'],
-                        "model": c_model
+                        "model": c_model,
+                        "stream": c_stream
                     })
 
         if not endpoints_to_try:
@@ -1363,15 +1418,16 @@ class BaseDrawCommand(BaseCommand, ABC):
                     openai_payload = {
                         "model": model_name,
                         "messages": openai_messages,
-                        "stream": endpoint_type == 'lmarena',
+                        "stream": endpoint.get("stream", False),
                     }
                     current_payload = openai_payload
 
                 logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {safe_json_dumps(current_payload)}")
                 
                 img_data = None
+                use_stream = endpoint.get("stream", False)
                 
-                if endpoint_type == 'lmarena':
+                if use_stream:
                     try:
                         async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0) as client:
                             async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
@@ -1395,7 +1451,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                         data_str = line.replace('data:', '').strip()
 
                                         if data_str == "DONE" or data_str == "[DONE]":
-                                            logger.info(f"LMArena SSE事件流结束 ({data_str})。")
+                                            logger.info(f"SSE事件流结束 ({data_str})。")
                                             break
                                         
                                         try:
@@ -1403,15 +1459,15 @@ class BaseDrawCommand(BaseCommand, ABC):
                                             extracted_data = await extract_image_data(response_data)
                                             if extracted_data:
                                                 img_data = extracted_data
-                                                logger.info("从LMArena SSE流中成功提取图片数据。")
+                                                logger.info("从SSE流中成功提取图片数据。")
                                                 break
                                         except json.JSONDecodeError:
-                                            logger.warning(f"无法解析LMArena SSE data: '{data_str}', 已跳过。")
+                                            logger.warning(f"无法解析SSE data: '{data_str}', 已跳过。")
                     except httpx.RequestError as e:
-                        logger.error(f"LMArena SSE 请求错误: {e}")
+                        logger.error(f"SSE 请求错误: {e}")
                         raise
                     except Exception as e:
-                        logger.error(f"LMArena SSE 流处理失败: {e}")
+                        logger.error(f"SSE 流处理失败: {e}")
                         raise
                 
                 else:
@@ -1680,6 +1736,7 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /渠道修改模型: 修改渠道模型\n"
             admin_text += "▪️ /启用渠道: 启用指定渠道\n"
             admin_text += "▪️ /禁用渠道: 禁用指定渠道\n"
+            admin_text += "▪️ /渠道设置流式 {名称} {true\|false}: 设置渠道是否使用流式请求\n"
             admin_text += "▪️ /渠道列表: 查看所有渠道状态"
             
             admin_content = [(ReplyContentType.TEXT, admin_text)]
@@ -1781,7 +1838,7 @@ class UniversalPromptCommand(BaseDrawCommand):
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.2.6"
+    plugin_version: str = "1.3.2"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -1892,6 +1949,7 @@ class GeminiDrawerPlugin(BasePlugin):
             (DeleteChannelCommand.get_command_info(), DeleteChannelCommand),
             (ToggleChannelCommand.get_command_info(), ToggleChannelCommand),
             (ListChannelsCommand.get_command_info(), ListChannelsCommand),
+            (ChannelSetStreamCommand.get_command_info(), ChannelSetStreamCommand),
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
             (TextToImageCommand.get_command_info(), TextToImageCommand),
             (UniversalPromptCommand.get_command_info(), UniversalPromptCommand),
