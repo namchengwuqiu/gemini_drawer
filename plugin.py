@@ -764,6 +764,36 @@ class DeletePromptCommand(BaseAdminCommand):
             await self.send_text(f"❌ 操作失败，发生内部错误：{e}")
             return False, str(e), True
 
+class ViewPromptCommand(BaseAdminCommand):
+    command_name: str = "gemini_view_prompt"
+    command_description: str = "查看指定提示词的内容"
+    command_pattern: str = r"^/查看提示词"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/查看提示词"
+        name = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        
+        if not name:
+            await self.send_text("❌ 请提供提示词名称！\n\n格式：`/查看提示词 名称`\n提示：使用 `/基咪绘图帮助` 可查看所有可用提示词。")
+            return True, "缺少参数", True
+
+        try:
+            prompts = data_manager.get_prompts()
+            if name in prompts:
+                prompt_content = prompts[name]
+                # 格式化输出
+                msg = f"📝 **提示词: {name}**\n\n```\n{prompt_content}\n```"
+                await self.send_text(msg)
+                return True, "查看成功", True
+            else:
+                await self.send_text(f"❌ 未找到名为 `{name}` 的提示词。\n\n使用 `/查看提示词` 查看所有可用提示词。")
+                return True, "提示词不存在", True
+        except Exception as e:
+            logger.error(f"查看提示词失败: {e}")
+            await self.send_text(f"❌ 操作失败，发生内部错误：{e}")
+            return False, str(e), True
+
+
 class AddChannelCommand(BaseAdminCommand):
     command_name: str = "gemini_add_channel"
     command_description: str = "添加自定义API渠道"
@@ -1133,7 +1163,15 @@ class BaseDrawCommand(BaseCommand, ABC):
         return recalled_count
 
     async def _notify_success(self, elapsed: float) -> None:
-        """成功生成后通知用户：使用戳一戳或文本消息"""
+        """成功生成后通知用户：使用戳一戳或文本消息
+        
+        如果启用了 reply_with_image，则跳过通知（图片回复本身就是通知）
+        """
+        # 如果启用了回复图片模式，则跳过额外通知
+        if self.get_config("behavior.reply_with_image", True):
+            logger.debug("[通知] 已启用回复图片模式，跳过额外通知")
+            return
+        
         use_poke = self.get_config("behavior.success_notify_poke", True)
         
         if use_poke:
@@ -1243,6 +1281,19 @@ class BaseDrawCommand(BaseCommand, ABC):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
+        
+        # 检查管理员专用模式
+        if self.get_config("behavior.admin_only_mode", False):
+            user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
+            if user_id_from_msg:
+                str_user_id = str(user_id_from_msg)
+                admin_list = self.get_config("general.admins", [])
+                str_admin_list = [str(admin) for admin in admin_list]
+                
+                if str_user_id not in str_admin_list:
+                    await self.send_text("⚠️ 管理员已关闭绘图功能")
+                    return True, "管理员专用模式", True
+        
         start_time = datetime.now()
         # 记录状态消息发送开始时间（用于撤回）
         status_msg_start_time = time.time()
@@ -1266,7 +1317,17 @@ class BaseDrawCommand(BaseCommand, ABC):
             parts.append({"inline_data": {"mime_type": mime_type, "data": base64_img}})
         
         parts.append({"text": prompt})
-        payload = {"contents": [{"parts": parts}]}
+
+        # --- 添加安全设置 ---
+        payload = {
+            "contents": [{"parts": parts}],
+            "safetySettings": [
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE"  # 设置为不拦截
+                }
+            ]
+        }
 
 
 
@@ -1513,11 +1574,58 @@ class BaseDrawCommand(BaseCommand, ABC):
                                 image_to_send_b64 = img_data
                             
                             if image_to_send_b64:
+                                # 检查是否启用回复图片模式
+                                reply_with_image = self.get_config("behavior.reply_with_image", True)
+                                trigger_msg = None
+                                
+                                if reply_with_image:
+                                    # 直接从 self.message 构造 DatabaseMessages 对象
+                                    # 避免因消息尚未入库而查询不到
+                                    try:
+                                        from src.common.data_models.database_data_model import DatabaseMessages, DatabaseUserInfo, DatabaseGroupInfo, DatabaseChatInfo
+                                        
+                                        msg_info = self.message.message_info
+                                        user_info = msg_info.user_info
+                                        group_info = getattr(msg_info, 'group_info', None)
+                                        chat_stream = self.message.chat_stream
+                                        
+                                        # 构造 DatabaseMessages 对象
+                                        trigger_msg = DatabaseMessages(
+                                            message_id=msg_info.message_id,
+                                            time=msg_info.time,
+                                            chat_id=self._get_current_chat_id() or "",
+                                            processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
+                                            user_id=user_info.user_id if user_info else "",
+                                            user_nickname=user_info.user_nickname if user_info else "",
+                                            user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                            user_platform=user_info.platform if user_info else "",
+                                            chat_info_group_id=group_info.group_id if group_info else None,
+                                            chat_info_group_name=group_info.group_name if group_info else None,
+                                            chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
+                                            chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
+                                            chat_info_platform=chat_stream.platform if chat_stream else "",
+                                            chat_info_user_id=user_info.user_id if user_info else "",
+                                            chat_info_user_nickname=user_info.user_nickname if user_info else "",
+                                            chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                            chat_info_user_platform=user_info.platform if user_info else "",
+                                        )
+                                        logger.debug(f"成功构造触发消息对象: {msg_info.message_id}")
+                                    except Exception as e:
+                                        logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
+                                        trigger_msg = None
+                                
+                                # 发送图片（如果有触发消息则以回复方式发送）
                                 await send_api.image_to_stream(
                                     image_base64=image_to_send_b64,
                                     stream_id=stream_id,
+                                    set_reply=trigger_msg is not None,
+                                    reply_message=trigger_msg,
                                     storage_message=False
                                 )
+                                
+                                if trigger_msg:
+                                    logger.info(f"以回复方式发送图片成功")
+                                
                                 # 成功后通知用户：使用戳一戳或文本消息
                                 await self._notify_success(elapsed)
                             else:
@@ -1736,7 +1844,7 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /渠道修改模型: 修改渠道模型\n"
             admin_text += "▪️ /启用渠道: 启用指定渠道\n"
             admin_text += "▪️ /禁用渠道: 禁用指定渠道\n"
-            admin_text += "▪️ /渠道设置流式 {名称} {true\|false}: 设置渠道是否使用流式请求\n"
+            admin_text += "▪️ /渠道设置流式 {名称} {true|false}: 设置渠道是否使用流式请求\n"
             admin_text += "▪️ /渠道列表: 查看所有渠道状态"
             
             admin_content = [(ReplyContentType.TEXT, admin_text)]
@@ -1838,7 +1946,7 @@ class UniversalPromptCommand(BaseDrawCommand):
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.3.2"
+    plugin_version: str = "1.4.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -1868,8 +1976,10 @@ class GeminiDrawerPlugin(BasePlugin):
             "lmarena_model_name": ConfigField(type=str, default="gemini-2.5-flash-image-preview (nano-banana)", description="LMArena 使用的模型名称")
         },
         "behavior": {
+            "admin_only_mode": ConfigField(type=bool, default=False, description="管理员专用模式：开启后仅管理员可使用绘图功能，其他用户会收到'管理员已关闭功能'提示"),
             "auto_recall_status": ConfigField(type=bool, default=True, description="是否自动撤回绘图过程中的状态提示消息（如'🎨 正在提交绘图指令…'）"),
             "success_notify_poke": ConfigField(type=bool, default=True, description="生成成功后使用戳一戳通知用户（替代文字消息'✅ 生成完成'）"),
+            "reply_with_image": ConfigField(type=bool, default=True, description="以回复触发消息的方式发送图片（开启后自动跳过成功通知）"),
         }
     }
 
@@ -1945,6 +2055,7 @@ class GeminiDrawerPlugin(BasePlugin):
             (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), 
             (AddPromptCommand.get_command_info(), AddPromptCommand),
             (DeletePromptCommand.get_command_info(), DeletePromptCommand),
+            (ViewPromptCommand.get_command_info(), ViewPromptCommand),
             (AddChannelCommand.get_command_info(), AddChannelCommand),
             (DeleteChannelCommand.get_command_info(), DeleteChannelCommand),
             (ToggleChannelCommand.get_command_info(), ToggleChannelCommand),
