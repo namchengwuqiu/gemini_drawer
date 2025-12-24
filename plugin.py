@@ -786,7 +786,7 @@ class ViewPromptCommand(BaseAdminCommand):
                 await self.send_text(msg)
                 return True, "查看成功", True
             else:
-                await self.send_text(f"❌ 未找到名为 `{name}` 的提示词。\n\n使用 `/查看提示词` 查看所有可用提示词。")
+                await self.send_text(f"❌ 未找到名为 `{name}` 的提示词。\n\n使用 `/基咪绘图帮助` 查看所有可用提示词。")
                 return True, "提示词不存在", True
         except Exception as e:
             logger.error(f"查看提示词失败: {e}")
@@ -1812,6 +1812,7 @@ class HelpCommand(BaseCommand):
         user_text += "【自定义风格】\n"
         user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片。\n"
         user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图。\n\n"
+        user_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容。\n\n"
 
         user_text += "【使用方法】\n"
         user_text += "1. 回复图片 + 指令\n"
@@ -1839,7 +1840,6 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /渠道设置错误上限: 设置Key的错误禁用上限\n"
             admin_text += "▪️ /添加提示词 {名称}:{prompt}: 动态添加绘图风格\n"
             admin_text += "▪️ /删除提示词 {名称}: 删除绘图风格\n"
-            admin_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容\n"
             admin_text += "▪️ /添加渠道: 添加自定义API渠道\n"
             admin_text += "▪️ /删除渠道: 删除自定义API渠道\n"
             admin_text += "▪️ /渠道修改模型: 修改渠道模型\n"
