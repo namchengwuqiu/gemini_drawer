@@ -1839,6 +1839,7 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /渠道设置错误上限: 设置Key的错误禁用上限\n"
             admin_text += "▪️ /添加提示词 {名称}:{prompt}: 动态添加绘图风格\n"
             admin_text += "▪️ /删除提示词 {名称}: 删除绘图风格\n"
+            admin_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容\n"
             admin_text += "▪️ /添加渠道: 添加自定义API渠道\n"
             admin_text += "▪️ /删除渠道: 删除自定义API渠道\n"
             admin_text += "▪️ /渠道修改模型: 修改渠道模型\n"
