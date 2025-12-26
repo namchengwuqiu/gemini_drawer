@@ -781,9 +781,22 @@ class ViewPromptCommand(BaseAdminCommand):
             prompts = data_manager.get_prompts()
             if name in prompts:
                 prompt_content = prompts[name]
-                # 格式化输出
-                msg = f"📝 **提示词: {name}**\n\n```\n{prompt_content}\n```"
-                await self.send_text(msg)
+                
+                # 使用聊天记录格式发送（和帮助命令一样）
+                bot_name = self.get_config("general.bot_name", "Gemini绘图助手")
+                
+                header_text = f"📝 提示词: {name}"
+                header_content = [(ReplyContentType.TEXT, header_text)]
+                
+                content_text = f"{prompt_content}"
+                content_node = [(ReplyContentType.TEXT, content_text)]
+                
+                nodes_to_send = [
+                    ("1", bot_name, header_content),
+                    ("1", bot_name, content_node)
+                ]
+                
+                await self.send_forward(nodes_to_send)
                 return True, "查看成功", True
             else:
                 await self.send_text(f"❌ 未找到名为 `{name}` 的提示词。\n\n使用 `/基咪绘图帮助` 查看所有可用提示词。")
