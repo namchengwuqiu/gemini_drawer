@@ -1,0 +1,249 @@
+"""
+Gemini Drawer 工具函数模块
+
+本模块提供插件使用的各种工具函数：
+
+配置文件处理：
+- fix_broken_toml_config(): 修复 TOML 配置文件中未加引号的中文键名
+- save_config_file(): 统一的配置文件保存入口，确保中文 Key 正确处理
+
+日志工具：
+- truncate_for_log(): 截断过长的日志数据
+- safe_json_dumps(): 安全的 JSON 序列化，自动截断 base64 数据
+
+图片处理：
+- download_image(): 异步下载图片，支持代理
+- get_image_mime_type(): 根据图片内容检测 MIME 类型
+- convert_if_gif(): 将 GIF 图片转换为 PNG 格式（取第一帧）
+- extract_image_data(): 从 API 响应中提取图片数据（URL 或 Base64）
+
+模块级实例：
+- logger: 插件专用的日志记录器
+"""
+import asyncio
+import json
+import re
+import io
+import httpx
+import base64
+from pathlib import Path
+from typing import List, Tuple, Type, Optional, Dict, Any
+from PIL import Image
+from src.common.logger import get_logger
+
+# 日志记录器
+logger = get_logger("gemini_drawer")
+
+def fix_broken_toml_config(file_path: Path):
+    """
+    读取配置文件原始文本，使用正则强制修复未加引号的中文键名。
+    专门解决框架自动生成时 key 不带引号导致 Empty key 报错的问题。
+    """
+    if not file_path.exists():
+        return
+
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+        
+        fixed_lines = []
+        modified = False
+        
+        # 匹配规则：行首是非引号、非注释、非方括号的字符，且包含中文，后接等号
+        pattern = re.compile(r'^([^#\n"\'\[]*[\u4e00-\u9fa5][^#\n"\'\[]*?)\s*=')
+        
+        for line in lines:
+            match = pattern.match(line)
+            if match:
+                key = match.group(1).strip()
+                parts = line.split('=', 1)
+                if len(parts) == 2:
+                    new_line = f'"{key}" ={parts[1]}'
+                    fixed_lines.append(new_line)
+                    modified = True
+                else:
+                    fixed_lines.append(line)
+            else:
+                fixed_lines.append(line)
+        
+        if modified:
+            with open(file_path, 'w', encoding='utf-8') as f:
+                f.writelines(fixed_lines)
+            logger.info("配置文件格式已自动修复（添加了丢失的引号）。")
+            
+    except Exception as e:
+        logger.error(f"尝试自动修复配置文件失败: {e}")
+
+def save_config_file(config_path: Path, config_data: Dict[str, Any]):
+    """
+    统一的保存入口，保存前先转为字符串并二次处理，确保中文Key有引号。
+    """
+    try:
+        import toml
+        # 1. 先生成标准 TOML 字符串
+        content = toml.dumps(config_data)
+        
+        # 2. 再次进行正则修复
+        lines = content.splitlines()
+        final_lines = []
+        for line in lines:
+            stripped = line.strip()
+            if '=' in stripped and not stripped.startswith('#') and not stripped.startswith('['):
+                key_part, rest = stripped.split('=', 1)
+                key_clean = key_part.strip()
+                # 如果包含非ASCII且没引号
+                if any(ord(c) > 127 for c in key_clean) and not (key_clean.startswith('"') or key_clean.startswith("'")):
+                    line = f'"{key_clean}" ={rest}'
+            final_lines.append(line)
+            
+        with open(config_path, 'w', encoding='utf-8') as f:
+            f.write("\n".join(final_lines))
+            
+    except Exception as e:
+        logger.error(f"保存配置文件失败: {e}")
+
+def truncate_for_log(data: str, max_length: int = 100) -> str:
+    """截断用于日志的数据，避免过长"""
+    if len(data) <= max_length:
+        return data
+    return data[:max_length//2] + "...[truncated]..." + data[-max_length//2:]
+
+def safe_json_dumps(obj: Any) -> str:
+    """安全地序列化JSON对象，对base64数据进行截断"""
+    def truncate_base64_values(o):
+        if isinstance(o, dict):
+            new_dict = {}
+            for k, v in o.items():
+                if isinstance(v, str) and ('base64' in v.lower() or len(v) > 500):
+                    new_dict[k] = truncate_for_log(v)
+                elif isinstance(v, (dict, list)):
+                    new_dict[k] = truncate_base64_values(v)
+                else:
+                    new_dict[k] = v
+            return new_dict
+        elif isinstance(o, list):
+            return [truncate_base64_values(item) for item in o]
+        return o
+    
+    truncated_obj = truncate_base64_values(obj)
+    return json.dumps(truncated_obj, ensure_ascii=False)
+
+async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
+    """从API响应中提取图片数据（URL或Base64）"""
+    try:
+        # 豆包格式响应解析
+        # 格式: {"data": [{"url": "...", "size": "..."} 或 {"b64_json": "..."}]}
+        if "data" in response_data and isinstance(response_data["data"], list):
+            for item in response_data["data"]:
+                if isinstance(item, dict):
+                    # 优先检查 URL
+                    if "url" in item and item["url"]:
+                        logger.info(f"从豆包响应中提取到图片URL: {item['url'][:100]}...")
+                        return item["url"]
+                    # 检查 base64 格式
+                    if "b64_json" in item and item["b64_json"]:
+                        logger.info("从豆包响应中提取到 base64 图片数据")
+                        return item["b64_json"]
+        
+        if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
+            choice = response_data["choices"][0]
+            content_text = None
+
+            # Handle streaming response with 'delta'
+            delta = choice.get("delta")
+            if delta and "content" in delta and isinstance(delta["content"], str):
+                content_text = delta["content"]
+            
+            # Handle non-streaming response with 'message'
+            if not content_text:
+                message = choice.get("message")
+                if message and "content" in message and isinstance(message["content"], str):
+                    content_text = message["content"]
+
+            if content_text:
+                match_url = re.search(r"!\[.*?\]\((.*?)\)", content_text)
+                if match_url:
+                    image_url = match_url.group(1)
+                    log_url = image_url
+                    if len(log_url) > 100 and "base64" in log_url:
+                        log_url = log_url[:50] + "..." + log_url[-20:]
+                    logger.info(f"从响应中提取到图片URL: {log_url}")
+                    return image_url
+
+                # 匹配裸露的HTTP/HTTPS URL
+                match_plain_url = re.search(r"https?://[^\s]+", content_text)
+                if match_plain_url:
+                    image_url = match_plain_url.group(0)
+                    logger.info(f"从响应中提取到裸图片URL: {image_url}")
+                    return image_url
+
+                match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
+                if match_b64:
+                    return match_b64.group(1)
+
+        candidates = response_data.get("candidates")
+        if not isinstance(candidates, list) or not candidates:
+            return None
+
+        content = candidates[0].get("content")
+        if not isinstance(content, dict):
+            return None
+
+        parts = content.get("parts")
+        if not isinstance(parts, list) or not parts:
+            return None
+
+        for part in parts:
+            if not isinstance(part, dict):
+                continue
+            inline_data = part.get("inlineData") or part.get("inline_data")
+            if isinstance(inline_data, dict):
+                image_b64 = inline_data.get("data")
+                if isinstance(image_b64, str):
+                    return image_b64
+
+            text_content = part.get("text")
+            if isinstance(text_content, str):
+                match = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", text_content)
+                if match:
+                    return match.group(1)
+
+        return None
+    except Exception:
+        return None
+
+async def download_image(url: str, proxy: Optional[str]) -> Optional[bytes]:
+    try:
+        async with httpx.AsyncClient(proxy=proxy, timeout=30.0) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            return response.content
+    except httpx.RequestError as e:
+        logger.error(f"下载图片失败: {url}, 错误: {e}")
+        return None
+
+def get_image_mime_type(image_bytes: bytes) -> str:
+    if image_bytes.startswith(b'\x89PNG\r\n\x1a\n'):
+        return 'image/png'
+    if image_bytes.startswith(b'\xff\xd8'):
+        return 'image/jpeg'
+    if image_bytes.startswith(b'GIF8'):
+        return 'image/gif'
+    if image_bytes.startswith(b'RIFF') and image_bytes[8:12] == b'WEBP':
+        return 'image/webp'
+    return 'application/octet-stream'
+
+def convert_if_gif(image_bytes: bytes) -> bytes:
+    mime = get_image_mime_type(image_bytes)
+    if mime == 'image/gif':
+        logger.info("检测到GIF图片，正在转换为PNG...")
+        try:
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                img.seek(0)
+                output = io.BytesIO()
+                img.save(output, format='PNG')
+                return output.getvalue()
+        except Exception as e:
+            logger.error(f"GIF转PNG失败: {e}")
+            return image_bytes
+    return image_bytes

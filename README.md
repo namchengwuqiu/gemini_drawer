@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.4.2
+> **Version:** 1.5.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片。
 
@@ -9,7 +9,7 @@
 - **动态指令**：无需修改代码，仅通过修改配置文件即可轻松添加新的绘图风格和对应指令。
 - **多样化图片源**：支持多种方式获取原始图片，极大提升了使用的便利性。
 - **多 API Key 管理**：自动轮换并管理多个 API Key，保证服务稳定。
-- **多后端支持**：支持 Google 官方、第三方兼容 API (如 Bailili) 以及自部署的 LMArena 后端。
+- **多后端支持**：支持 Google 官方、第三方兼容 API (如 Bailili)、LMArena 后端以及火山豆包 API。
 - **自定义指令**：支持使用 `/bnn` 指令进行完全自定义的 prompt 绘图。
 - **代理支持**：可为 API 请求配置 HTTP 代理。
 - **回复图片模式** 🆕：生成的图片以回复触发消息的方式发送，更直观的用户反馈。
@@ -58,7 +58,7 @@ pip install -r requirements.txt
 | `/渠道设置错误上限 {渠道} {序号} {次数}` | **[新]** 设置指定Key的错误禁用上限 (-1为永不禁用)。                |
 | `/添加提示词 {名称}:{prompt}`            | **[新]** 动态添加一个绘图指令，**即时生效**。                      |
 | `/删除提示词 {名称}`                     | **[新]** 动态删除一个绘图指令，**即时生效**。                      |
-| `/添加渠道 {名称}:{API地址}[:{模型}]`    | **[改]** 动态添加一个自定义 API 渠道。支持 OpenAI 和 Gemini 格式。 |
+| `/添加渠道 {名称}:{API地址}[:{模型}]`    | **[改]** 动态添加一个自定义 API 渠道。支持 OpenAI、Gemini 和豆包格式。 |
 | `/渠道修改模型 {名称} {新模型}`          | **[新]** 修改指定渠道的模型名称，加载需重启。                      |
 | `/删除渠道 {名称}`                       | **[新]** 动态删除一个自定义 API 渠道。                             |
 | `/启用渠道 {名称}`                       | **[新]** 启用指定渠道 (支持 google/lmarena)。                      |
@@ -126,6 +126,12 @@ pip install -r requirements.txt
     *   URL: `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent`
     *   Model: 包含在 URL 中，无需额外指定。
     *   指令示例: `/添加渠道 MyGemini:https://.../models/gemini-1.5-flash:generateContent`
+
+3.  **火山豆包格式** 🆕 (必须包含 `/images/generations`):
+    *   URL: `https://ark.cn-beijing.volces.com/api/v3/images/generations`
+    *   Model: **必须指定** (例如 `doubao-seedream-4-5-251128`)
+    *   指令示例: `/添加渠道 doubao:https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128`
+    *   获取 API Key: [火山引擎控制台](https://console.volcengine.com/)
 
 ### 流式请求配置
 

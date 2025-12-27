@@ -4,3 +4,8 @@ data/*
 
 # Ignore configuration file with sensitive keys
 config.toml
+
+# Ignore Python cache files
+__pycache__/
+*.pyc
+*.pyo
