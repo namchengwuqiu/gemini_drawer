@@ -515,7 +515,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                         data = response.json()
                         img_data = await extract_image_data(data)
                         if not img_data:
-                            logger.warning(f"API 响应成功但未提取到图片。响应: {json.dumps(data, indent=2, ensure_ascii=False)}")
+                            logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
                             raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
                     else:
                         raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")

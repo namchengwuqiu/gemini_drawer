@@ -147,39 +147,89 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
         
         if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
             choice = response_data["choices"][0]
-            content_text = None
+            content_data = None
 
             # Handle streaming response with 'delta'
             delta = choice.get("delta")
-            if delta and "content" in delta and isinstance(delta["content"], str):
-                content_text = delta["content"]
+            if delta and "content" in delta:
+                content_data = delta["content"]
             
             # Handle non-streaming response with 'message'
-            if not content_text:
+            if content_data is None:
                 message = choice.get("message")
-                if message and "content" in message and isinstance(message["content"], str):
-                    content_text = message["content"]
+                if message and "content" in message:
+                    content_data = message["content"]
 
-            if content_text:
-                match_url = re.search(r"!\[.*?\]\((.*?)\)", content_text)
-                if match_url:
-                    image_url = match_url.group(1)
-                    log_url = image_url
-                    if len(log_url) > 100 and "base64" in log_url:
-                        log_url = log_url[:50] + "..." + log_url[-20:]
-                    logger.info(f"从响应中提取到图片URL: {log_url}")
-                    return image_url
+            if content_data is not None:
+                # 处理 content 为数组格式的情况（新版 OpenAI 兼容格式）
+                # 格式: [{"type": "image", "image": {"data": "base64..."}}]
+                if isinstance(content_data, list):
+                    for item in content_data:
+                        if isinstance(item, dict):
+                            item_type = item.get("type", "")
+                            
+                            # 处理 type: "image" 格式
+                            if item_type == "image":
+                                image_obj = item.get("image", {})
+                                if isinstance(image_obj, dict):
+                                    # 检查 data 字段（base64）
+                                    if "data" in image_obj and image_obj["data"]:
+                                        logger.info("从响应中提取到图片 base64 数据 (content array 格式)")
+                                        return image_obj["data"]
+                                    # 检查 url 字段
+                                    if "url" in image_obj and image_obj["url"]:
+                                        logger.info(f"从响应中提取到图片 URL: {image_obj['url'][:100]}...")
+                                        return image_obj["url"]
+                            
+                            # 处理 type: "image_url" 格式
+                            if item_type == "image_url":
+                                image_url_obj = item.get("image_url", {})
+                                if isinstance(image_url_obj, dict) and "url" in image_url_obj:
+                                    url = image_url_obj["url"]
+                                    if url.startswith("data:image"):
+                                        # data URL 格式，提取 base64 部分
+                                        if "base64," in url:
+                                            logger.info("从响应中提取到图片 base64 数据 (data URL 格式)")
+                                            return url.split("base64,")[1]
+                                    else:
+                                        logger.info(f"从响应中提取到图片 URL: {url[:100]}...")
+                                        return url
+                            
+                            # 处理纯文本中的图片链接
+                            if item_type == "text" and "text" in item:
+                                text_content = item["text"]
+                                if isinstance(text_content, str):
+                                    # 匹配 markdown 图片格式
+                                    match_url = re.search(r"!\[.*?\]\((.*?)\)", text_content)
+                                    if match_url:
+                                        image_url = match_url.group(1)
+                                        logger.info(f"从文本中提取到图片 URL: {image_url[:100] if len(image_url) > 100 else image_url}...")
+                                        return image_url
+                    
+                    logger.debug("content 为数组格式但未找到图片数据")
+                
+                # 处理 content 为字符串格式的情况（旧版格式）
+                elif isinstance(content_data, str):
+                    content_text = content_data
+                    
+                    match_url = re.search(r"!\[.*?\]\((.*?)\)", content_text)
+                    if match_url:
+                        image_url = match_url.group(1)
+                        log_url = image_url[:100] + "..." if len(image_url) > 100 else image_url
+                        logger.info(f"从响应中提取到图片URL: {log_url}")
+                        return image_url
 
-                # 匹配裸露的HTTP/HTTPS URL
-                match_plain_url = re.search(r"https?://[^\s]+", content_text)
-                if match_plain_url:
-                    image_url = match_plain_url.group(0)
-                    logger.info(f"从响应中提取到裸图片URL: {image_url}")
-                    return image_url
+                    # 匹配裸露的HTTP/HTTPS URL
+                    match_plain_url = re.search(r"https?://[^\s]+", content_text)
+                    if match_plain_url:
+                        image_url = match_plain_url.group(0)
+                        logger.info(f"从响应中提取到裸图片URL: {image_url[:100]}...")
+                        return image_url
 
-                match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
-                if match_b64:
-                    return match_b64.group(1)
+                    match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
+                    if match_b64:
+                        logger.info("从响应中提取到 base64 图片数据 (字符串格式)")
+                        return match_b64.group(1)
 
         candidates = response_data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
