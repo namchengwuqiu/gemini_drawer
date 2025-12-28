@@ -204,6 +204,23 @@ class KeyManager:
         self.save_config(self.config)
         return True
 
+    def delete_key(self, key_type: str, index: int) -> bool:
+        """删除指定渠道的特定 Key"""
+        keys = self.config.get('keys', [])
+        target_keys = []
+        for i, key_obj in enumerate(keys):
+            if key_obj.get('type') == key_type:
+                target_keys.append((i, key_obj))
+        
+        if index < 1 or index > len(target_keys):
+            return False
+        
+        real_index, key_obj = target_keys[index - 1]
+        del self.config['keys'][real_index]
+        self.save_config(self.config)
+        logger.info(f"已删除渠道 {key_type} 的第 {index} 个 Key: {key_obj['value'][:8]}...")
+        return True
+
 class DataManager:
     def __init__(self, data_file_path: Path = None):
         if data_file_path is None:

@@ -28,7 +28,7 @@ from .help_command import HelpCommand
 from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand
 from .admin_commands import (
     ChannelAddKeyCommand, ChannelListKeysCommand, ChannelResetKeyCommand,
-    ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
+    ChannelDeleteKeyCommand, ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
     AddPromptCommand, DeletePromptCommand, ViewPromptCommand,
     AddChannelCommand, DeleteChannelCommand, ToggleChannelCommand,
     ListChannelsCommand, ChannelSetStreamCommand
@@ -122,6 +122,7 @@ class GeminiDrawerPlugin(BasePlugin):
             (ChannelAddKeyCommand.get_command_info(), ChannelAddKeyCommand),
             (ChannelListKeysCommand.get_command_info(), ChannelListKeysCommand),
             (ChannelResetKeyCommand.get_command_info(), ChannelResetKeyCommand),
+            (ChannelDeleteKeyCommand.get_command_info(), ChannelDeleteKeyCommand),
             (ChannelSetKeyErrorLimitCommand.get_command_info(), ChannelSetKeyErrorLimitCommand),
             (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), 
             (AddPromptCommand.get_command_info(), AddPromptCommand),

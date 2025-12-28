@@ -127,6 +127,33 @@ class ChannelResetKeyCommand(BaseAdminCommand):
             await self.send_text(f"✅ 已成功重置渠道 `{channel_name}` 的 {count} 个失效 Key。")
         return True, "操作完成", True
 
+class ChannelDeleteKeyCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_delete_key"
+    command_description: str = "删除渠道Key (格式: /渠道删除key <渠道> <序号>)"
+    command_pattern: str = r"^/渠道删除key"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/渠道删除key"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        parts = content.split()
+        
+        if len(parts) < 2:
+            await self.send_text("❌ 参数错误！\n格式：`/渠道删除key <渠道名称> <序号>`\n\n使用 `/渠道key列表` 查看所有 Key 及其序号。")
+            return True, "参数不足", True
+        
+        channel_name = parts[0]
+        try:
+            index = int(parts[1])
+        except ValueError:
+            await self.send_text("❌ 序号必须是数字！")
+            return True, "参数类型错误", True
+        
+        if key_manager.delete_key(channel_name, index):
+            await self.send_text(f"✅ 已成功删除渠道 `{channel_name}` 的第 {index} 个 Key。")
+        else:
+            await self.send_text(f"❌ 删除失败：渠道 `{channel_name}` 不存在第 {index} 个 Key。")
+        return True, "操作完成", True
+
 class ChannelSetKeyErrorLimitCommand(BaseAdminCommand):
     command_name: str = "gemini_channel_set_key_error_limit"
     command_description: str = "设置Key的错误禁用上限 (格式: /渠道设置错误上限 <渠道> <序号> <次数>)"

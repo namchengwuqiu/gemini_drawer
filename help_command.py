@@ -56,6 +56,7 @@ class HelpCommand(BaseCommand):
         if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
             admin_text = "🔑 管理员指令 🔑\n--------------------\n"
             admin_text += "▪️ /渠道添加key: 添加渠道API Key\n"
+            admin_text += "▪️ /渠道删除key: 删除渠道API Key\n"
             admin_text += "▪️ /渠道key列表: 查看各渠道Key状态\n"
             admin_text += "▪️ /渠道重置key: 重置指定渠道的Key\n"
             admin_text += "▪️ /渠道设置错误上限: 设置Key的错误禁用上限\n"
