@@ -155,10 +155,40 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                 content_data = delta["content"]
             
             # Handle non-streaming response with 'message'
-            if content_data is None:
-                message = choice.get("message")
-                if message and "content" in message:
+            message = choice.get("message")
+            if content_data is None and message:
+                if "content" in message:
                     content_data = message["content"]
+            
+            # 检查 message.images 数组格式（某些 API 把图片放在 images 字段中）
+            # 格式: {"message": {"images": [{"type": "image_url", "image_url": {"url": "..."}}]}}
+            if message and "images" in message and isinstance(message["images"], list):
+                for img_item in message["images"]:
+                    if isinstance(img_item, dict):
+                        img_type = img_item.get("type", "")
+                        
+                        # 处理 type: "image_url" 格式
+                        if img_type == "image_url":
+                            image_url_obj = img_item.get("image_url", {})
+                            if isinstance(image_url_obj, dict) and "url" in image_url_obj:
+                                url = image_url_obj["url"]
+                                if url.startswith("data:image"):
+                                    if "base64," in url:
+                                        logger.info("从 message.images 中提取到图片 base64 数据")
+                                        return url.split("base64,")[1]
+                                else:
+                                    logger.info(f"从 message.images 中提取到图片 URL: {url[:100]}...")
+                                    return url
+                        
+                        # 处理直接的 url 字段
+                        if "url" in img_item and img_item["url"]:
+                            url = img_item["url"]
+                            if url.startswith("data:image") and "base64," in url:
+                                logger.info("从 message.images 中提取到图片 base64 数据")
+                                return url.split("base64,")[1]
+                            else:
+                                logger.info(f"从 message.images 中提取到图片 URL: {url[:100]}...")
+                                return url
 
             if content_data is not None:
                 # 处理 content 为数组格式的情况（新版 OpenAI 兼容格式）

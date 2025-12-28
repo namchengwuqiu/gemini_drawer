@@ -16,6 +16,7 @@
   - 修复 `content` 为数组格式时无法提取图片的问题
   - 支持 `{"type": "image", "image": {"data": "..."}}` 格式
   - 支持 `{"type": "image_url", "image_url": {"url": "..."}}` 格式
+  - 支持 `message.images` 数组格式（图片与 content 分离的响应）
 
 ### 改进
 - **日志优化**
