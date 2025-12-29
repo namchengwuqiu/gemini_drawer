@@ -223,6 +223,89 @@ class BaseDrawCommand(BaseCommand, ABC):
         user_id = self.message.message_info.user_info.user_id
         return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640", proxy)
 
+    async def get_multiple_source_images(self, min_count: int = 2) -> List[bytes]:
+        """
+        获取多张源图片
+        来源优先级：回复消息中的图片 > 当前消息中的图片 > @提及用户的头像
+        返回图片字节列表
+        """
+        proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
+        images = []
+        
+        async def _extract_images_from_segments(segments) -> List[bytes]:
+            """从消息段中提取所有图片"""
+            extracted = []
+            if hasattr(segments, 'type') and segments.type == 'seglist':
+                segments = segments.data
+            if not isinstance(segments, list):
+                segments = [segments]
+            
+            for seg in segments:
+                if seg.type == 'image' or seg.type == 'emoji':
+                    if isinstance(seg.data, dict) and seg.data.get('url'):
+                        logger.info(f"[多图] 在消息段中找到URL图片 (类型: {seg.type})。")
+                        img_bytes = await download_image(seg.data.get('url'), proxy)
+                        if img_bytes:
+                            extracted.append(img_bytes)
+                    elif isinstance(seg.data, str) and len(seg.data) > 200:
+                        try:
+                            logger.info(f"[多图] 在消息段中找到Base64图片 (类型: {seg.type})。")
+                            extracted.append(base64.b64decode(seg.data))
+                        except Exception:
+                            continue
+            return extracted
+        
+        # 1. 从回复消息中提取图片
+        if hasattr(self.message, 'reply') and self.message.reply:
+            reply_msg = self.message.reply
+            if hasattr(reply_msg, 'message_segment') and reply_msg.message_segment:
+                logger.info("[多图] 尝试从回复消息中提取图片...")
+                reply_images = await _extract_images_from_segments(reply_msg.message_segment)
+                images.extend(reply_images)
+                logger.info(f"[多图] 从回复消息中提取到 {len(reply_images)} 张图片")
+        
+        # 2. 从当前消息中提取图片
+        segments = self.message.message_segment
+        current_images = await _extract_images_from_segments(segments)
+        images.extend(current_images)
+        
+        # 准备处理 @ 提及
+        if hasattr(segments, 'type') and segments.type == 'seglist':
+            segments = segments.data
+        if not isinstance(segments, list):
+            segments = [segments]
+        
+        # 3. 收集 @ 提及的用户头像
+        mentioned_users = []
+        for seg in segments:
+            if seg.type == 'text' and isinstance(seg.data, str) and '@' in seg.data:
+                # 提取所有 @ 的用户 ID
+                # 匹配标准 @123456
+                for match in re.finditer(r'@(\d+)', seg.data):
+                    mentioned_users.append(match.group(1))
+                # 匹配特殊格式 @<Name:123456>
+                for match in re.finditer(r'@<[^>]+:(\d+)>', seg.data):
+                    mentioned_users.append(match.group(1))
+            elif seg.type == 'at':
+                # 处理 at 类型的消息段
+                if isinstance(seg.data, dict):
+                     # 尝试多种可能的键名
+                    uid = seg.data.get('qq') or seg.data.get('user_id') or seg.data.get('id')
+                    if uid:
+                        mentioned_users.append(str(uid))
+                elif isinstance(seg.data, str):
+                    mentioned_users.append(seg.data)
+        
+        # 下载 @ 用户的头像
+        for user_id in mentioned_users:
+            logger.info(f"[多图] 获取 @{user_id} 的头像")
+            img_bytes = await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640", proxy)
+            if img_bytes:
+                images.append(img_bytes)
+        
+        logger.info(f"[多图] 共收集到 {len(images)} 张图片")
+        return images
+
     @abstractmethod
     async def get_prompt(self) -> Optional[str]:
         raise NotImplementedError
@@ -673,3 +756,382 @@ class BaseDrawCommand(BaseCommand, ABC):
             if to_recall:
                 await self._safe_recall(to_recall)
         except Exception: pass
+
+class BaseMultiImageDrawCommand(BaseDrawCommand):
+    """
+    多图绘图命令基类
+    继承自 BaseDrawCommand，重写 execute 方法以支持多图输入
+    """
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        if not self.get_config("general.enable_gemini_drawer", True):
+            return True, "Plugin disabled", False
+        
+        if self.get_config("behavior.admin_only_mode", False):
+            user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
+            if user_id_from_msg:
+                str_user_id = str(user_id_from_msg)
+                admin_list = self.get_config("general.admins", [])
+                str_admin_list = [str(admin) for admin in admin_list]
+                
+                if str_user_id not in str_admin_list:
+                    await self.send_text("⚠️ 管理员已关闭绘图功能")
+                    return True, "管理员专用模式", True
+        
+        start_time = datetime.now()
+        status_msg_start_time = time.time()
+
+        prompt = await self.get_prompt()
+        if not prompt:
+            return True, "无效的Prompt", True
+
+        await self._notify_start()
+        
+        # 获取多张图片
+        images = await self.get_multiple_source_images(min_count=2)
+        
+        if len(images) < 2:
+            await self.send_text("❌ 请至少提供2张图片（通过回复消息、@用户或直接发送）")
+            return True, "图片数量不足", True
+        
+        # 构造 Gemini 格式的 parts
+        parts = []
+        for i, img_bytes in enumerate(images):
+            img_bytes = convert_if_gif(img_bytes)
+            base64_img = base64.b64encode(img_bytes).decode('utf-8')
+            mime_type = get_image_mime_type(img_bytes)
+            # 添加图片标签，帮助模型识别
+            parts.append({"text": f"Image {i+1}:"})
+            parts.append({"inline_data": {"mime_type": mime_type, "data": base64_img}})
+        
+        parts.append({"text": f"Prompt: {prompt}"})
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "safetySettings": [
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE"
+                }
+            ]
+        }
+
+        # 准备 Endpoint 列表 (逻辑同 BaseDrawCommand)
+        endpoints_to_try = []
+
+        if self.get_config("api.enable_lmarena", True):
+            lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
+            lmarena_key = self.get_config("api.lmarena_api_key", "") 
+            endpoints_to_try.append({
+                "type": "lmarena",
+                "url": lmarena_url,
+                "key": lmarena_key,
+                "stream": True # LMArena 强制流式
+            })
+
+        custom_channels = data_manager.get_channels()
+        for name, channel_info in custom_channels.items():
+            c_url = ""
+            c_key = ""
+            c_model = None
+            c_enabled = True
+            
+            if isinstance(channel_info, dict):
+                c_url = channel_info.get("url")
+                c_key = channel_info.get("key")
+                c_model = channel_info.get("model")
+                c_enabled = channel_info.get("enabled", True)
+            elif isinstance(channel_info, str) and ":" in channel_info:
+                c_url, c_key = channel_info.rsplit(":", 1)
+            
+            if c_url and c_key and c_enabled:
+                c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
+                endpoints_to_try.append({
+                    "type": f"custom_{name}",
+                    "url": c_url,
+                    "key": c_key,
+                    "model": c_model,
+                    "stream": c_stream
+                })
+
+        enable_google = self.get_config("api.enable_google", True)
+
+        for key_info in key_manager.get_all_keys():
+            if key_info.get('status') != 'active':
+                continue
+            
+            key_type = key_info.get('type')
+            if not key_type:
+                key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
+
+            if key_type == 'google':
+                if enable_google:
+                    endpoints_to_try.append({
+                        "type": "google",
+                        "url": self.get_config("api.api_url"),
+                        "key": key_info['value']
+                    })
+            
+            elif key_type in custom_channels:
+                channel_info = custom_channels[key_type]
+                c_enabled = True
+                c_url = ""
+                c_model = None
+                
+                if isinstance(channel_info, dict):
+                    c_url = channel_info.get("url")
+                    c_model = channel_info.get("model")
+                    c_enabled = channel_info.get("enabled", True)
+                
+                if c_enabled and c_url:
+                    c_stream = channel_info.get("stream", False)
+                    endpoints_to_try.append({
+                        "type": f"custom_{key_type}",
+                        "url": c_url,
+                        "key": key_info['value'],
+                        "model": c_model,
+                        "stream": c_stream
+                    })
+
+        if not endpoints_to_try:
+            await self.send_text("❌ 未配置任何API密钥或端点。" )
+            return True, "无可用密钥或端点", True
+
+        last_error = ""
+        proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
+
+        for i, endpoint in enumerate(endpoints_to_try):
+            api_url = endpoint["url"]
+            api_key = endpoint["key"]
+            endpoint_type = endpoint["type"]
+            
+            logger.info(f"尝试第 {i+1}/{len(endpoints_to_try)} 个端点: {endpoint_type} ({api_url})")
+
+            headers = {"Content-Type": "application/json"}
+            request_url = api_url
+
+            try:
+                current_payload = payload 
+                client_proxy = proxy 
+                
+                is_openai = False
+                is_doubao = False
+                
+                if endpoint_type == 'lmarena':
+                    is_openai = True
+                    request_url = f"{api_url}" 
+                    client_proxy = None 
+                elif "/chat/completions" in api_url:
+                    is_openai = True
+                    request_url = api_url
+                elif "/images/generations" in api_url:
+                    is_doubao = True
+                    is_openai = False
+                    request_url = api_url
+                elif "generateContent" in api_url:
+                    is_openai = False
+                    request_url = f"{api_url}?key={api_key}"
+                else:
+                    logger.warning(f"无法识别的API地址格式: {api_url}，跳过。请检查配置。")
+                    continue
+
+                user_text_prompt = prompt
+                
+                if is_doubao:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                    
+                    model_name = endpoint.get("model", "doubao-seedream-4-5-251128")
+                    
+                    doubao_payload = {
+                        "model": model_name,
+                        "prompt": user_text_prompt,
+                        "response_format": "url",
+                        "size": "2k",
+                        "stream": False,
+                        "watermark": False
+                    }
+                    
+                    image_list = []
+                    for img in images:
+                        img = convert_if_gif(img)
+                        b64_img = base64.b64encode(img).decode('utf-8')
+                        mime = get_image_mime_type(img)
+                        image_list.append(f"data:{mime};base64,{b64_img}")
+                    
+                    doubao_payload["image"] = image_list
+                    
+                    current_payload = doubao_payload
+                
+                elif is_openai:
+                    if api_key:
+                        headers["Authorization"] = f"Bearer {api_key}"
+                    
+                    content_list = [{"type": "text", "text": f"Prompt: {user_text_prompt}"}]
+                    
+                    for i, img_bytes in enumerate(images):
+                        img_bytes = convert_if_gif(img_bytes)
+                        base64_img = base64.b64encode(img_bytes).decode('utf-8')
+                        mime_type = get_image_mime_type(img_bytes)
+                        content_list.append({"type": "text", "text": f"Image {i+1}:"})
+                        content_list.append({
+                            "type": "image_url",
+                            "image_url": { "url": f"data:{mime_type};base64,{base64_img}" }
+                        })
+
+                    openai_messages = [{"role": "user", "content": content_list}]
+                    
+                    model_name = endpoint.get("model")
+                    if not model_name:
+                        model_name = self.get_config("api.lmarena_model_name", "gemini-pro-vision") if endpoint_type != 'lmarena' else "gemini-3-pro-image-preview"
+
+                    openai_payload = {
+                        "model": model_name,
+                        "messages": openai_messages,
+                        "stream": endpoint.get("stream", False),
+                    }
+                    current_payload = openai_payload
+
+                logger.info(f"准备向 {endpoint_type} 端点发送多图请求。")
+                
+                img_data = None
+                use_stream = endpoint.get("stream", False)
+                
+                if use_stream:
+                    try:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0) as client:
+                            async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
+                                if response.status_code != 200:
+                                    raw_body = await response.aread()
+                                    raise Exception(f"API请求失败, 状态码: {response.status_code} - {raw_body.decode('utf-8', 'ignore')}")
+
+                                async for line in response.aiter_lines():
+                                    line = line.strip()
+                                    if not line: continue
+                                    if line.startswith(':'): continue
+                                    if line.startswith('data:'):
+                                        data_str = line.replace('data:', '').strip()
+                                        if data_str == "DONE" or data_str == "[DONE]": break
+                                        try:
+                                            response_data = json.loads(data_str)
+                                            extracted_data = await extract_image_data(response_data)
+                                            if extracted_data:
+                                                img_data = extracted_data
+                                                logger.info("从SSE流中成功提取图片数据。")
+                                                break
+                                        except json.JSONDecodeError: pass
+                    except Exception as e:
+                        logger.error(f"SSE 请求错误: {e}")
+                        raise
+                
+                else:
+                    try:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
+                            response = await client.post(request_url, json=current_payload, headers=headers)
+                    except httpx.RequestError as e:
+                        logger.error(f"httpx.RequestError: {e}")
+                        raise
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        img_data = await extract_image_data(data)
+                        if not img_data:
+                            logger.warning(f"API 响应成功但未提取到图片。")
+                            raise Exception(f"API未返回图片")
+                    else:
+                        raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+
+                if img_data:
+                    if endpoint_type != 'lmarena':
+                        key_manager.record_key_usage(api_key, True)
+                    
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
+                    
+                    try:
+                        stream_id = None
+                        if hasattr(self.message, 'chat_stream') and self.message.chat_stream:
+                            stream_info = chat_api.get_stream_info(self.message.chat_stream)
+                            stream_id = stream_info.get('stream_id')
+
+                        if stream_id:
+                            image_to_send_b64 = None
+                            if img_data.startswith(('http://', 'https')):
+                                image_bytes = await download_image(img_data, proxy)
+                                if image_bytes:
+                                    image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                            elif 'base64,' in img_data:
+                                image_to_send_b64 = img_data.split('base64,')[1]
+                            else:
+                                image_to_send_b64 = img_data
+                            
+                            if image_to_send_b64:
+                                reply_with_image = self.get_config("behavior.reply_with_image", True)
+                                trigger_msg = None
+                                
+                                if reply_with_image:
+                                    try:
+                                        from src.common.data_models.database_data_model import DatabaseMessages
+                                        msg_info = self.message.message_info
+                                        user_info = msg_info.user_info
+                                        group_info = getattr(msg_info, 'group_info', None)
+                                        chat_stream = self.message.chat_stream
+                                        
+                                        trigger_msg = DatabaseMessages(
+                                            message_id=msg_info.message_id,
+                                            time=msg_info.time,
+                                            chat_id=self._get_current_chat_id() or "",
+                                            processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
+                                            user_id=user_info.user_id if user_info else "",
+                                            user_nickname=user_info.user_nickname if user_info else "",
+                                            user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                            chat_info_group_id=group_info.group_id if group_info else None,
+                                            chat_info_group_name=group_info.group_name if group_info else None,
+                                            chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
+                                            chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
+                                            chat_info_platform=chat_stream.platform if chat_stream else "",
+                                            chat_info_user_id=user_info.user_id if user_info else "",
+                                            chat_info_user_nickname=user_info.user_nickname if user_info else "",
+                                            chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                            chat_info_user_platform=user_info.platform if user_info else "",
+                                        )
+                                    except Exception as e:
+                                        logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
+                                        trigger_msg = None
+                                
+                                await send_api.image_to_stream(
+                                    image_base64=image_to_send_b64,
+                                    stream_id=stream_id,
+                                    set_reply=trigger_msg is not None,
+                                    reply_message=trigger_msg,
+                                    storage_message=False
+                                )
+                                
+                                await self._notify_success(elapsed)
+                            else:
+                                raise Exception("图片下载或转换失败")
+                        else:
+                            raise Exception("无法从当前消息中确定stream_id")
+                    except Exception as e:
+                        logger.error(f"发送图片失败: {e}")
+                        await self.send_text("❌ 图片发送失败。" )
+
+                    await self._recall_status_messages(status_msg_start_time)
+                    return True, "绘图成功", True 
+
+                if not img_data:
+                    raise Exception("审核不通过，未能从API响应中获取图片数据")
+
+            except Exception as e:
+                logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
+                if endpoint_type != 'lmarena':
+                    is_quota_error = "429" in str(e)
+                    key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
+                last_error = str(e)
+                await asyncio.sleep(1)
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        fail_msg = f"❌ 生成失败 ({elapsed:.2f}s, {len(endpoints_to_try)}次尝试)\n最终错误: {last_error}"
+        fail_msg_send_time = time.time()
+        await self.send_text(fail_msg)
+        asyncio.create_task(self._delayed_recall_fail_message(fail_msg_send_time, fail_msg))
+        await self._recall_status_messages(status_msg_start_time)
+        return True, "所有尝试均失败", True

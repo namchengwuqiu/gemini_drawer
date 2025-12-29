@@ -25,7 +25,7 @@ from src.plugin_system import BasePlugin, register_plugin, ComponentInfo, Config
 from .utils import fix_broken_toml_config, logger
 
 from .help_command import HelpCommand
-from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand
+from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand, MultiImageDrawCommand
 from .admin_commands import (
     ChannelAddKeyCommand, ChannelListKeysCommand, ChannelResetKeyCommand,
     ChannelDeleteKeyCommand, ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
@@ -37,7 +37,7 @@ from .admin_commands import (
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.5.1"
+    plugin_version: str = "1.5.2"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -136,4 +136,5 @@ class GeminiDrawerPlugin(BasePlugin):
             (CustomDrawCommand.get_command_info(), CustomDrawCommand),
             (TextToImageCommand.get_command_info(), TextToImageCommand),
             (UniversalPromptCommand.get_command_info(), UniversalPromptCommand),
+            (MultiImageDrawCommand.get_command_info(), MultiImageDrawCommand),
         ]

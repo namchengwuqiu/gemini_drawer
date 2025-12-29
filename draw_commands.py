@@ -25,7 +25,7 @@ UniversalPromptCommand (/+ 指令名):
 """
 import re
 from typing import Tuple, Optional
-from .base_commands import BaseDrawCommand
+from .base_commands import BaseDrawCommand, BaseMultiImageDrawCommand
 from .managers import data_manager
 from .utils import logger
 
@@ -97,3 +97,26 @@ class UniversalPromptCommand(BaseDrawCommand):
 
     async def get_prompt(self) -> Optional[str]:
         return self.current_prompt_content
+
+class MultiImageDrawCommand(BaseMultiImageDrawCommand):
+    command_name: str = "gemini_multi_image_draw"
+    command_description: str = "多图生图：根据至少2张图片和提示词生成图片"
+    command_pattern: str = r".*/多图.*"
+
+    async def get_prompt(self) -> Optional[str]:
+        # 移除 CQ 码以获取纯文本
+        cleaned_message = re.sub(r'\[CQ:.*?\]', '', self.message.raw_message).strip()
+        command_pattern = "/多图"
+        command_pos = cleaned_message.find(command_pattern)
+        
+        if command_pos == -1:
+            await self.send_text("❌ 未找到 /多图 指令。")
+            return None
+            
+        prompt_text = cleaned_message[command_pos + len(command_pattern):].strip()
+        
+        if not prompt_text:
+            await self.send_text("❌ 请输入提示词！\n例如：`/多图 融合这两张图`")
+            return None
+            
+        return prompt_text
