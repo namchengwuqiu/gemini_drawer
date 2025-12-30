@@ -52,7 +52,13 @@ def fix_broken_toml_config(file_path: Path):
         # 匹配规则：行首是非引号、非注释、非方括号的字符，且包含中文，后接等号
         pattern = re.compile(r'^([^#\n"\'\[]*[\u4e00-\u9fa5][^#\n"\'\[]*?)\s*=')
         
+        # 简单的状态机，用于处理 admins 列表
+        in_admins_block = False
+        
         for line in lines:
+            stripped = line.strip()
+            
+            # 1. 修复中文键名 (现有逻辑)
             match = pattern.match(line)
             if match:
                 key = match.group(1).strip()
@@ -60,6 +66,24 @@ def fix_broken_toml_config(file_path: Path):
                 if len(parts) == 2:
                     new_line = f'"{key}" ={parts[1]}'
                     fixed_lines.append(new_line)
+                    modified = True
+                    continue
+            
+            # 2. 修复 admins 列表中的纯数字 (新增逻辑)
+            if stripped.startswith('admins = ['):
+                in_admins_block = True
+                fixed_lines.append(line)
+            elif in_admins_block and stripped == ']':
+                in_admins_block = False
+                fixed_lines.append(line)
+            elif in_admins_block:
+                # 检查是否是纯数字（可能带逗号）
+                # 匹配: 空白 + 数字 + 可选逗号 + 空白
+                digit_match = re.match(r'^(\s*)(\d+)(\s*,?\s*)$', line)
+                if digit_match:
+                    # 给数字加上双引号
+                    prefix, number, suffix = digit_match.groups()
+                    fixed_lines.append(f'{prefix}"{number}"{suffix}')
                     modified = True
                 else:
                     fixed_lines.append(line)
@@ -69,7 +93,7 @@ def fix_broken_toml_config(file_path: Path):
         if modified:
             with open(file_path, 'w', encoding='utf-8') as f:
                 f.writelines(fixed_lines)
-            logger.info("配置文件格式已自动修复（添加了丢失的引号）。")
+            logger.info("配置文件格式已自动修复（中文Key引号/Admins列表格式）。")
             
     except Exception as e:
         logger.error(f"尝试自动修复配置文件失败: {e}")
