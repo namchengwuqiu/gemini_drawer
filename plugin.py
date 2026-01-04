@@ -22,7 +22,7 @@ from typing import List, Tuple, Type
 from pathlib import Path
 
 from src.plugin_system import BasePlugin, register_plugin, ComponentInfo, ConfigField
-from .utils import fix_broken_toml_config, logger
+from .utils import fix_broken_toml_config, save_config_file, logger
 
 from .help_command import HelpCommand
 from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand, MultiImageDrawCommand
@@ -34,10 +34,12 @@ from .admin_commands import (
     ListChannelsCommand, ChannelSetStreamCommand
 )
 
+from .actions import ImageGenerateAction, SelfieGenerateAction
+
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.5.2"
+    plugin_version: str = "1.6.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -47,6 +49,7 @@ class GeminiDrawerPlugin(BasePlugin):
         "general": "插件启用配置，其他动态配置请向bot发送/基咪绘图帮助 设置其余配置",
         "proxy": "代理配置",
         "api": "API配置",
+        "selfie": "自拍功能配置",
     }
 
     config_schema: dict = {
@@ -57,6 +60,21 @@ class GeminiDrawerPlugin(BasePlugin):
         "proxy": {
             "enable": ConfigField(type=bool, default=False, description="是否为 Gemini API 请求启用代理"),
             "proxy_url": ConfigField(type=str, default="http://127.0.0.1:7890", description="HTTP 代理地址"),
+        },
+        "selfie": {
+            "enable": ConfigField(type=bool, default=False, description="是否启用自拍功能"),
+            "reference_image_path": ConfigField(type=str, default="selfie_base.jpg", description="人设底图"),
+            "base_prompt": ConfigField(type=str, default="", description="人设基础Prompt (可选，可以不输入因为有人设图)"),
+            "random_actions": ConfigField(type=list, default=[
+                "向观众眨眼，面带俏皮的微笑",
+                "在公园里吃冰淇淋",
+                "用手指做和平手势",
+                "拿着珍珠奶茶",
+                "戴着太阳镜在海滩上",
+                "调整头发，看起来害羞",
+                "穿着睡衣，抱着枕头",
+                "随机生成符合图片人物的自拍动作"
+            ], description="随机动作列表")
         },
         "api": {
             "enable_google": ConfigField(type=bool, default=True, description="是否启用Google官方API"),
@@ -92,6 +110,21 @@ class GeminiDrawerPlugin(BasePlugin):
             pass
         self._migrate_config()
 
+        # 初始化自拍目录
+        try:
+            if self.get_config("selfie.enable"):
+                image_filename = self.get_config("selfie.reference_image_path")
+                # 总是基于插件目录下的 images 文件夹
+                plugin_dir = Path(__file__).parent
+                images_dir = plugin_dir / "images"
+                
+                if not images_dir.exists():
+                    images_dir.mkdir(parents=True, exist_ok=True)
+                    logger.info(f"[GeminiDrawer] Auto-created images directory at: {images_dir}")
+                
+        except Exception as e:
+            logger.warning(f"[GeminiDrawer] Failed to initialize selfie directory: {e}")
+
     def _migrate_config(self):
         try:
             import toml
@@ -113,8 +146,11 @@ class GeminiDrawerPlugin(BasePlugin):
                         check_and_update(field, config_level[key])
 
             check_and_update(self.config_schema, config_data)
-        except Exception:
-            logger.error("Config migration skipped.")
+            
+            # 保存更新后的配置
+            save_config_file(config_path, config_data)
+        except Exception as e:
+            logger.error(f"Config migration failed: {e}")
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         return [
@@ -137,4 +173,6 @@ class GeminiDrawerPlugin(BasePlugin):
             (TextToImageCommand.get_command_info(), TextToImageCommand),
             (UniversalPromptCommand.get_command_info(), UniversalPromptCommand),
             (MultiImageDrawCommand.get_command_info(), MultiImageDrawCommand),
+            (ImageGenerateAction.get_action_info(), ImageGenerateAction),
+            (SelfieGenerateAction.get_action_info(), SelfieGenerateAction),
         ]

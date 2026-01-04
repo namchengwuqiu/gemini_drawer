@@ -9,3 +9,6 @@ config.toml
 __pycache__/
 *.pyc
 *.pyo
+
+# Ignore selfie images directory
+images/

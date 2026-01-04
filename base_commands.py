@@ -43,7 +43,9 @@ from .utils import (
     download_image, convert_if_gif, get_image_mime_type, 
     safe_json_dumps, extract_image_data
 )
+
 from .managers import key_manager, data_manager
+from .draw_logic import extract_source_image
 
 logger = get_logger("gemini_drawer")
 
@@ -175,50 +177,18 @@ class BaseDrawCommand(BaseCommand, ABC):
 
     async def get_source_image_bytes(self) -> Optional[bytes]:
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
-
-        async def _extract_image_from_segments(segments) -> Optional[bytes]:
-            if not segments:
-                return None
-            if hasattr(segments, 'type') and segments.type == 'seglist':
-                segments = segments.data
-            if not isinstance(segments, list):
-                segments = [segments]
-            for seg in segments:
-                if seg.type == 'image' or seg.type == 'emoji':
-                    if isinstance(seg.data, dict) and seg.data.get('url'):
-                        logger.info(f"在消息段中找到URL图片 (类型: {seg.type})。")
-                        return await download_image(seg.data.get('url'), proxy)
-                    elif isinstance(seg.data, str) and len(seg.data) > 200:
-                        try:
-                            logger.info(f"在消息段中找到Base64图片 (类型: {seg.type})。")
-                            return base64.b64decode(seg.data)
-                        except Exception:
-                            logger.warning(f"无法将类型为 '{seg.type}' 的段解码为图片，已跳过。")
-                            continue
-            return None
-
-        image_bytes = await _extract_image_from_segments(self.message.message_segment)
+        
+        # 使用 draw_logic.py 中的共享逻辑
+        image_bytes = await extract_source_image(self.message, proxy, logger)
         if image_bytes:
             return image_bytes
-
-        segments = self.message.message_segment
-        if hasattr(segments, 'type') and segments.type == 'seglist':
-            segments = segments.data
-        if not isinstance(segments, list):
-            segments = [segments]
-        
-        for seg in segments:
-            if seg.type == 'text' and '@' in seg.data:
-                match = re.search(r'(\d+)', seg.data)
-                if match:
-                    mentioned_user_id = match.group(1)
-                    logger.info(f"在消息中找到@提及用户 {mentioned_user_id}，获取其头像。")
-                    return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={mentioned_user_id}&s=640", proxy)
 
         if self.allow_text_only:
             logger.info("允许纯文本模式且未找到图片，跳过自动获取头像。")
             return None
 
+        # 兜底逻辑：BaseDrawCommand 特有的行为（Action 不使用这个兜底）
+        # 如果以上都没找到图片，使用发送者头像
         logger.info("未找到图片、Emoji或@提及，回退到发送者头像。")
         user_id = self.message.message_info.user_info.user_id
         return await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640", proxy)

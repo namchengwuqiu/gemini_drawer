@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.5.2
+> **Version:** 1.6.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在CHANGELOG.md中查看。
 
@@ -14,6 +14,7 @@
 - **代理支持**：可为 API 请求配置 HTTP 代理。
 - **回复图片模式** 🆕：生成的图片以回复触发消息的方式发送，更直观的用户反馈。
 - **管理员专用模式** 🆕：可限制仅管理员使用绘图功能。
+- **自然语言交互** 🆕：支持直接通过"帮我画个猫"等自然语言请求触发绘图。
 
 ---
 
@@ -26,6 +27,21 @@
 ```shell
 pip install -r requirements.txt
 ```
+
+---
+
+---
+
+## 自然语言交互 🆕
+
+本插件现在包含一个 `ImageGenerateAction` 组件，允许 Bot 理解自然语言的绘图请求。
+
+**触发示例**:
+- "帮我画一只戴眼镜的猫"
+- "生成一张赛博朋克风格的街道图片"
+- "画个太阳"
+
+**注意**: 此功能依赖于 Bot 的核心 LLM 具备意图识别（Function Calling 或 ReAct）能力。如果 Bot 认为用户的意图是绘图，它会自动调用本插件进行生成。
 
 ---
 
@@ -113,6 +129,17 @@ pip install -r requirements.txt
 - `lmarena_api_url` (字符串, 默认 `http://host.docker.internal:5102`): **[新增]** LMArena API 的基础 URL。如果你在 Docker 中运行，并且 LMArena 也在 Docker 网络中，这个地址通常是正确的。
 - `lmarena_api_key` (字符串, 默认 `""`): **[新增]** LMArena API 的密钥 (可选, 使用 Bearer Token)。
 - `lmarena_model_name` (字符串, 默认 `gemini-2.5-flash-image-preview (nano-banana)`): **[新增]** LMArena 使用的模型名称。
+*   `selfie.enable` (布尔值, 默认 `false`): 是否启用自拍功能 (需手动开启)。
+*   `selfie.reference_image_path` (字符串, 默认 `"selfie_base.jpg"`): 人设底图文件名 (放入插件自动生成的 images 目录)。
+*   `selfie.base_prompt` (字符串, 默认 `""`): 人设基础描述词 (可选)。
+*   `selfie.random_actions` (数组): 随机场景/动作列表。
+
+## 📸 自拍与照片生成
+插件支持通过自然语言请求 Bot 发送“自拍”。
+1. **启用功能**: 在配置中设置 `selfie.enable = true` 并重启插件。
+2. **准备底图**: 将人设图放入插件目录下的 `images/` 文件夹（插件启动后会自动创建此文件夹）。
+3. **配置文件名**: 确保 `reference_image_path` 与您的图片文件名一致。
+4. **触发**: 直接对 Bot 说“发张自拍”、“看看你的照片”。
 
 ### 自定义渠道配置
 自定义渠道的配置数据存储于 `data/data.json` 中，建议使用管理员指令进行管理。
@@ -187,7 +214,7 @@ pip install -r requirements.txt
 - **删除**: `/删除提示词 水彩画` (即时生效)
 - **使用**: `/+水彩画`
 
-如果需要手动批量添加，可以编辑 `data/data.json` 并重启机器人。
+如果需要手动批量添加，可以编辑 `data/data.json` 。
 
 ---
 
