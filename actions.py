@@ -14,6 +14,48 @@ from .managers import key_manager
 
 logger = get_logger("gemini_drawer_action")
 
+def is_command_message(message: Any) -> bool:
+    """检查消息是否是特定绘图指令 (/绘图, /多图, /bnn)，忽略 @mention"""
+    if not message:
+        return False
+        
+    target_commands = ["/绘图", "＃绘图", "/多图", "＃多图", "/bnn", "＃bnn"]
+    
+    def check_text(text: str) -> bool:
+        if not text: return False
+        t = text.strip()
+        return any(t.startswith(cmd) for cmd in target_commands)
+
+    try:
+        # 1. 尝试基于 Segments 判断 (忽略 At 后的第一个文本段)
+        if hasattr(message, 'message_segment'):
+            segments = message.message_segment
+            # 处理 SegList 包装
+            if hasattr(segments, 'type') and segments.type == 'seglist':
+                segments = segments.data
+            if not isinstance(segments, list):
+                segments = [segments]
+            
+            for seg in segments:
+                if hasattr(seg, 'type') and seg.type == 'at':
+                    continue
+                if hasattr(seg, 'type') and seg.type == 'text':
+                    data = getattr(seg, 'data', '')
+                    if isinstance(data, str) and data.strip():
+                        # 找到第一个非空文本段
+                        return check_text(data)
+    except Exception:
+        pass
+
+    # 2. 回退到基于 plain_text 判断
+    try:
+        msg_text = getattr(message, 'plain_text', '') or \
+                   getattr(message, 'processed_plain_text', '') or \
+                   getattr(message, 'display_message', '') or ''
+        return check_text(msg_text)
+    except Exception:
+        return False
+
 class ImageGenerateAction(BaseAction):
     """
     自然语言绘图 Action
@@ -41,6 +83,10 @@ class ImageGenerateAction(BaseAction):
     
     async def execute(self) -> Tuple[bool, str]:
         """执行绘图动作"""
+        # 检查是否是指令触发
+        if is_command_message(self.action_message):
+             return False, "检测到指令前缀，忽略Action触发"
+
         prompt = self.action_data.get("prompt", "").strip()
         if not prompt:
             await self.send_text("你想画什么呢？说清楚一点嘛。")
@@ -140,6 +186,10 @@ class SelfieGenerateAction(BaseAction):
     action_parameters: Dict[str, Any] = {}
 
     async def execute(self) -> Tuple[bool, str]:
+        # 检查是否是指令触发
+        if is_command_message(self.action_message):
+             return False, "检测到指令前缀，忽略Action触发"
+
         if not self.get_config("selfie.enable"):
              await self.send_text("虽然很想发，但是管理员没有开启自拍功能哦。")
              return True, "自拍功能未启用"
