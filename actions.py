@@ -264,7 +264,15 @@ class SelfieGenerateAction(BaseAction):
             
             if img_data:
                 image_to_send_b64 = None
-                if img_data.startswith('data:image'):
+                
+                # 处理不同格式的图片数据
+                if img_data.startswith(('http://', 'https')):
+                    # 下载 URL 图片
+                    image_bytes = await download_image(img_data, proxy)
+                    if image_bytes:
+                        image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                elif img_data.startswith('data:image') and 'base64,' in img_data:
+                    # 提取 data URL 中的 Base64 部分
                     image_to_send_b64 = img_data.split('base64,')[1]
                 else:
                     image_to_send_b64 = img_data
