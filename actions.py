@@ -249,7 +249,7 @@ class SelfieGenerateAction(BaseAction):
             # 获取 proxy
             proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
             
-            await self.send_text("好吧，你这么想看那我就给你一张，等一下...")
+            # await self.send_text("我去找照片，等一下...")
             
             # 调用绘图逻辑
             img_data, error = await process_drawing_api_request(
