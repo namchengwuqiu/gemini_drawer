@@ -233,7 +233,64 @@ class DataManager:
             self.plugin_dir = self.data_file.parent.parent
             
         self.data = self._load_data()
+        self._migrate_from_root()
         self._migrate_from_toml()
+
+    def _migrate_from_root(self):
+        """迁移根目录下的 data.json/data.js 到 data/data.json"""
+        migrated = False
+        
+        # 检查可能的旧文件名称
+        possible_files = ["data.json", "data.js", "data.json.bak"]
+        
+        for filename in possible_files:
+            root_file = self.plugin_dir / filename
+            if not root_file.exists():
+                continue
+                
+            if root_file.resolve() == self.data_file.resolve():
+                continue
+                
+            try:
+                # 尝试读取旧文件
+                content = {}
+                with open(root_file, 'r', encoding='utf-8') as f:
+                    content = json.load(f)
+                
+                if not content:
+                    continue
+
+                # 合并数据
+                changed = False
+                
+                # 迁移 Prompts
+                if "prompts" in content:
+                    for name, prompt in content["prompts"].items():
+                        if name not in self.data.get("prompts", {}):
+                            self.add_prompt(name, prompt)
+                            changed = True
+                            
+                # 迁移 Channels
+                if "channels" in content:
+                    for name, info in content["channels"].items():
+                        if name not in self.data.get("channels", {}):
+                            self.add_channel(name, info)
+                            changed = True
+                            
+                if changed:
+                    migrated = True
+                    logger.info(f"已从 {filename} 迁移数据")
+                
+                # 备份旧文件
+                backup_path = root_file.with_suffix(root_file.suffix + ".migrated")
+                root_file.rename(backup_path)
+                logger.info(f"已将 {filename} 重命名为 {backup_path.name}")
+                
+            except Exception as e:
+                logger.error(f"迁移 {filename} 数据失败: {e}")
+
+        if migrated:
+            self.save_data()
 
     def _load_data(self) -> Dict[str, Any]:
         if not self.data_file.exists():
