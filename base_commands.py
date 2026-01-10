@@ -154,6 +154,10 @@ class BaseDrawCommand(BaseCommand, ABC):
         
         await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
 
+    def get_image_caption(self) -> Optional[str]:
+        """子类可重写此方法，返回要与图片一起发送的文字说明"""
+        return None
+
     async def _notify_start(self) -> None:
         """开始处理时通知用户：使用戳一戳"""
         try:
@@ -632,13 +636,36 @@ class BaseDrawCommand(BaseCommand, ABC):
                                         logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
                                         trigger_msg = None
                                 
-                                await send_api.image_to_stream(
-                                    image_base64=image_to_send_b64,
-                                    stream_id=stream_id,
-                                    set_reply=trigger_msg is not None,
-                                    reply_message=trigger_msg,
-                                    storage_message=False
-                                )
+                                # 检查是否有图片说明文字（如随机风格名）
+                                caption = self.get_image_caption()
+                                
+                                if caption:
+                                    # 发送图文混合消息
+                                    from src.common.data_models.message_data_model import ReplySetModel, ReplyContent, ReplyContentType
+                                    hybrid_content = [
+                                        ReplyContent(content_type=ReplyContentType.TEXT, content=caption),
+                                        ReplyContent(content_type=ReplyContentType.IMAGE, content=image_to_send_b64)
+                                    ]
+                                    reply_set = ReplySetModel(reply_data=[
+                                        ReplyContent(content_type=ReplyContentType.HYBRID, content=hybrid_content)
+                                    ])
+                                    await send_api.custom_reply_set_to_stream(
+                                        reply_set=reply_set,
+                                        stream_id=stream_id,
+                                        set_reply=False,
+                                        reply_message=trigger_msg,
+                                        storage_message=False
+                                    )
+                                    logger.info(f"[发送] 发送图文混合消息，说明: {caption}")
+                                else:
+                                    # 普通图片发送
+                                    await send_api.image_to_stream(
+                                        image_base64=image_to_send_b64,
+                                        stream_id=stream_id,
+                                        set_reply=trigger_msg is not None,
+                                        reply_message=trigger_msg,
+                                        storage_message=False
+                                    )
                                 
                                 await self._notify_success(elapsed)
                             else:

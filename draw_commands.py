@@ -147,10 +147,13 @@ class RandomPromptDrawCommand(BaseDrawCommand):
         
         logger.info(f"[Random] 随机选中提示词: {self.selected_prompt_name}")
         
-        # 通知用户选中的风格，注释掉后则不通知
-        # await self.send_text(f"🎲 随机抽中风格: **{self.selected_prompt_name}**\n正在生成...")
-        
         return await super().execute()
 
     async def get_prompt(self) -> Optional[str]:
         return self.selected_prompt_content
+
+    def get_image_caption(self) -> Optional[str]:
+        """返回要与图片一起发送的风格名称"""
+        if self.selected_prompt_name:
+            return f"🎲 {self.selected_prompt_name}"
+        return None
