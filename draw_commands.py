@@ -24,6 +24,7 @@ UniversalPromptCommand (/+ 指令名):
 每个命令通过重写 get_prompt() 方法来定义如何解析用户输入并生成提示词。
 """
 import re
+import random
 from typing import Tuple, Optional
 from .base_commands import BaseDrawCommand, BaseMultiImageDrawCommand
 from .managers import data_manager
@@ -120,3 +121,36 @@ class MultiImageDrawCommand(BaseMultiImageDrawCommand):
             return None
             
         return prompt_text
+
+
+class RandomPromptDrawCommand(BaseDrawCommand):
+    """随机绘图命令 - 从预设中随机选择一个提示词进行绘图"""
+    command_name: str = "gemini_random_draw"
+    command_description: str = "随机绘图：从预设风格中随机抽取一个进行绘图"
+    command_pattern: str = r".*(?:^|\s)/随机(?:绘图)?(?:$|\s).*"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.selected_prompt_name = None
+        self.selected_prompt_content = None
+
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        prompts = data_manager.get_prompts()
+        
+        if not prompts:
+            await self.send_text("❌ 当前没有任何预设提示词！\n请先使用 `/添加提示词` 添加。")
+            return True, "无预设", True
+        
+        # 随机选择一个提示词
+        self.selected_prompt_name = random.choice(list(prompts.keys()))
+        self.selected_prompt_content = prompts[self.selected_prompt_name]
+        
+        logger.info(f"[Random] 随机选中提示词: {self.selected_prompt_name}")
+        
+        # 通知用户选中的风格，注释掉后则不通知
+        # await self.send_text(f"🎲 随机抽中风格: **{self.selected_prompt_name}**\n正在生成...")
+        
+        return await super().execute()
+
+    async def get_prompt(self) -> Optional[str]:
+        return self.selected_prompt_content

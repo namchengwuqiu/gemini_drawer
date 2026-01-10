@@ -43,7 +43,8 @@ class HelpCommand(BaseCommand):
         user_text += "【自定义风格】\n"
         user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片。\n"
         user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图。\n"
-        user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用。\n\n"
+        user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用。\n"
+        user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图。\n\n"
         user_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容。\n\n"
         user_text += "【使用方法】\n1. 回复图片 + 指令\n2. @用户 + 指令\n3. 发送图片 + 指令\n4. 直接发送指令 (使用自己头像)"
         
