@@ -39,7 +39,7 @@ from .actions import ImageGenerateAction, SelfieGenerateAction
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.6.4"
+    plugin_version: str = "1.6.5"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -74,7 +74,10 @@ class GeminiDrawerPlugin(BasePlugin):
                 "调整头发，看起来害羞",
                 "穿着睡衣，抱着枕头",
                 "随机生成符合图片人物的自拍动作"
-            ], description="随机动作列表")
+            ], description="随机动作列表"),
+            "polish_enable": ConfigField(type=bool, default=True, description="是否启用提示词润色"),
+            "polish_model": ConfigField(type=str, default="replyer", description="润色使用的文本模型名称"),
+            "polish_template": ConfigField(type=str, default="请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的提示词，不要输出其他内容。原始主题：'{original_prompt}'", description="润色提示词模板")
         },
         "api": {
             "enable_google": ConfigField(type=bool, default=True, description="是否启用Google官方API"),

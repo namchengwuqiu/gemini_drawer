@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.6.4
+> **Version:** 1.6.5
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在CHANGELOG.md中查看。
 
@@ -133,6 +133,9 @@ pip install -r requirements.txt
 *   `selfie.reference_image_path` (字符串, 默认 `"selfie_base.jpg"`): 人设底图文件名 (放入插件自动生成的 images 目录)。
 *   `selfie.base_prompt` (字符串, 默认 `""`): 人设基础描述词 (可选)。
 *   `selfie.random_actions` (数组): 随机场景/动作列表。
+*   `selfie.polish_enable` (布尔值, 默认 `true`): 是否启用提示词润色 🆕。
+*   `selfie.polish_model` (字符串, 默认 `"replyer"`): 润色使用的文本模型名称 🆕。
+*   `selfie.polish_template` (字符串): 润色提示词模板 🆕。
 
 ## 📸 自拍与照片生成
 插件支持通过自然语言请求 Bot 发送“自拍”。

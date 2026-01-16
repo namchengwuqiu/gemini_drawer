@@ -4,7 +4,7 @@ import asyncio
 from typing import Tuple, List, Dict, Optional, Any
 from datetime import datetime
 
-from src.plugin_system.apis import message_api
+from src.plugin_system.apis import message_api, llm_api
 from src.plugin_system import BaseAction, ActionActivationType
 from src.common.logger import get_logger
 
@@ -185,6 +185,46 @@ class SelfieGenerateAction(BaseAction):
     # 无需特定的参数提取，只需要触发即可
     action_parameters: Dict[str, Any] = {}
 
+    async def _polish_selfie_prompt(self, original_prompt: str) -> str:
+        """使用 LLM 模型润色自拍提示词"""
+        if not self.get_config("selfie.polish_enable", False):
+            return original_prompt
+        
+        try:
+            models = llm_api.get_available_models()
+            model_name = self.get_config("selfie.polish_model", "replyer")
+            model_config = models.get(model_name)
+            
+            if not model_config:
+                logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
+                return original_prompt
+            
+            polish_template = self.get_config(
+                "selfie.polish_template",
+                "请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的提示词，不要输出其他内容。原始主题：'{original_prompt}'"
+            )
+            prompt = polish_template.format(original_prompt=original_prompt)
+            
+            logger.info(f"正在润色自拍提示词: {original_prompt}")
+            success, polished_prompt, reasoning, used_model = await llm_api.generate_with_model(
+                prompt=prompt,
+                model_config=model_config,
+                request_type="gemini_drawer.selfie_polish",
+                temperature=0.5,
+                max_tokens=512
+            )
+            
+            if success and polished_prompt:
+                logger.debug(f"润色完成: {original_prompt} -> {polished_prompt.strip()}")
+                return polished_prompt.strip()
+            else:
+                logger.warning(f"润色失败，使用原始提示词")
+                return original_prompt
+                
+        except Exception as e:
+            logger.error(f"润色提示词时出错: {e}")
+            return original_prompt
+
     async def execute(self) -> Tuple[bool, str]:
         # 检查是否是指令触发
         if is_command_message(self.action_message):
@@ -221,6 +261,9 @@ class SelfieGenerateAction(BaseAction):
             else:
                 full_prompt = action
             
+            # 润色提示词
+            full_prompt = await self._polish_selfie_prompt(full_prompt)
+            
             # 使用 process_drawing_api_request 进行绘图 (图生图模式)
             logger.info(f"Generating selfie with prompt: {full_prompt}")
             
@@ -249,7 +292,7 @@ class SelfieGenerateAction(BaseAction):
             # 获取 proxy
             proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
             
-            # await self.send_text("我去找照片，等一下...")
+            await self.send_text("我现在就去拍一张，请稍等一下...")
             
             # 调用绘图逻辑
             img_data, error = await process_drawing_api_request(
