@@ -81,20 +81,25 @@ class ChannelListKeysCommand(BaseAdminCommand):
                 grouped_keys[ctype] = []
             grouped_keys[ctype].append(k)
 
-        msg_lines = ["📋 **渠道 Key 状态列表**", "--------------------"]
+        bot_name = "Gemini Drawer"
+        header_text = "📋 **渠道 Key 状态列表**\n--------------------"
+        header_content = [(ReplyContentType.TEXT, header_text)]
+        nodes_to_send = [("1", bot_name, header_content)]
+
         for channel, keys in grouped_keys.items():
             active_count = sum(1 for k in keys if k['status'] == 'active')
-            msg_lines.append(f"🔷 **{channel}** (可用: {active_count}/{len(keys)})")
+            channel_lines = [f"🔷 **{channel}** (可用: {active_count}/{len(keys)})"]
             for i, k in enumerate(keys):
                 status_icon = "✅" if k['status'] == 'active' else "❌"
                 masked_key = k['value'][:8] + "..." + k['value'][-4:]
                 err_info = f"(错误: {k.get('error_count', 0)})" if k.get('error_count', 0) > 0 else ""
                 max_errors = k.get('max_errors', 5)
                 limit_info = f" [上限: {'∞' if max_errors == -1 else max_errors}]"
-                msg_lines.append(f"  {i+1}. {status_icon} `{masked_key}`{limit_info} {err_info}")
-            msg_lines.append("")
+                channel_lines.append(f"  {i+1}. {status_icon} `{masked_key}`{limit_info} {err_info}")
+            channel_content = [(ReplyContentType.TEXT, "\n".join(channel_lines))]
+            nodes_to_send.append(("1", bot_name, channel_content))
 
-        await self.send_text("\n".join(msg_lines))
+        await self.send_forward(nodes_to_send)
         return True, "查询成功", True
 
 class ChannelResetKeyCommand(BaseAdminCommand):
@@ -451,21 +456,32 @@ class ListChannelsCommand(BaseAdminCommand):
 
         api_config = config_data.get("api", {})
         channels_config = data_manager.get_channels()
-        msg_lines = ["📋 **当前渠道状态列表**", "--------------------"]
+        
+        bot_name = "Gemini Drawer"
+        header_text = "📋 **当前渠道状态列表**\n--------------------"
+        header_content = [(ReplyContentType.TEXT, header_text)]
+        nodes_to_send = [("1", bot_name, header_content)]
 
-        msg_lines.append(f"{'✅' if api_config.get('enable_google', True) else '❌'} **Google** (官方Key)")
-        msg_lines.append(f"{'✅' if api_config.get('enable_lmarena', False) else '❌'} **LMArena** (免费接口)")
+        # 内置渠道
+        builtin_lines = []
+        builtin_lines.append(f"{'✅' if api_config.get('enable_google', True) else '❌'} **Google** (官方Key)")
+        builtin_lines.append(f"{'✅' if api_config.get('enable_lmarena', False) else '❌'} **LMArena** (免费接口)")
+        builtin_content = [(ReplyContentType.TEXT, "\n".join(builtin_lines))]
+        nodes_to_send.append(("1", bot_name, builtin_content))
 
+        # 自定义渠道
         if channels_config:
-            msg_lines.append("--------------------")
+            custom_lines = []
             for name, info in channels_config.items():
                 enabled = info.get("enabled", True) if isinstance(info, dict) else True
                 stream = info.get("stream", False) if isinstance(info, dict) else False
                 stream_info = " [流式]" if stream else ""
                 model_info = f" ({info['model']})" if isinstance(info, dict) and info.get("model") else ""
-                msg_lines.append(f"{'✅' if enabled else '❌'} **{name}**{model_info}{stream_info}")
+                custom_lines.append(f"{'✅' if enabled else '❌'} **{name}**{model_info}{stream_info}")
+            custom_content = [(ReplyContentType.TEXT, "\n".join(custom_lines))]
+            nodes_to_send.append(("1", bot_name, custom_content))
         
-        await self.send_text("\n".join(msg_lines))
+        await self.send_forward(nodes_to_send)
         return True, "查询成功", True
 
 class ChannelSetStreamCommand(BaseAdminCommand):

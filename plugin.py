@@ -39,7 +39,7 @@ from .actions import ImageGenerateAction, SelfieGenerateAction
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.6.5"
+    plugin_version: str = "1.6.6"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
