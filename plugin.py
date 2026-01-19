@@ -25,7 +25,7 @@ from src.plugin_system import BasePlugin, register_plugin, ComponentInfo, Config
 from .utils import fix_broken_toml_config, save_config_file, logger
 
 from .help_command import HelpCommand
-from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand, MultiImageDrawCommand, RandomPromptDrawCommand, VideoGenerateCommand
+from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand, MultiImageDrawCommand, RandomPromptDrawCommand, VideoGenerateCommand, TextToVideoCommand
 from .admin_commands import (
     ChannelAddKeyCommand, ChannelListKeysCommand, ChannelResetKeyCommand,
     ChannelDeleteKeyCommand, ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
@@ -180,6 +180,7 @@ class GeminiDrawerPlugin(BasePlugin):
             (MultiImageDrawCommand.get_command_info(), MultiImageDrawCommand),
             (RandomPromptDrawCommand.get_command_info(), RandomPromptDrawCommand),
             (VideoGenerateCommand.get_command_info(), VideoGenerateCommand),
+            (TextToVideoCommand.get_command_info(), TextToVideoCommand),
             (ChannelSetVideoCommand.get_command_info(), ChannelSetVideoCommand),
             (ImageGenerateAction.get_action_info(), ImageGenerateAction),
             (SelfieGenerateAction.get_action_info(), SelfieGenerateAction),

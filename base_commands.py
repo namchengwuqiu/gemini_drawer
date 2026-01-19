@@ -1138,8 +1138,13 @@ class BaseVideoCommand(BaseCommand, ABC):
     """
     视频生成命令基类
     仅使用标记为 is_video=True 的渠道进行视频生成
+    
+    子类通过设置 requires_image 属性控制是否需要图片输入：
+    - requires_image = True: 图生视频（需要图片）
+    - requires_image = False: 文生视频（纯文字）
     """
     permission: str = "user"
+    requires_image: bool = True  # 默认需要图片，子类可覆盖
 
     def _get_current_chat_id(self) -> Optional[str]:
         """获取当前聊天的 chat_id（使用 stream_id）"""
@@ -1185,21 +1190,30 @@ class BaseVideoCommand(BaseCommand, ABC):
         if not prompt:
             return True, "无效的Prompt", True
 
-        image_bytes = await self.get_source_image_bytes()
+        # 根据 requires_image 决定是否需要图片
+        image_bytes = None
+        base64_img = None
+        mime_type = None
         
-        if not image_bytes:
-            await self.send_text("❌ 视频生成需要一张图片作为输入！\n请回复图片或@用户或发送图片后使用此指令。")
-            return True, "缺少图片", True
-        
-        # 构造请求 payload (Gemini 格式)
-        image_bytes = convert_if_gif(image_bytes)
-        base64_img = base64.b64encode(image_bytes).decode('utf-8')
-        mime_type = get_image_mime_type(image_bytes)
-        
-        parts = [
-            {"inline_data": {"mime_type": mime_type, "data": base64_img}},
-            {"text": prompt}
-        ]
+        if self.requires_image:
+            image_bytes = await self.get_source_image_bytes()
+            
+            if not image_bytes:
+                await self.send_text("❌ 图生视频需要一张图片作为输入！\n请回复图片或@用户或发送图片后使用此指令。")
+                return True, "缺少图片", True
+            
+            # 构造请求 payload (带图片)
+            image_bytes = convert_if_gif(image_bytes)
+            base64_img = base64.b64encode(image_bytes).decode('utf-8')
+            mime_type = get_image_mime_type(image_bytes)
+            
+            parts = [
+                {"inline_data": {"mime_type": mime_type, "data": base64_img}},
+                {"text": prompt}
+            ]
+        else:
+            # 纯文字 payload
+            parts = [{"text": prompt}]
 
         payload = {
             "contents": [{"parts": parts}],
@@ -1298,18 +1312,19 @@ class BaseVideoCommand(BaseCommand, ABC):
                 if is_openai:
                     headers["Authorization"] = f"Bearer {api_key}"
                     
-                    openai_messages = [
-                        {
-                            "role": "user",
-                            "content": [
-                                {"type": "text", "text": user_text_prompt},
-                                {
-                                    "type": "image_url",
-                                    "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
-                                }
-                            ]
-                        }
-                    ]
+                    # 根据是否有图片构建不同的消息内容
+                    if self.requires_image and base64_img:
+                        content_list = [
+                            {"type": "text", "text": user_text_prompt},
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
+                            }
+                        ]
+                    else:
+                        content_list = [{"type": "text", "text": user_text_prompt}]
+                    
+                    openai_messages = [{"role": "user", "content": content_list}]
 
                     model_name = endpoint.get("model", "video-preview")
                     openai_payload = {

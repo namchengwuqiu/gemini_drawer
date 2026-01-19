@@ -160,25 +160,52 @@ class RandomPromptDrawCommand(BaseDrawCommand):
 
 
 class VideoGenerateCommand(BaseVideoCommand):
-    """视频生成命令 - 根据图片和提示词生成视频"""
+    """图生视频命令 - 根据图片和提示词生成视频"""
     command_name: str = "gemini_video_generate"
-    command_description: str = "视频生成：根据图片和描述生成视频"
-    command_pattern: str = r".*/视频.*"
+    command_description: str = "图生视频：根据图片和描述生成视频"
+    command_pattern: str = r".*/图生视频.*"
+    requires_image: bool = True  # 需要图片输入
 
     async def get_prompt(self) -> Optional[str]:
         # 移除 CQ 码以获取纯文本
         cleaned_message = re.sub(r'\[CQ:.*?\]', '', self.message.raw_message).strip()
-        command_pattern = "/视频"
+        command_pattern = "/图生视频"
         command_pos = cleaned_message.find(command_pattern)
         
         if command_pos == -1:
-            await self.send_text("❌ 未找到 /视频 指令。")
+            await self.send_text("❌ 未找到 /图生视频 指令。")
             return None
             
         prompt_text = cleaned_message[command_pos + len(command_pattern):].strip()
         
         if not prompt_text:
-            await self.send_text("❌ 请输入视频描述！\n例如：`/视频 让画面动起来`")
+            await self.send_text("❌ 请输入视频描述！\n例如：`/图生视频 让画面动起来`")
+            return None
+            
+        return prompt_text
+
+
+class TextToVideoCommand(BaseVideoCommand):
+    """文生视频命令 - 根据文字描述生成视频"""
+    command_name: str = "gemini_text_to_video"
+    command_description: str = "文生视频：根据文字描述生成视频"
+    command_pattern: str = r".*/文生视频.*"
+    requires_image: bool = False  # 不需要图片输入
+
+    async def get_prompt(self) -> Optional[str]:
+        # 移除 CQ 码以获取纯文本
+        cleaned_message = re.sub(r'\[CQ:.*?\]', '', self.message.raw_message).strip()
+        command_pattern = "/文生视频"
+        command_pos = cleaned_message.find(command_pattern)
+        
+        if command_pos == -1:
+            await self.send_text("❌ 未找到 /文生视频 指令。")
+            return None
+            
+        prompt_text = cleaned_message[command_pos + len(command_pattern):].strip()
+        
+        if not prompt_text:
+            await self.send_text("❌ 请输入视频描述！\n例如：`/文生视频 一只可爱的小猫在草地上打滚`")
             return None
             
         return prompt_text
