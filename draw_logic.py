@@ -179,21 +179,27 @@ async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
             "stream": True
         })
 
-    # 2. 自定义渠道
+    # 2. 自定义渠道 (排除视频渠道)
     custom_channels = data_manager.get_channels()
     for name, channel_info in custom_channels.items():
         c_url = ""
         c_key = ""
         c_model = None
         c_enabled = True
+        c_is_video = False
         
         if isinstance(channel_info, dict):
             c_url = channel_info.get("url")
             c_key = channel_info.get("key")
             c_model = channel_info.get("model")
             c_enabled = channel_info.get("enabled", True)
+            c_is_video = channel_info.get("is_video", False)
         elif isinstance(channel_info, str) and ":" in channel_info:
             c_url, c_key = channel_info.rsplit(":", 1)
+        
+        # 跳过视频渠道
+        if c_is_video:
+            continue
         
         if c_url and c_key and c_enabled:
             c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
@@ -230,11 +236,17 @@ async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
             c_enabled = True
             c_url = ""
             c_model = None
+            c_is_video = False
             
             if isinstance(channel_info, dict):
                 c_url = channel_info.get("url")
                 c_model = channel_info.get("model")
                 c_enabled = channel_info.get("enabled", True)
+                c_is_video = channel_info.get("is_video", False)
+            
+            # 跳过视频渠道
+            if c_is_video:
+                continue
             
             if c_enabled and c_url:
                 c_stream = channel_info.get("stream", False)

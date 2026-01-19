@@ -351,14 +351,20 @@ class BaseDrawCommand(BaseCommand, ABC):
             c_key = ""
             c_model = None
             c_enabled = True
+            c_is_video = False
             
             if isinstance(channel_info, dict):
                 c_url = channel_info.get("url")
                 c_key = channel_info.get("key")
                 c_model = channel_info.get("model")
                 c_enabled = channel_info.get("enabled", True)
+                c_is_video = channel_info.get("is_video", False)
             elif isinstance(channel_info, str) and ":" in channel_info:
                 c_url, c_key = channel_info.rsplit(":", 1)
+            
+            # 跳过视频渠道
+            if c_is_video:
+                continue
             
             if c_url and c_key and c_enabled:
                 c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
@@ -393,11 +399,17 @@ class BaseDrawCommand(BaseCommand, ABC):
                 c_enabled = True
                 c_url = ""
                 c_model = None
+                c_is_video = False
                 
                 if isinstance(channel_info, dict):
                     c_url = channel_info.get("url")
                     c_model = channel_info.get("model")
                     c_enabled = channel_info.get("enabled", True)
+                    c_is_video = channel_info.get("is_video", False)
+                
+                # 跳过视频渠道
+                if c_is_video:
+                    continue
                 
                 if c_enabled and c_url:
                     c_stream = channel_info.get("stream", False)
@@ -831,14 +843,20 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
             c_key = ""
             c_model = None
             c_enabled = True
+            c_is_video = False
             
             if isinstance(channel_info, dict):
                 c_url = channel_info.get("url")
                 c_key = channel_info.get("key")
                 c_model = channel_info.get("model")
                 c_enabled = channel_info.get("enabled", True)
+                c_is_video = channel_info.get("is_video", False)
             elif isinstance(channel_info, str) and ":" in channel_info:
                 c_url, c_key = channel_info.rsplit(":", 1)
+            
+            # 跳过视频渠道
+            if c_is_video:
+                continue
             
             if c_url and c_key and c_enabled:
                 c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
@@ -873,11 +891,17 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 c_enabled = True
                 c_url = ""
                 c_model = None
+                c_is_video = False
                 
                 if isinstance(channel_info, dict):
                     c_url = channel_info.get("url")
                     c_model = channel_info.get("model")
                     c_enabled = channel_info.get("enabled", True)
+                    c_is_video = channel_info.get("is_video", False)
+                
+                # 跳过视频渠道
+                if c_is_video:
+                    continue
                 
                 if c_enabled and c_url:
                     c_stream = channel_info.get("stream", False)
@@ -1440,17 +1464,25 @@ class BaseVideoCommand(BaseCommand, ABC):
                                 if result.get("status") == "ok" or result.get("retcode") == 0:
                                     logger.info(f"[视频] 视频发送成功")
                                     await self.send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")
+                                    return True, "视频生成成功", True
                                 else:
-                                    raise Exception(f"napcat API 返回错误: {result}")
+                                    # 发送返回错误但视频已生成，不重试
+                                    logger.error(f"[视频] napcat返回错误: {result}")
+                                    await self.send_text(f"❌ 视频发送失败: {result}")
+                                    return True, "视频发送失败", True
                             else:
-                                raise Exception(f"napcat API 返回错误: {response.status_code} - {response.text}")
+                                # HTTP错误但视频已生成，不重试
+                                logger.error(f"[视频] napcat HTTP错误: {response.status_code}")
+                                await self.send_text(f"❌ 视频发送失败: HTTP {response.status_code}")
+                                return True, "视频发送失败", True
                         
                     except Exception as e:
+                        # 视频已生成但发送过程出错，不重试
                         logger.error(f"[视频] 发送视频失败: {e}")
                         await self.send_text(f"❌ 视频发送失败: {e}")
+                        return True, "视频发送失败", True
 
-                    return True, "视频生成成功", True 
-
+                # 如果没有提取到视频数据，继续尝试下一个端点
                 if not video_data:
                     raise Exception("未能从API响应中获取视频数据")
 
