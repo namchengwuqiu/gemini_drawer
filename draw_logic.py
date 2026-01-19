@@ -397,7 +397,7 @@ async def process_drawing_api_request(
             
             if use_stream:
                 try:
-                    async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0) as client:
+                    async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0, follow_redirects=True) as client:
                         async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
                             if response.status_code != 200:
                                 raw_body = await response.aread()
@@ -427,7 +427,7 @@ async def process_drawing_api_request(
             
             else:
                 try:
-                    async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
+                    async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
                         response = await client.post(request_url, json=current_payload, headers=headers)
                 except httpx.RequestError as e:
                     logger.error(f"httpx.RequestError: {e}")

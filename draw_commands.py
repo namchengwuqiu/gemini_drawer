@@ -26,7 +26,7 @@ UniversalPromptCommand (/+ 指令名):
 import re
 import random
 from typing import Tuple, Optional
-from .base_commands import BaseDrawCommand, BaseMultiImageDrawCommand
+from .base_commands import BaseDrawCommand, BaseMultiImageDrawCommand, BaseVideoCommand
 from .managers import data_manager
 from .utils import logger
 
@@ -157,3 +157,28 @@ class RandomPromptDrawCommand(BaseDrawCommand):
         if self.selected_prompt_name:
             return f"🎲 {self.selected_prompt_name}"
         return None
+
+
+class VideoGenerateCommand(BaseVideoCommand):
+    """视频生成命令 - 根据图片和提示词生成视频"""
+    command_name: str = "gemini_video_generate"
+    command_description: str = "视频生成：根据图片和描述生成视频"
+    command_pattern: str = r".*/视频.*"
+
+    async def get_prompt(self) -> Optional[str]:
+        # 移除 CQ 码以获取纯文本
+        cleaned_message = re.sub(r'\[CQ:.*?\]', '', self.message.raw_message).strip()
+        command_pattern = "/视频"
+        command_pos = cleaned_message.find(command_pattern)
+        
+        if command_pos == -1:
+            await self.send_text("❌ 未找到 /视频 指令。")
+            return None
+            
+        prompt_text = cleaned_message[command_pos + len(command_pattern):].strip()
+        
+        if not prompt_text:
+            await self.send_text("❌ 请输入视频描述！\n例如：`/视频 让画面动起来`")
+            return None
+            
+        return prompt_text

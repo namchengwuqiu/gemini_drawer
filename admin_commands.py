@@ -475,9 +475,11 @@ class ListChannelsCommand(BaseAdminCommand):
             for name, info in channels_config.items():
                 enabled = info.get("enabled", True) if isinstance(info, dict) else True
                 stream = info.get("stream", False) if isinstance(info, dict) else False
+                is_video = info.get("is_video", False) if isinstance(info, dict) else False
                 stream_info = " [流式]" if stream else ""
+                video_info = " [视频]" if is_video else ""
                 model_info = f" ({info['model']})" if isinstance(info, dict) and info.get("model") else ""
-                custom_lines.append(f"{'✅' if enabled else '❌'} **{name}**{model_info}{stream_info}")
+                custom_lines.append(f"{'✅' if enabled else '❌'} **{name}**{model_info}{stream_info}{video_info}")
             custom_content = [(ReplyContentType.TEXT, "\n".join(custom_lines))]
             nodes_to_send.append(("1", bot_name, custom_content))
         
@@ -512,4 +514,34 @@ class ChannelSetStreamCommand(BaseAdminCommand):
         channel_info["stream"] = stream_value
         data_manager.update_channel(channel_name, channel_info)
         await self.send_text(f"✅ 渠道 `{channel_name}` 流式请求已{'启用' if stream_value else '禁用'}！")
+        return True, "设置成功", True
+
+class ChannelSetVideoCommand(BaseAdminCommand):
+    command_name: str = "gemini_channel_set_video"
+    command_description: str = "设置渠道是否用于视频生成"
+    command_pattern: str = r"^/渠道设置视频"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        content = self.message.raw_message.replace("/渠道设置视频", "", 1).strip()
+        parts = content.split()
+        if len(parts) != 2:
+            await self.send_text("❌ 参数错误！格式：`/渠道设置视频 <渠道> <true|false>`")
+            return True, "参数不足", True
+
+        channel_name, video_str = parts
+        video_value = video_str.lower() in ['true', '1', 'yes', '是', '开启', '启用']
+        
+        channels = data_manager.get_channels()
+        if channel_name not in channels:
+            await self.send_text(f"❌ 未找到渠道 `{channel_name}`。")
+            return True, "渠道不存在", True
+        
+        channel_info = channels[channel_name]
+        if isinstance(channel_info, str):
+            url, key = channel_info.rsplit(":", 1)
+            channel_info = {"url": url, "key": key}
+        
+        channel_info["is_video"] = video_value
+        data_manager.update_channel(channel_name, channel_info)
+        await self.send_text(f"✅ 渠道 `{channel_name}` 视频模式已{'启用' if video_value else '禁用'}！")
         return True, "设置成功", True

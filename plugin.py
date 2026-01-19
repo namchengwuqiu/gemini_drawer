@@ -25,13 +25,13 @@ from src.plugin_system import BasePlugin, register_plugin, ComponentInfo, Config
 from .utils import fix_broken_toml_config, save_config_file, logger
 
 from .help_command import HelpCommand
-from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand, MultiImageDrawCommand, RandomPromptDrawCommand
+from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromptCommand, MultiImageDrawCommand, RandomPromptDrawCommand, VideoGenerateCommand
 from .admin_commands import (
     ChannelAddKeyCommand, ChannelListKeysCommand, ChannelResetKeyCommand,
     ChannelDeleteKeyCommand, ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
     AddPromptCommand, DeletePromptCommand, ViewPromptCommand,
     AddChannelCommand, DeleteChannelCommand, ToggleChannelCommand,
-    ListChannelsCommand, ChannelSetStreamCommand
+    ListChannelsCommand, ChannelSetStreamCommand, ChannelSetVideoCommand
 )
 
 from .actions import ImageGenerateAction, SelfieGenerateAction
@@ -39,7 +39,7 @@ from .actions import ImageGenerateAction, SelfieGenerateAction
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.6.6"
+    plugin_version: str = "1.6.8"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -85,7 +85,9 @@ class GeminiDrawerPlugin(BasePlugin):
             "enable_lmarena": ConfigField(type=bool, default=False, description="是否启用LMArena API"),
             "lmarena_api_url": ConfigField(type=str, default="http://xxx:666/v1/chat/completions", description="LMArena API的基础URL"),
             "lmarena_api_key": ConfigField(type=str, default="", description="LMArena API密钥 (可选, 使用Bearer Token)"),
-            "lmarena_model_name": ConfigField(type=str, default="gemini-3-pro-image-preview", description="LMArena 使用的模型名称")
+            "lmarena_model_name": ConfigField(type=str, default="gemini-3-pro-image-preview", description="LMArena 使用的模型名称"),
+            "napcat_host": ConfigField(type=str, default="napcat", description="NapCat HTTP服务器地址（Docker环境下设为'napcat'或容器名）"),
+            "napcat_port": ConfigField(type=int, default=3033, description="NapCat 正向HTTP端口，用于发送视频文件")
         },
         "behavior": {
             "admin_only_mode": ConfigField(type=bool, default=False, description="管理员专用模式：开启后仅管理员可使用绘图功能，其他用户会收到'管理员已关闭功能'提示"),
@@ -177,6 +179,8 @@ class GeminiDrawerPlugin(BasePlugin):
             (UniversalPromptCommand.get_command_info(), UniversalPromptCommand),
             (MultiImageDrawCommand.get_command_info(), MultiImageDrawCommand),
             (RandomPromptDrawCommand.get_command_info(), RandomPromptDrawCommand),
+            (VideoGenerateCommand.get_command_info(), VideoGenerateCommand),
+            (ChannelSetVideoCommand.get_command_info(), ChannelSetVideoCommand),
             (ImageGenerateAction.get_action_info(), ImageGenerateAction),
             (SelfieGenerateAction.get_action_info(), SelfieGenerateAction),
         ]

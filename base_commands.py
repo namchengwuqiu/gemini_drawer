@@ -41,7 +41,7 @@ from src.common.logger import get_logger
 
 from .utils import (
     download_image, convert_if_gif, get_image_mime_type, 
-    safe_json_dumps, extract_image_data
+    safe_json_dumps, extract_image_data, extract_video_data
 )
 
 from .managers import key_manager, data_manager
@@ -526,7 +526,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                 
                 if use_stream:
                     try:
-                        async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0) as client:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0, follow_redirects=True) as client:
                             async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
                                 if response.status_code != 200:
                                     raw_body = await response.aread()
@@ -562,7 +562,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                 
                 else:
                     try:
-                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
                             response = await client.post(request_url, json=current_payload, headers=headers)
                     except httpx.RequestError as e:
                         logger.error(f"httpx.RequestError for endpoint {endpoint_type} ({request_url}): {e}")
@@ -994,7 +994,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 
                 if use_stream:
                     try:
-                        async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0) as client:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0, follow_redirects=True) as client:
                             async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
                                 if response.status_code != 200:
                                     raw_body = await response.aread()
@@ -1021,7 +1021,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 
                 else:
                     try:
-                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0) as client:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
                             response = await client.post(request_url, json=current_payload, headers=headers)
                     except httpx.RequestError as e:
                         logger.error(f"httpx.RequestError: {e}")
@@ -1131,4 +1131,321 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
         await self.send_text(fail_msg)
         asyncio.create_task(self._delayed_recall_fail_message(fail_msg_send_time, fail_msg))
         await self._recall_status_messages(status_msg_start_time)
+        return True, "所有尝试均失败", True
+
+
+class BaseVideoCommand(BaseCommand, ABC):
+    """
+    视频生成命令基类
+    仅使用标记为 is_video=True 的渠道进行视频生成
+    """
+    permission: str = "user"
+
+    def _get_current_chat_id(self) -> Optional[str]:
+        """获取当前聊天的 chat_id（使用 stream_id）"""
+        try:
+            chat_stream = self.message.chat_stream
+            if chat_stream:
+                stream_id = getattr(chat_stream, 'stream_id', None)
+                if stream_id:
+                    return stream_id
+            return None
+        except Exception:
+            return None
+
+    async def get_source_image_bytes(self) -> Optional[bytes]:
+        """获取源图片，复用 draw_logic 中的逻辑"""
+        proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
+        image_bytes = await extract_source_image(self.message, proxy, logger)
+        return image_bytes
+
+    @abstractmethod
+    async def get_prompt(self) -> Optional[str]:
+        raise NotImplementedError
+
+    async def execute(self) -> Tuple[bool, Optional[str], bool]:
+        if not self.get_config("general.enable_gemini_drawer", True):
+            return True, "Plugin disabled", False
+        
+        # 检查管理员专用模式
+        if self.get_config("behavior.admin_only_mode", False):
+            user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
+            if user_id_from_msg:
+                str_user_id = str(user_id_from_msg)
+                admin_list = self.get_config("general.admins", [])
+                str_admin_list = [str(admin) for admin in admin_list]
+                
+                if str_user_id not in str_admin_list:
+                    await self.send_text("⚠️ 管理员已关闭绘图功能")
+                    return True, "管理员专用模式", True
+        
+        start_time = datetime.now()
+
+        prompt = await self.get_prompt()
+        if not prompt:
+            return True, "无效的Prompt", True
+
+        image_bytes = await self.get_source_image_bytes()
+        
+        if not image_bytes:
+            await self.send_text("❌ 视频生成需要一张图片作为输入！\n请回复图片或@用户或发送图片后使用此指令。")
+            return True, "缺少图片", True
+        
+        # 构造请求 payload (Gemini 格式)
+        image_bytes = convert_if_gif(image_bytes)
+        base64_img = base64.b64encode(image_bytes).decode('utf-8')
+        mime_type = get_image_mime_type(image_bytes)
+        
+        parts = [
+            {"inline_data": {"mime_type": mime_type, "data": base64_img}},
+            {"text": prompt}
+        ]
+
+        payload = {
+            "contents": [{"parts": parts}],
+            "safetySettings": [
+                {
+                    "category": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+                    "threshold": "BLOCK_NONE"
+                }
+            ]
+        }
+
+        # 只收集标记为 is_video=True 的渠道
+        endpoints_to_try = []
+        custom_channels = data_manager.get_channels()
+        
+        for name, channel_info in custom_channels.items():
+            if not isinstance(channel_info, dict):
+                continue
+            
+            # 只使用 is_video=True 的渠道
+            if not channel_info.get("is_video", False):
+                continue
+            
+            c_url = channel_info.get("url")
+            c_enabled = channel_info.get("enabled", True)
+            c_model = channel_info.get("model")
+            
+            if not c_url or not c_enabled:
+                continue
+            
+            # 检查该渠道是否有可用的 Key
+            c_key = channel_info.get("key")
+            if c_key:
+                c_stream = channel_info.get("stream", False)
+                endpoints_to_try.append({
+                    "type": f"custom_{name}",
+                    "url": c_url,
+                    "key": c_key,
+                    "model": c_model,
+                    "stream": c_stream
+                })
+            
+            # 检查 key_manager 中该渠道的 keys
+            for key_info in key_manager.get_all_keys():
+                if key_info.get('status') != 'active':
+                    continue
+                if key_info.get('type') == name:
+                    c_stream = channel_info.get("stream", False)
+                    endpoints_to_try.append({
+                        "type": f"custom_{name}",
+                        "url": c_url,
+                        "key": key_info['value'],
+                        "model": c_model,
+                        "stream": c_stream
+                    })
+
+        if not endpoints_to_try:
+            await self.send_text("❌ 未配置视频生成渠道。\n请使用 `/渠道设置视频 <渠道名> true` 启用视频渠道。")
+            return True, "无视频渠道", True
+
+        # 发送开始提示
+        await self.send_text("🎬 开始生成视频，请稍候...")
+
+        last_error = ""
+        proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
+
+        for i, endpoint in enumerate(endpoints_to_try):
+            api_url = endpoint["url"]
+            api_key = endpoint["key"]
+            endpoint_type = endpoint["type"]
+            
+            logger.info(f"[视频] 尝试第 {i+1}/{len(endpoints_to_try)} 个端点: {endpoint_type} ({api_url})")
+
+            headers = {"Content-Type": "application/json"}
+            request_url = api_url
+
+            try:
+                current_payload = payload.copy()
+                client_proxy = proxy 
+                
+                is_openai = False
+                
+                # 判断 API 类型
+                if "/chat/completions" in api_url:
+                    is_openai = True
+                    request_url = api_url
+                elif "generateContent" in api_url:
+                    is_openai = False
+                    request_url = f"{api_url}?key={api_key}"
+                else:
+                    logger.warning(f"[视频] 无法识别的API地址格式: {api_url}，跳过。")
+                    continue
+
+                user_text_prompt = prompt
+                
+                if is_openai:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                    
+                    openai_messages = [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": user_text_prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
+                                }
+                            ]
+                        }
+                    ]
+
+                    model_name = endpoint.get("model", "video-preview")
+                    openai_payload = {
+                        "model": model_name,
+                        "messages": openai_messages,
+                        "stream": endpoint.get("stream", False),
+                    }
+                    current_payload = openai_payload
+
+                logger.info(f"[视频] 准备向 {endpoint_type} 端点发送请求。")
+                
+                video_data = None
+                use_stream = endpoint.get("stream", False)
+                
+                if use_stream:
+                    try:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=300.0, follow_redirects=True) as client:
+                            async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
+                                if response.status_code != 200:
+                                    raw_body = await response.aread()
+                                    raise Exception(f"API请求失败, 状态码: {response.status_code} - {raw_body.decode('utf-8', 'ignore')}")
+
+                                async for line in response.aiter_lines():
+                                    line = line.strip()
+                                    if not line:
+                                        continue
+                                    if line.startswith(':'):
+                                        continue
+                                    
+                                    if line.startswith('data:'):
+                                        data_str = line.replace('data:', '').strip()
+                                        if data_str == "DONE" or data_str == "[DONE]":
+                                            break
+                                        
+                                        try:
+                                            response_data = json.loads(data_str)
+                                            extracted_data = await extract_video_data(response_data)
+                                            if extracted_data:
+                                                video_data = extracted_data
+                                                logger.info("[视频] 从SSE流中成功提取视频数据。")
+                                                break
+                                        except json.JSONDecodeError:
+                                            pass
+                    except Exception as e:
+                        logger.error(f"[视频] SSE 请求错误: {e}")
+                        raise
+                
+                else:
+                    try:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=300.0, follow_redirects=True) as client:
+                            response = await client.post(request_url, json=current_payload, headers=headers)
+                    except httpx.RequestError as e:
+                        logger.error(f"[视频] httpx.RequestError: {e}")
+                        raise
+
+                    if response.status_code == 200:
+                        data = response.json()
+                        video_data = await extract_video_data(data)
+                        if not video_data:
+                            logger.warning(f"[视频] API 响应成功但未提取到视频。")
+                            raise Exception(f"API未返回视频数据")
+                    else:
+                        raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+
+                if video_data:
+                    key_manager.record_key_usage(api_key, True)
+                    
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    logger.info(f"[视频] 使用 {endpoint_type} 端点成功生成视频，耗时 {elapsed:.2f}s")
+                    
+                    try:
+                        # 获取群ID或用户ID
+                        group_id = None
+                        user_id = None
+                        
+                        if hasattr(self.message, 'message_info') and self.message.message_info:
+                            group_info = getattr(self.message.message_info, 'group_info', None)
+                            if group_info and hasattr(group_info, 'group_id') and group_info.group_id:
+                                group_id = str(group_info.group_id)
+                            
+                            user_info = getattr(self.message.message_info, 'user_info', None)
+                            if user_info and hasattr(user_info, 'user_id'):
+                                user_id = str(user_info.user_id)
+                        
+                        # 通过 napcat HTTP API 发送视频 (使用 base64 格式)
+                        napcat_host = self.get_config("api.napcat_host", "napcat")
+                        napcat_port = self.get_config("api.napcat_port", 3033)
+                        
+                        # 使用 base64:// 格式直接发送视频数据，避免 Docker 容器文件系统隔离问题
+                        video_base64_uri = f"base64://{video_data}"
+                        
+                        if group_id:
+                            api_url = f"http://{napcat_host}:{napcat_port}/send_group_msg"
+                            request_data = {
+                                "group_id": group_id,
+                                "message": [{"type": "video", "data": {"file": video_base64_uri}}]
+                            }
+                        elif user_id:
+                            api_url = f"http://{napcat_host}:{napcat_port}/send_private_msg"
+                            request_data = {
+                                "user_id": user_id,
+                                "message": [{"type": "video", "data": {"file": video_base64_uri}}]
+                            }
+                        else:
+                            raise Exception("无法确定群ID或用户ID")
+                        
+                        logger.info(f"[视频] 发送视频请求到: {api_url}")
+                        
+                        async with httpx.AsyncClient(timeout=300.0) as client:
+                            response = await client.post(api_url, json=request_data)
+                            if response.status_code == 200:
+                                result = response.json()
+                                if result.get("status") == "ok" or result.get("retcode") == 0:
+                                    logger.info(f"[视频] 视频发送成功")
+                                    await self.send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")
+                                else:
+                                    raise Exception(f"napcat API 返回错误: {result}")
+                            else:
+                                raise Exception(f"napcat API 返回错误: {response.status_code} - {response.text}")
+                        
+                    except Exception as e:
+                        logger.error(f"[视频] 发送视频失败: {e}")
+                        await self.send_text(f"❌ 视频发送失败: {e}")
+
+                    return True, "视频生成成功", True 
+
+                if not video_data:
+                    raise Exception("未能从API响应中获取视频数据")
+
+            except Exception as e:
+                logger.warning(f"[视频] 端点 {endpoint_type} 尝试失败: {e}")
+                is_quota_error = "429" in str(e)
+                key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
+                last_error = str(e)
+                await asyncio.sleep(1)
+
+        elapsed = (datetime.now() - start_time).total_seconds()
+        await self.send_text(f"❌ 视频生成失败 ({elapsed:.2f}s)\n错误: {last_error}")
         return True, "所有尝试均失败", True

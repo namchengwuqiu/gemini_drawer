@@ -44,7 +44,8 @@ class HelpCommand(BaseCommand):
         user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片。\n"
         user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图。\n"
         user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用。\n"
-        user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图。\n\n"
+        user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图。\n"
+        user_text += "▪️ /视频 {描述词}: 图生视频，需配合图片使用。\n\n"
         user_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容。\n\n"
         user_text += "【使用方法】\n1. 回复图片 + 指令\n2. @用户 + 指令\n3. 发送图片 + 指令\n4. 直接发送指令 (使用自己头像)"
         
@@ -70,6 +71,7 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /启用渠道: 启用指定渠道\n"
             admin_text += "▪️ /禁用渠道: 禁用指定渠道\n"
             admin_text += "▪️ /渠道设置流式 {名称} {true|false}: 设置渠道是否使用流式请求\n"
+            admin_text += "▪️ /渠道设置视频 {名称} {true|false}: 设置渠道是否用于视频生成\n"
             admin_text += "▪️ /渠道列表: 查看所有渠道状态"
             
             nodes_to_send.append(("1", bot_name, [(ReplyContentType.TEXT, admin_text)]))

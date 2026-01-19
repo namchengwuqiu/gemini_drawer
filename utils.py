@@ -274,11 +274,25 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                         return image_url
 
                     # 匹配裸露的HTTP/HTTPS URL
-                    match_plain_url = re.search(r"https?://[^\s]+", content_text)
+                    # 优先匹配常见的图片后缀
+                    match_plain_url = re.search(r"https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|ico|tiff?)(?:\?[^\s]*)?", content_text, re.IGNORECASE)
                     if match_plain_url:
                         image_url = match_plain_url.group(0)
-                        logger.info(f"从响应中提取到裸图片URL: {image_url[:100]}...")
+                        logger.info(f"从响应中提取到裸图片URL(带后缀): {image_url[:100]}...")
                         return image_url
+                    
+                    # 如果没有带后缀的URL，再次尝试匹配所有URL，但在日志中标记风险
+                    # 这一步是为了兼容某些不带后缀的图片API（如某些重定向链接）
+                    # 但为了避免匹配到 dashboard 等页面，我们可以尝试排除一些关键词
+                    match_all_url = re.search(r"https?://[^\s]+", content_text)
+                    if match_all_url:
+                        possible_url = match_all_url.group(0)
+                        # 简单的逻辑排除非图片页面
+                        if not any(kw in possible_url.lower() for kw in ['dashboard', 'login', 'signin', 'register', 'admin']):
+                            logger.info(f"从响应中提取到裸可能是图片的URL: {possible_url[:100]}...")
+                            return possible_url
+                        else:
+                            logger.warning(f"跳过疑似非图片的URL: {possible_url}")
 
                     match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
                     if match_b64:
@@ -316,9 +330,84 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
     except Exception:
         return None
 
+async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
+    """从API响应中提取视频数据（Base64）
+    
+    支持的响应格式:
+    {
+        "choices": [{
+            "message": {
+                "content": "![image](data:video/mp4;base64,AAAAIGZ0eXBpc29tAA..."
+            }
+        }]
+    }
+    
+    Returns:
+        base64 编码的视频数据字符串，或 None
+    """
+    try:
+        if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
+            choice = response_data["choices"][0]
+            content_data = None
+
+            # Handle streaming response with 'delta'
+            delta = choice.get("delta")
+            if delta and "content" in delta:
+                content_data = delta["content"]
+            
+            # Handle non-streaming response with 'message'
+            message = choice.get("message")
+            if content_data is None and message:
+                if "content" in message:
+                    content_data = message["content"]
+
+            if content_data is not None and isinstance(content_data, str):
+                # 匹配 markdown 格式的视频 data URL
+                # 格式: ![image](data:video/mp4;base64,...)
+                match_video = re.search(r"!\[.*?\]\(data:video/[^;]+;base64,([a-zA-Z0-9+/=\n]+)\)", content_data)
+                if match_video:
+                    logger.info("从响应中提取到视频 base64 数据 (markdown 格式)")
+                    return match_video.group(1)
+                
+                # 匹配裸露的 data URL 格式
+                match_video_raw = re.search(r"data:video/[^;]+;base64,([a-zA-Z0-9+/=\n]+)", content_data)
+                if match_video_raw:
+                    logger.info("从响应中提取到视频 base64 数据 (裸 data URL 格式)")
+                    return match_video_raw.group(1)
+        
+        # Gemini 格式响应解析
+        candidates = response_data.get("candidates")
+        if isinstance(candidates, list) and candidates:
+            content = candidates[0].get("content")
+            if isinstance(content, dict):
+                parts = content.get("parts")
+                if isinstance(parts, list):
+                    for part in parts:
+                        if isinstance(part, dict):
+                            inline_data = part.get("inlineData") or part.get("inline_data")
+                            if isinstance(inline_data, dict):
+                                mime_type = inline_data.get("mimeType") or inline_data.get("mime_type", "")
+                                if "video" in mime_type:
+                                    video_b64 = inline_data.get("data")
+                                    if isinstance(video_b64, str):
+                                        logger.info("从 Gemini 响应中提取到视频 base64 数据")
+                                        return video_b64
+                            
+                            # 检查文本内容中的视频 data URL
+                            text_content = part.get("text")
+                            if isinstance(text_content, str):
+                                match = re.search(r"data:video/[^;]+;base64,([a-zA-Z0-9+/=\n]+)", text_content)
+                                if match:
+                                    logger.info("从 Gemini 文本响应中提取到视频 base64 数据")
+                                    return match.group(1)
+        
+        return None
+    except Exception:
+        return None
+
 async def download_image(url: str, proxy: Optional[str]) -> Optional[bytes]:
     try:
-        async with httpx.AsyncClient(proxy=proxy, timeout=30.0) as client:
+        async with httpx.AsyncClient(proxy=proxy, timeout=30.0, follow_redirects=True) as client:
             response = await client.get(url)
             response.raise_for_status()
             return response.content
