@@ -1319,9 +1319,13 @@ class BaseVideoCommand(BaseCommand, ABC):
                 client_proxy = proxy 
                 
                 is_openai = False
+                is_doubao = False
                 
                 # 判断 API 类型
-                if "/chat/completions" in api_url:
+                if "volces.com" in api_url or "/contents/generations/tasks" in api_url:
+                    is_doubao = True
+                    request_url = api_url
+                elif "/chat/completions" in api_url:
                     is_openai = True
                     request_url = api_url
                 elif "generateContent" in api_url:
@@ -1333,7 +1337,99 @@ class BaseVideoCommand(BaseCommand, ABC):
 
                 user_text_prompt = prompt
                 
-                if is_openai:
+                # 豆包 API 处理 (异步任务模式)
+                if is_doubao:
+                    headers["Authorization"] = f"Bearer {api_key}"
+                    
+                    # 构建豆包格式的 content
+                    doubao_content = [{"type": "text", "text": user_text_prompt}]
+                    
+                    if self.requires_image and base64_img:
+                        doubao_content.append({
+                            "type": "image_url",
+                            "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
+                        })
+                    
+                    model_name = endpoint.get("model", "doubao-seedance-1-5-pro-251215")
+                    doubao_payload = {
+                        "model": model_name,
+                        "content": doubao_content
+                    }
+                    
+                    logger.info(f"[视频] 使用豆包 API 创建视频任务...")
+                    
+                    try:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=60.0, follow_redirects=True) as client:
+                            # 1. 创建任务
+                            response = await client.post(request_url, json=doubao_payload, headers=headers)
+                            if response.status_code != 200:
+                                raise Exception(f"创建任务失败: {response.status_code} - {response.text}")
+                            
+                            task_result = response.json()
+                            task_id = task_result.get("id")
+                            if not task_id:
+                                raise Exception(f"未获取到任务ID: {task_result}")
+                            
+                            logger.info(f"[视频] 豆包任务已创建: {task_id}")
+                            
+                            # 2. 轮询任务状态
+                            poll_url = f"{request_url}/{task_id}"
+                            max_polls = 120  # 最多轮询 120 次 (约 10 分钟)
+                            poll_interval = 5  # 每 5 秒轮询一次
+                            
+                            for poll_count in range(max_polls):
+                                await asyncio.sleep(poll_interval)
+                                
+                                poll_response = await client.get(poll_url, headers=headers)
+                                if poll_response.status_code != 200:
+                                    logger.warning(f"[视频] 轮询失败: {poll_response.status_code}")
+                                    continue
+                                
+                                poll_data = poll_response.json()
+                                status = poll_data.get("status")
+                                
+                                logger.debug(f"[视频] 任务状态: {status} ({poll_count + 1}/{max_polls})")
+                                
+                                if status == "succeeded":
+                                    # 从响应中提取视频 URL
+                                    content = poll_data.get("content", {})
+                                    video_url = content.get("video_url") or content.get("url")
+                                    
+                                    if not video_url:
+                                        # 尝试从其他位置提取
+                                        if isinstance(content, list) and len(content) > 0:
+                                            video_url = content[0].get("video_url") or content[0].get("url")
+                                    
+                                    if video_url:
+                                        logger.info(f"[视频] 豆包视频生成成功，正在下载...")
+                                        # 下载视频并转为 base64
+                                        video_response = await client.get(video_url)
+                                        if video_response.status_code == 200:
+                                            video_data = base64.b64encode(video_response.content).decode('utf-8')
+                                            logger.info(f"[视频] 视频下载完成")
+                                        else:
+                                            raise Exception(f"下载视频失败: {video_response.status_code}")
+                                    else:
+                                        raise Exception(f"未找到视频URL: {poll_data}")
+                                    break
+                                    
+                                elif status == "failed":
+                                    error_msg = poll_data.get("error", {}).get("message", "未知错误")
+                                    raise Exception(f"任务失败: {error_msg}")
+                                    
+                                elif status in ["pending", "running", "processing"]:
+                                    continue
+                                else:
+                                    logger.warning(f"[视频] 未知状态: {status}")
+                                    continue
+                            else:
+                                raise Exception("任务超时")
+                                
+                    except Exception as e:
+                        logger.error(f"[视频] 豆包 API 错误: {e}")
+                        raise
+                
+                elif is_openai:
                     headers["Authorization"] = f"Bearer {api_key}"
                     
                     # 根据是否有图片构建不同的消息内容
@@ -1360,10 +1456,15 @@ class BaseVideoCommand(BaseCommand, ABC):
 
                 logger.info(f"[视频] 准备向 {endpoint_type} 端点发送请求。")
                 
-                video_data = None
+                video_data = None if not is_doubao else video_data  # 豆包已处理
                 use_stream = endpoint.get("stream", False)
                 
-                if use_stream:
+                # 豆包 API 已在上面处理完毕，跳过后续流程
+                if is_doubao and video_data:
+                    pass  # 继续到发送视频逻辑
+                elif is_doubao and not video_data:
+                    raise Exception("豆包视频生成失败")
+                elif use_stream:
                     try:
                         async with httpx.AsyncClient(proxy=client_proxy, timeout=300.0, follow_redirects=True) as client:
                             async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
