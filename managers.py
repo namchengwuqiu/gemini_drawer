@@ -156,6 +156,8 @@ class KeyManager:
         return added_count, duplicate_count
 
     def get_all_keys(self) -> List[Dict[str, Any]]:
+        # 每次调用时从文件重新加载，支持实时更新
+        self.config = self._load_config()
         return self.config.get('keys', [])
 
     def record_key_usage(self, key_value: str, success: bool, force_disable: bool = False):
@@ -362,6 +364,8 @@ class DataManager:
         return False
 
     def get_channels(self) -> Dict[str, Any]:
+        # 每次调用时从文件重新加载，支持实时更新
+        self.data = self._load_data()
         return self.data.get("channels", {})
 
     def add_channel(self, name: str, info: Dict[str, Any]):
