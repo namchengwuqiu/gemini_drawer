@@ -14,13 +14,10 @@
   "homepage_url": "https://github.com/namchengwuqiu/gemini_drawer",
   "repository_url": "https://github.com/namchengwuqiu/gemini_drawer",
   "keywords": [
-    "gemini",
-    "image",
-    "drawing",
-    "ai",
+    "ai画图",
     "绘图",
-    "画图",
-    "视频生成"
+    "ai视频生成",
+    "image"
   ],
   "categories": [
     "Utilities",
