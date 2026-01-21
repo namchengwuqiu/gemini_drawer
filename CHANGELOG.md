@@ -7,7 +7,7 @@
   - 新增 `SelfieVideoAction` - 生成自己的视频
   - 支持通过自然语言触发（如"发个视频看看"、"来段视频"）
   - 随机选择视频动作，可配置 `selfie.video_actions`
-  - 支持按才和 OpenAI 格式的视频 API
+  - 支持豆包和 OpenAI 格式的视频 API
 
 ---
 
