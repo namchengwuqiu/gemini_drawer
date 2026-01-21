@@ -393,7 +393,8 @@ async def process_drawing_api_request(
                 model_name = endpoint.get("model")
                 if not model_name:
                     # 回退逻辑
-                    model_name = config_getter("api.lmarena_model_name", "gemini-pro-vision") if endpoint_type != 'lmarena' else "gemini-3-pro-image-preview"
+                    default_model = "gemini-3-pro-image-preview" if endpoint_type == 'lmarena' else "gemini-pro-vision"
+                    model_name = config_getter("api.lmarena_model_name", default_model)
 
                 openai_payload = {
                     "model": model_name,
@@ -452,7 +453,8 @@ async def process_drawing_api_request(
                         logger.warning(f"API 响应成功但未提取到图片。")
                         raise Exception(f"API未返回图片")
                 else:
-                    raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+                    error_text = response.text
+                    raise Exception(f"API请求失败, 状态码: {response.status_code} - {error_text}")
 
             if img_data:
                 if endpoint_type != 'lmarena':
@@ -474,3 +476,264 @@ async def process_drawing_api_request(
             await asyncio.sleep(1)
 
     return None, last_error
+
+
+async def get_video_endpoints(config_getter, logger=None) -> List[Dict[str, Any]]:
+    """
+    获取视频生成端点列表（只返回 is_video=True 的渠道）
+    """
+    endpoints_to_try = []
+    custom_channels = data_manager.get_channels()
+    
+    for name, channel_info in custom_channels.items():
+        if not isinstance(channel_info, dict):
+            continue
+        if not channel_info.get("is_video", False):
+            continue
+        
+        c_url = channel_info.get("url")
+        c_enabled = channel_info.get("enabled", True)
+        c_model = channel_info.get("model")
+        c_key = channel_info.get("key")
+        
+        if c_url and c_enabled:
+            if c_key:
+                endpoints_to_try.append({
+                    "type": f"custom_{name}",
+                    "url": c_url,
+                    "key": c_key,
+                    "model": c_model,
+                    "stream": channel_info.get("stream", False)
+                })
+            
+            # 检查 key_manager 中的 keys
+            key_manager_keys_count = 0
+            for key_info in key_manager.get_all_keys():
+                if key_info.get('status') != 'active':
+                    continue
+                if key_info.get('type') == name:
+                    key_manager_keys_count += 1
+                    endpoints_to_try.append({
+                        "type": f"custom_{name}",
+                        "url": c_url,
+                        "key": key_info['value'],
+                        "model": c_model,
+                        "stream": channel_info.get("stream", False)
+                    })
+                    
+            if not c_key and key_manager_keys_count == 0:
+                if logger:
+                    logger.warning(f"[视频] 渠道 '{name}' 已启用但未找到有效Key (检查了 key_manager 和 data.json)")
+    
+    return endpoints_to_try
+
+
+async def process_video_generation(
+    prompt: str,
+    base64_img: Optional[str],
+    mime_type: Optional[str],
+    endpoints: List[Dict[str, Any]],
+    proxy: Optional[str],
+    logger
+) -> Tuple[Optional[str], str]:
+    """
+    处理视频生成请求，返回 (video_base64_data, error_message)
+    
+    Args:
+        prompt: 视频描述
+        base64_img: 可选的 base64 编码图片
+        mime_type: 图片 MIME 类型
+        endpoints: 视频端点列表
+        proxy: 代理地址
+        logger: 日志对象
+    """
+    from .utils import extract_video_data
+    
+    video_data = None
+    last_error = ""
+    
+    for endpoint in endpoints:
+        api_url = endpoint["url"]
+        api_key = endpoint["key"]
+        endpoint_type = endpoint["type"]
+        
+        logger.info(f"[视频] 尝试端点: {endpoint_type}")
+        
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}"
+        }
+        
+        try:
+            # 豆包 API (异步任务模式)
+            if "volces.com" in api_url or "/contents/generations/tasks" in api_url:
+                doubao_content = [{"type": "text", "text": prompt}]
+                if base64_img:
+                    doubao_content.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
+                    })
+                
+                model_name = endpoint.get("model", "doubao-seedance-1-5-pro-251215")
+                doubao_payload = {"model": model_name, "content": doubao_content}
+                
+                async with httpx.AsyncClient(proxy=proxy, timeout=60.0, follow_redirects=True) as client:
+                    response = await client.post(api_url, json=doubao_payload, headers=headers)
+                    if response.status_code != 200:
+                        raise Exception(f"创建任务失败: {response.status_code} - {response.text}")
+                    
+                    task_id = response.json().get("id")
+                    if not task_id:
+                        raise Exception("未获取到任务ID")
+                    
+                    logger.info(f"[视频] 豆包任务已创建: {task_id}")
+                    
+                    # 轮询任务状态
+                    poll_url = f"{api_url}/{task_id}"
+                    for poll_count in range(120):  # 最多10分钟
+                        await asyncio.sleep(5)
+                        poll_resp = await client.get(poll_url, headers=headers)
+                        if poll_resp.status_code != 200:
+                            continue
+                        
+                        poll_data = poll_resp.json()
+                        status = poll_data.get("status")
+                        
+                        if status == "succeeded":
+                            content = poll_data.get("content", {})
+                            video_url = content.get("video_url") or content.get("url")
+                            if isinstance(content, list) and len(content) > 0:
+                                video_url = content[0].get("video_url") or content[0].get("url")
+                            
+                            if video_url:
+                                video_resp = await client.get(video_url)
+                                if video_resp.status_code == 200:
+                                    video_data = base64.b64encode(video_resp.content).decode('utf-8')
+                                    logger.info(f"[视频] 豆包视频下载完成")
+                            break
+                        elif status == "failed":
+                            error_msg = poll_data.get("error", {}).get("message", "未知错误")
+                            raise Exception(f"任务失败: {error_msg}")
+                    else:
+                        raise Exception("任务超时")
+            
+            # OpenAI 格式
+            elif "/chat/completions" in api_url:
+                content_list = [{"type": "text", "text": prompt}]
+                if base64_img:
+                    content_list.append({
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
+                    })
+                
+                openai_payload = {
+                    "model": endpoint.get("model", "video-preview"),
+                    "messages": [{"role": "user", "content": content_list}],
+                    "stream": endpoint.get("stream", False)
+                }
+                
+                use_stream = endpoint.get("stream", False)
+                
+                async with httpx.AsyncClient(proxy=proxy, timeout=300.0, follow_redirects=True) as client:
+                    if use_stream:
+                        async with client.stream("POST", api_url, json=openai_payload, headers=headers) as response:
+                            if response.status_code != 200:
+                                raw_body = await response.aread()
+                                error_msg = raw_body.decode('utf-8', 'ignore')
+                                raise Exception(f"API请求失败: {response.status_code} - {error_msg}")
+                            
+                            async for line in response.aiter_lines():
+                                line = line.strip()
+                                if not line or line.startswith(':'):
+                                    continue
+                                if line.startswith('data:'):
+                                    data_str = line.replace('data:', '').strip()
+                                    if data_str in ["DONE", "[DONE]"]:
+                                        break
+                                    try:
+                                        response_data = json.loads(data_str)
+                                        extracted = await extract_video_data(response_data)
+                                        if extracted:
+                                            video_data = extracted
+                                            break
+                                    except json.JSONDecodeError:
+                                        pass
+                    else:
+                        response = await client.post(api_url, json=openai_payload, headers=headers)
+                        if response.status_code == 200:
+                            data = response.json()
+                            video_data = await extract_video_data(data)
+                        else:
+                            raise Exception(f"API请求失败: {response.status_code} - {response.text}")
+            
+            # Gemini 格式
+            elif "generateContent" in api_url:
+                parts = [{"text": prompt}]
+                if base64_img:
+                    parts.append({"inline_data": {"mime_type": mime_type, "data": base64_img}})
+                
+                gemini_payload = {"contents": [{"parts": parts}]}
+                request_url = f"{api_url}?key={api_key}"
+                
+                async with httpx.AsyncClient(proxy=proxy, timeout=300.0, follow_redirects=True) as client:
+                    response = await client.post(request_url, json=gemini_payload, headers={"Content-Type": "application/json"})
+                    if response.status_code == 200:
+                        data = response.json()
+                        video_data = await extract_video_data(data)
+                    else:
+                        raise Exception(f"API请求失败: {response.status_code} - {response.text}")
+            
+            if video_data:
+                key_manager.record_key_usage(api_key, True)
+                return video_data, ""
+                
+        except Exception as e:
+            logger.warning(f"[视频] 端点 {endpoint_type} 失败: {e}")
+            is_quota_error = "429" in str(e)
+            key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
+            last_error = str(e)
+            await asyncio.sleep(1)
+    
+    return None, last_error
+
+
+async def send_video_via_napcat(
+    video_base64: str,
+    group_id: Optional[str],
+    user_id: Optional[str],
+    napcat_host: str,
+    napcat_port: int,
+    logger
+) -> Tuple[bool, str]:
+    """
+    通过 NapCat HTTP API 发送视频
+    
+    Returns:
+        (success, error_message)
+    """
+    video_base64_uri = f"base64://{video_base64}"
+    
+    if group_id:
+        api_url = f"http://{napcat_host}:{napcat_port}/send_group_msg"
+        request_data = {"group_id": group_id, "message": [{"type": "video", "data": {"file": video_base64_uri}}]}
+    elif user_id:
+        api_url = f"http://{napcat_host}:{napcat_port}/send_private_msg"
+        request_data = {"user_id": user_id, "message": [{"type": "video", "data": {"file": video_base64_uri}}]}
+    else:
+        return False, "无法确定发送目标"
+    
+    try:
+        async with httpx.AsyncClient(timeout=300.0) as client:
+            response = await client.post(api_url, json=request_data)
+            if response.status_code == 200:
+                result = response.json()
+                if result.get("status") == "ok" or result.get("retcode") == 0:
+                    logger.info(f"[视频] 发送成功")
+                    return True, ""
+                else:
+                    return False, f"napcat返回错误: {result}"
+            else:
+                return False, f"HTTP {response.status_code}"
+    except Exception as e:
+        logger.error(f"[视频] 发送失败: {e}")
+        return False, str(e)

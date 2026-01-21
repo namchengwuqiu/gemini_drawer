@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.7.1
+> **Version:** 1.7.2
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 

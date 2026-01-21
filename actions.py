@@ -334,3 +334,164 @@ class SelfieGenerateAction(BaseAction):
             logger.error(f"Selfie Action Error: {e}")
             await self.send_text(f"处理自拍时发生了错误: {e}")
             return False, str(e)
+
+
+class SelfieVideoAction(BaseAction):
+    """
+    发送自己的视频动作
+    类似自拍功能，但生成视频而非图片
+    """
+    action_name: str = "gemini_selfie_video"
+    action_description: str = "发送一段自己的视频"
+    
+    action_require: List[str] = [
+        "当用户明确要求看我的视频、动态、动作时使用",
+        "发个视频看看", "想看你跳舞", "来段视频"
+    ]
+    activation_type: ActionActivationType = ActionActivationType.ALWAYS
+    
+    action_parameters: Dict[str, Any] = {
+        "action": "可选的动作描述，如跳舞、挥手等"
+    }
+
+    async def _polish_video_prompt(self, original_prompt: str) -> str:
+        """使用 LLM 模型润色视频提示词"""
+        if not self.get_config("selfie.polish_enable", False):
+            return original_prompt
+        
+        try:
+            models = llm_api.get_available_models()
+            model_name = self.get_config("selfie.polish_model", "replyer")
+            model_config = models.get(model_name)
+            
+            if not model_config:
+                logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
+                return original_prompt
+            
+            polish_template = self.get_config(
+                "selfie.video_polish_template",
+                "请将以下视频动作描述润色为更适合AI视频生成的提示词，让动作描述更加流畅、生动、有画面感。只输出润色后的提示词，不要输出其他内容。原始描述：'{original_prompt}'"
+            )
+            prompt = polish_template.format(original_prompt=original_prompt)
+            
+            logger.info(f"正在润色视频提示词: {original_prompt}")
+            success, polished_prompt, reasoning, used_model = await llm_api.generate_with_model(
+                prompt=prompt,
+                model_config=model_config,
+                request_type="gemini_drawer.selfie_video_polish",
+                temperature=0.5,
+                max_tokens=512
+            )
+            
+            if success and polished_prompt:
+                logger.debug(f"润色完成: {original_prompt} -> {polished_prompt.strip()}")
+                return polished_prompt.strip()
+            else:
+                logger.warning(f"润色失败，使用原始提示词")
+                return original_prompt
+                
+        except Exception as e:
+            logger.error(f"润色提示词时出错: {e}")
+            return original_prompt
+
+    async def execute(self) -> Tuple[bool, str]:
+        # 检查是否是指令触发
+        if is_command_message(self.action_message):
+            return False, "检测到指令前缀，忽略Action触发"
+
+        if not self.get_config("selfie.enable"):
+            await self.send_text("虽然很想发，但是管理员没有开启功能哦。")
+            return True, "功能未启用"
+
+        image_filename = self.get_config("selfie.reference_image_path")
+        from pathlib import Path
+        plugin_dir = Path(__file__).parent
+        ref_image_path = plugin_dir / "images" / image_filename
+        
+        if not ref_image_path.exists():
+            await self.send_text("糟糕，我找不到我的底图了，可能被管理员删掉了。")
+            logger.warning(f"Selfie reference image not found at: {ref_image_path}")
+            return False, "未找到人设底图"
+
+        try:
+            with open(ref_image_path, "rb") as f:
+                image_bytes = f.read()
+
+            # 获取动作参数或随机选择
+            action = self.action_data.get("action", "").strip()
+            if not action:
+                video_actions = self.get_config("selfie.video_actions", [
+                    "缓缓转头，露出微笑",
+                    "轻轻挥手打招呼",
+                    "眨眼并微微歪头",
+                    "点头微笑",
+                    "比耶手势"
+                ])
+                import random
+                action = random.choice(video_actions) if video_actions else "looking at camera"
+            
+            base_prompt = self.get_config("selfie.base_prompt", "")
+            if base_prompt:
+                full_prompt = f"{base_prompt}, {action}"
+            else:
+                full_prompt = action
+            
+            # 润色提示词
+            full_prompt = await self._polish_video_prompt(full_prompt)
+            
+            logger.info(f"Generating selfie video with prompt: {full_prompt}")
+            await self.send_text("我现在就去录一段视频，请稍等一下...")
+            
+            # 使用复用函数
+            from .draw_logic import get_video_endpoints, process_video_generation, send_video_via_napcat
+            
+            # 获取视频端点
+            endpoints = await get_video_endpoints(self.get_config, logger=logger)
+            
+            if not endpoints:
+                await self.send_text("❌ 没有配置视频生成渠道，无法录制视频。")
+                return False, "无视频渠道"
+            
+            # 准备图片数据
+            mime_type = get_image_mime_type(image_bytes)
+            base64_img = base64.b64encode(image_bytes).decode('utf-8')
+            proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
+            
+            # 生成视频
+            video_data, error = await process_video_generation(
+                prompt=full_prompt,
+                base64_img=base64_img,
+                mime_type=mime_type,
+                endpoints=endpoints,
+                proxy=proxy,
+                logger=logger
+            )
+            
+            if video_data:
+                # 发送视频
+                # 使用 BaseAction 基类在初始化时已解析的 group_id 和 user_id
+                napcat_host = self.get_config("api.napcat_host", "napcat")
+                napcat_port = self.get_config("api.napcat_port", 3033)
+                
+                success, send_error = await send_video_via_napcat(
+                    video_base64=video_data,
+                    group_id=self.group_id,  # 直接使用基类属性
+                    user_id=self.user_id,    # 直接使用基类属性
+                    napcat_host=napcat_host,
+                    napcat_port=napcat_port,
+                    logger=logger
+                )
+                
+                if success:
+                    return True, "成功发送自拍视频"
+                else:
+                    await self.send_text(f"❌ 视频发送失败: {send_error}")
+                    return False, f"发送失败: {send_error}"
+            else:
+                await self.send_text(f"视频生成失败了: {error}")
+                return False, f"生成失败: {error}"
+
+        except Exception as e:
+            logger.error(f"Selfie Video Action Error: {e}")
+            await self.send_text(f"录制视频时发生了错误: {e}")
+            return False, str(e)

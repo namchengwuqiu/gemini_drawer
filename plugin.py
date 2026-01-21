@@ -34,12 +34,12 @@ from .admin_commands import (
     ListChannelsCommand, ChannelSetStreamCommand, ChannelSetVideoCommand
 )
 
-from .actions import ImageGenerateAction, SelfieGenerateAction
+from .actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoAction
 
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.7.1"
+    plugin_version: str = "1.7.2"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -77,7 +77,15 @@ class GeminiDrawerPlugin(BasePlugin):
             ], description="随机动作列表"),
             "polish_enable": ConfigField(type=bool, default=True, description="是否启用提示词润色"),
             "polish_model": ConfigField(type=str, default="replyer", description="润色使用的文本模型名称(默认replyer不需要更改)"),
-            "polish_template": ConfigField(type=str, default="请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的提示词，不要输出其他内容。原始主题：'{original_prompt}'", description="润色提示词模板")
+            "polish_template": ConfigField(type=str, default="请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的提示词，不要输出其他内容。原始主题：'{original_prompt}'", description="润色提示词模板"),
+            "video_actions": ConfigField(type=list, default=[
+                "缓缓转头，露出微笑",
+                "轻轻挥手打招呼",
+                "眨眼并微微歪头",
+                "点头微笑",
+                "比耶手势"
+            ], description="视频自拍随机动作列表"),
+            "video_polish_template": ConfigField(type=str, default="请将以下视频动作描述润色为更适合AI视频生成的提示词时长5～10秒，让动作描述更加流畅、生动、有画面感。只输出润色后的提示词，不要输出其他内容。原始描述：'{original_prompt}'", description="视频提示词润色模板")
         },
         "api": {
             "enable_google": ConfigField(type=bool, default=True, description="是否启用Google官方API"),
@@ -184,4 +192,5 @@ class GeminiDrawerPlugin(BasePlugin):
             (ChannelSetVideoCommand.get_command_info(), ChannelSetVideoCommand),
             (ImageGenerateAction.get_action_info(), ImageGenerateAction),
             (SelfieGenerateAction.get_action_info(), SelfieGenerateAction),
+            (SelfieVideoAction.get_action_info(), SelfieVideoAction),
         ]
