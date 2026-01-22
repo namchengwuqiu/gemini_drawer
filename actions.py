@@ -76,7 +76,8 @@ class ImageGenerateAction(BaseAction):
         "当用户明确表示想要绘画、画图、生成图片、修改图片时使用",
         "适用于'画一张xx'、'生成xx图片'、'帮我画xx'等请求",
         "不适用于用户只是在讨论某个事物，但没有明确表示想要图片的情况",
-        "如果用户只是说'发张图'但没说发什么，可以尝试生成一张通用的美图"
+        "如果用户只是说'发张图'但没说发什么，可以尝试生成一张通用的美图",
+        "注意：不要连续触发，如果刚刚已经发送过图片或正在生成中，就不要再次触发此动作，除非用户再次主动要求"
     ]
     
     associated_types = ["image"]
@@ -182,7 +183,7 @@ class SelfieGenerateAction(BaseAction):
     action_require: List[str] = [
         "当用户明确要求看我的照片、自拍、长什么样时使用",
         "看看你的照片", "发张自拍",
-        "重点：不要连续发，如果刚刚已经发送过自拍或正在生成中，就不要再次触发此动作"
+        "注意：不要连续发，如果刚刚已经发送过自拍或正在生成中，就不要再次触发此动作"
     ]
     activation_type: ActionActivationType = ActionActivationType.ALWAYS
     
@@ -207,7 +208,7 @@ class SelfieGenerateAction(BaseAction):
             
             polish_template = self.get_config(
                 "selfie.polish_template",
-                "请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的提示词，不要输出其他内容。原始主题：'{original_prompt}'"
+                "请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的一份提示词，不要输出其他内容。原始主题：'{original_prompt}'"
             )
             prompt = polish_template.format(original_prompt=original_prompt)
             
@@ -362,7 +363,7 @@ class SelfieVideoAction(BaseAction):
     action_require: List[str] = [
         "当用户明确要求看我的视频、动态、动作时使用",
         "发个视频看看", "想看你跳舞", "来段视频",
-        "重点：不要连续发，如果刚刚已经发送过视频或正在生成中，就不要再次触发此动作"
+        "注意：不要连续发，如果刚刚已经发送过视频或正在生成中，就不要再次触发此动作"
     ]
     activation_type: ActionActivationType = ActionActivationType.ALWAYS
     
@@ -386,7 +387,7 @@ class SelfieVideoAction(BaseAction):
             
             polish_template = self.get_config(
                 "selfie.video_polish_template",
-                "请将以下视频动作描述润色为更适合AI视频生成的提示词，让动作描述更加流畅、生动、有画面感。只输出润色后的提示词，不要输出其他内容。原始描述：'{original_prompt}'"
+                "请将以下视频动作描述润色为更适合AI视频生成的提示词，让动作描述更加流畅、生动、有画面感。只输出润色后的一份提示词，不要输出其他内容。原始描述：'{original_prompt}'"
             )
             prompt = polish_template.format(original_prompt=original_prompt)
             
