@@ -19,7 +19,7 @@ def is_command_message(message: Any) -> bool:
     if not message:
         return False
         
-    target_commands = ["/绘图", "＃绘图", "/多图", "＃多图", "/bnn", "＃bnn"]
+    target_commands = ["/绘图", "＃绘图", "/多图", "/bnn", "文生视频","图生视频"]
     
     def check_text(text: str) -> bool:
         if not text: return False
@@ -182,8 +182,10 @@ class SelfieGenerateAction(BaseAction):
     action_require: List[str] = ["当用户明确要求看我的照片、自拍、长什么样时使用", "看看你的照片", "发张自拍"]
     activation_type: ActionActivationType = ActionActivationType.ALWAYS
     
-    # 无需特定的参数提取，只需要触发即可
-    action_parameters: Dict[str, Any] = {}
+    # 参数定义：让 Planner 从用户消息中提取完整场景描述
+    action_parameters: Dict[str, Any] = {
+        "requested_action": "用户请求的完整场景描述（包括服装、动作、姿势、场景等），如'穿女仆装比心'、'戴眼镜做鬼脸'、'在海边挥手'等。需要完整提取用户的要求，不要只提取单个动作词。如果用户没有指定具体场景，返回空字符串。"
+    }
 
     async def _polish_selfie_prompt(self, original_prompt: str) -> str:
         """使用 LLM 模型润色自拍提示词"""
@@ -252,9 +254,18 @@ class SelfieGenerateAction(BaseAction):
             base_prompt = self.get_config("selfie.base_prompt")
             random_actions = self.get_config("selfie.random_actions")
             
-            # 随机选择一个动作
+            # 获取用户指定的动作（如果有）
             import random
-            action = random.choice(random_actions) if random_actions else "looking at viewer"
+            user_action = self.action_data.get("requested_action", "").strip()
+            
+            if user_action:
+                # 使用用户指定的动作
+                action = user_action
+                logger.info(f"使用用户指定的动作: {action}")
+            else:
+                # 随机选择一个动作
+                action = random.choice(random_actions) if random_actions else "looking at viewer"
+                logger.info(f"随机选择动作: {action}")
             
             if base_prompt:
                 full_prompt = f"{base_prompt}, {action}"
@@ -351,7 +362,7 @@ class SelfieVideoAction(BaseAction):
     activation_type: ActionActivationType = ActionActivationType.ALWAYS
     
     action_parameters: Dict[str, Any] = {
-        "action": "可选的动作描述，如跳舞、挥手等"
+        "requested_action": "用户请求的完整视频场景描述（包括服装、动作、场景等），如'穿女仆装跳舞'、'在海边挥手'、'穿JK转圈'、'做鬼脸眨眼'等。需要完整提取用户的要求，不要只提取单个动作词。如果用户没有明确指定场景，返回空字符串。"
     }
 
     async def _polish_video_prompt(self, original_prompt: str) -> str:
@@ -418,8 +429,11 @@ class SelfieVideoAction(BaseAction):
                 image_bytes = f.read()
 
             # 获取动作参数或随机选择
-            action = self.action_data.get("action", "").strip()
-            if not action:
+            user_action = self.action_data.get("requested_action", "").strip()
+            if user_action:
+                action = user_action
+                logger.info(f"使用用户指定的视频动作: {action}")
+            else:
                 video_actions = self.get_config("selfie.video_actions", [
                     "缓缓转头，露出微笑",
                     "轻轻挥手打招呼",
@@ -429,6 +443,7 @@ class SelfieVideoAction(BaseAction):
                 ])
                 import random
                 action = random.choice(video_actions) if video_actions else "looking at camera"
+                logger.info(f"随机选择视频动作: {action}")
             
             base_prompt = self.get_config("selfie.base_prompt", "")
             if base_prompt:

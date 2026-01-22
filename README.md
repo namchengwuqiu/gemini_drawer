@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.7.2
+> **Version:** 1.7.3
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -15,7 +15,7 @@
 - **回复图片模式** 🆕：生成的图片以回复触发消息的方式发送，更直观的用户反馈。
 - **管理员专用模式** 🆕：可限制仅管理员使用绘图功能。
 - **自然语言交互** 🆕：支持直接通过"帮我画个猫"等自然语言请求触发绘图。
-- **视频生成功能** 🎬：支持图生视频和文生视频，根据图片和描述生成视频。
+- **视频生成功能** 🎬：支持图生视频和文生视频，根据图片和描述生成视频，还有自然语言生成自拍视频。
 
 ---
 
@@ -133,6 +133,23 @@ pip install -r requirements.txt
 - `lmarena_api_url` (字符串, 默认 `http://host.docker.internal:5102`): **[新增]** LMArena API 的基础 URL。如果你在 Docker 中运行，并且 LMArena 也在 Docker 网络中，这个地址通常是正确的。
 - `lmarena_api_key` (字符串, 默认 `""`): **[新增]** LMArena API 的密钥 (可选, 使用 Bearer Token)。
 - `lmarena_model_name` (字符串, 默认 `gemini-2.5-flash-image-preview (nano-banana)`): **[新增]** LMArena 使用的模型名称。
+- `napcat_host` (字符串, 默认 `napcat`): NapCat HTTP 服务器地址。Docker 环境下通常为 `napcat`，本地运行可设为 `localhost`。
+- `napcat_port` (整数, 默认 `3033`): NapCat 正向 HTTP 端口。
+
+### NapCat HTTP 服务器配置 🆕
+
+视频发送功能需要通过 NapCat 的 HTTP API 来发送视频文件。请按以下步骤配置：
+
+1. **在 NapCat 网络配置中新建一个 HTTP 服务器**
+2. **配置参数**：
+   - **Port**: 与 `config.toml` 中 `api.napcat_port` 保持一致（如 `3033`）
+   - **Host**: 
+     - 本地运行：`localhost` 或 `127.0.0.1`
+     - Docker 环境：`0.0.0.0`（不推荐在公网服务器使用）
+3. **测试连通性**：确保从 MaiBot 所在环境能访问 `http://{napcat_host}:{napcat_port}`
+
+> ⚠️ **安全提示**: 如果在公网服务器部署，不建议将 Host 设为 `0.0.0.0`，请使用 Docker 网络内部通信或设置防火墙规则。
+
 *   `selfie.enable` (布尔值, 默认 `false`): 是否启用自拍功能 (需手动开启)。
 *   `selfie.reference_image_path` (字符串, 默认 `"selfie_base.jpg"`): 人设底图文件名 (放入插件自动生成的 images 目录)。
 *   `selfie.base_prompt` (字符串, 默认 `""`): 人设基础描述词 (可选)。
