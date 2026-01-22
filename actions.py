@@ -19,7 +19,7 @@ def is_command_message(message: Any) -> bool:
     if not message:
         return False
         
-    target_commands = ["/绘图", "＃绘图", "/多图", "/bnn", "文生视频","图生视频"]
+    target_commands = ["/绘图", "＃绘图", "/多图", "/bnn", "/文生视频","/图生视频"]
     
     def check_text(text: str) -> bool:
         if not text: return False
