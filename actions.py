@@ -179,7 +179,11 @@ class SelfieGenerateAction(BaseAction):
     action_description: str = "发送一张自己的自拍照片"
     
     # 只需要简单的触发词监测，这里描述触发条件，Planner会进行判断
-    action_require: List[str] = ["当用户明确要求看我的照片、自拍、长什么样时使用", "看看你的照片", "发张自拍"]
+    action_require: List[str] = [
+        "当用户明确要求看我的照片、自拍、长什么样时使用",
+        "看看你的照片", "发张自拍",
+        "重点：不要连续发，如果刚刚已经发送过自拍或正在生成中，就不要再次触发此动作"
+    ]
     activation_type: ActionActivationType = ActionActivationType.ALWAYS
     
     # 参数定义：让 Planner 从用户消息中提取完整场景描述
@@ -357,7 +361,8 @@ class SelfieVideoAction(BaseAction):
     
     action_require: List[str] = [
         "当用户明确要求看我的视频、动态、动作时使用",
-        "发个视频看看", "想看你跳舞", "来段视频"
+        "发个视频看看", "想看你跳舞", "来段视频",
+        "重点：不要连续发，如果刚刚已经发送过视频或正在生成中，就不要再次触发此动作"
     ]
     activation_type: ActionActivationType = ActionActivationType.ALWAYS
     
