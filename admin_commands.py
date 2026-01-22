@@ -292,10 +292,12 @@ class AddChannelCommand(BaseAdminCommand):
             last_colon_index = rest_part.rfind(':')
             is_openai = "/chat/completions" in rest_part
             is_gemini = "generateContent" in rest_part
-            is_doubao = "/images/generations" in rest_part
+            is_doubao_image = "/images/generations" in rest_part
+            is_doubao_video = "/contents/generations/tasks" in rest_part
+            is_doubao = is_doubao_image or is_doubao_video
             
             if not is_openai and not is_gemini and not is_doubao:
-                await self.send_text("❌ URL 格式不正确！\n支持的格式：\n- OpenAI: 包含 /chat/completions\n- Gemini: 包含 generateContent\n- 豆包: 包含 /images/generations")
+                await self.send_text("❌ URL 格式不正确！\n支持的格式：\n- OpenAI: 包含 /chat/completions\n- Gemini: 包含 generateContent\n- 豆包图片: 包含 /images/generations\n- 豆包视频: 包含 /contents/generations/tasks")
                 return True, "URL格式错误", True
 
             if is_openai:
@@ -316,14 +318,16 @@ class AddChannelCommand(BaseAdminCommand):
                      return True, "缺少模型", True
 
             elif is_doubao:
-                # 豆包格式: URL:模型名
-                if rest_part.strip().endswith("/images/generations"):
-                     await self.send_text("❌ 豆包格式必须指定模型名称！\n例如: https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128")
+                # 豆包格式: URL:模型名 (图片或视频)
+                url_pattern = "/contents/generations/tasks" if is_doubao_video else "/images/generations"
+                if rest_part.strip().endswith(url_pattern):
+                     example = "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks:doubao-seedance-1-5-pro-251215" if is_doubao_video else "https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128"
+                     await self.send_text(f"❌ 豆包格式必须指定模型名称！\n例如: {example}")
                      return True, "缺少模型", True
                 if last_colon_index != -1:
                     possible_model = rest_part[last_colon_index+1:].strip()
                     possible_url = rest_part[:last_colon_index].strip()
-                    if "/images/generations" in possible_url:
+                    if url_pattern in possible_url:
                         url = possible_url
                         model = possible_model
                     else:
@@ -341,10 +345,15 @@ class AddChannelCommand(BaseAdminCommand):
 
             channel_info = {"url": url, "enabled": True, "stream": False}
             if model: channel_info["model"] = model
+            # 自动标记视频渠道
+            if is_doubao_video:
+                channel_info["is_video"] = True
             data_manager.add_channel(name, channel_info)
 
-            api_type = "豆包" if is_doubao else ("OpenAI" if is_openai else "Gemini")
+            api_type = "豆包视频" if is_doubao_video else ("豆包图片" if is_doubao_image else ("OpenAI" if is_openai else "Gemini"))
             msg = f"✅ 自定义渠道 `{name}` 添加成功！\n类型: {api_type}\n请使用 `/渠道添加key {name} <your-api-key>` 添加密钥。"
+            if is_doubao_video:
+                msg += "\n已自动标记为视频渠道。"
             await self.send_text(msg)
             return True, "添加成功", True
 
