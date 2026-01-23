@@ -686,6 +686,11 @@ async def process_video_generation(
             if video_data:
                 key_manager.record_key_usage(api_key, True)
                 return video_data, ""
+            else:
+                # API 调用成功但未提取到视频数据
+                error_msg = f"端点 {endpoint_type} 未返回有效视频数据"
+                logger.warning(f"[视频] {error_msg}")
+                last_error = error_msg
                 
         except Exception as e:
             logger.warning(f"[视频] 端点 {endpoint_type} 失败: {e}")
@@ -694,6 +699,10 @@ async def process_video_generation(
             last_error = str(e)
             await asyncio.sleep(1)
     
+    # 所有端点都失败了，记录最终错误
+    if not last_error:
+        last_error = "所有端点均未返回有效视频数据"
+    logger.error(f"[视频] 生成失败: {last_error}")
     return None, last_error
 
 

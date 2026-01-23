@@ -222,8 +222,10 @@ class SelfieGenerateAction(BaseAction):
             )
             
             if success and polished_prompt:
-                logger.debug(f"润色完成: {original_prompt} -> {polished_prompt.strip()}")
-                return polished_prompt.strip()
+                # 添加图片引导前缀，确保生成基于附带的图片
+                final_prompt = f"根据图中人物按以下要求生成图片：{polished_prompt.strip()}"
+                logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
+                return final_prompt
             else:
                 logger.warning(f"润色失败，使用原始提示词")
                 return original_prompt
@@ -401,8 +403,10 @@ class SelfieVideoAction(BaseAction):
             )
             
             if success and polished_prompt:
-                logger.debug(f"润色完成: {original_prompt} -> {polished_prompt.strip()}")
-                return polished_prompt.strip()
+                # 添加图片引导前缀，确保生成基于附带的图片
+                final_prompt = f"根据图中人物按以下要求生成视频：{polished_prompt.strip()}"
+                logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
+                return final_prompt
             else:
                 logger.warning(f"润色失败，使用原始提示词")
                 return original_prompt
