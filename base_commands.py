@@ -1298,7 +1298,7 @@ class BaseVideoCommand(BaseCommand, ABC):
             )
             
             if success:
-                await self.send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")
+                # await self.send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")
                 return True, "视频生成成功", True
             else:
                 await self.send_text(f"❌ 视频发送失败: {send_error}")
