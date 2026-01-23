@@ -575,7 +575,12 @@ async def process_video_generation(
                     })
                 
                 model_name = endpoint.get("model", "doubao-seedance-1-5-pro-251215")
-                doubao_payload = {"model": model_name, "content": doubao_content}
+                doubao_payload = {
+                    "model": model_name,
+                    "content": doubao_content,
+                    "duration": -1,  # 自动时长: 模型在 4~12 秒范围内自主选择
+                    "resolution": "720p"
+                }
                 
                 async with httpx.AsyncClient(proxy=proxy, timeout=60.0, follow_redirects=True) as client:
                     response = await client.post(api_url, json=doubao_payload, headers=headers)
