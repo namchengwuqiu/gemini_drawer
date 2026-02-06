@@ -263,6 +263,33 @@ class ViewPromptCommand(BaseAdminCommand):
             await self.send_text(f"❌ 未找到提示词 `{name}`。")
         return True, "查看成功", True
 
+class ModifyPromptCommand(BaseAdminCommand):
+    command_name: str = "gemini_modify_prompt"
+    command_description: str = "修改一个已存在的绘图提示词预设"
+    command_pattern: str = "/修改提示词"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        command_prefix = "/修改提示词"
+        content = self.message.raw_message.replace(command_prefix, "", 1).strip()
+        if ":" not in content and "：" not in content:
+            await self.send_text("❌ 格式错误！\n正确格式：`/修改提示词 功能名称:新提示词`")
+            return True, "格式错误", True
+
+        parts = re.split(r"[:：]", content, 1)
+        name, prompt = parts[0].strip(), parts[1].strip()
+
+        if not name or not prompt:
+            await self.send_text("❌ 内容不能为空！")
+            return True, "参数不全", True
+
+        if name not in data_manager.get_prompts():
+            await self.send_text(f"❌ 未找到提示词 `{name}`。\n如需添加新提示词，请使用 `/添加提示词` 命令。")
+            return True, "提示词不存在", True
+
+        data_manager.update_prompt(name, prompt)
+        await self.send_text(f"✅ 提示词 `{name}` 修改成功！")
+        return True, "修改成功", True
+
 class AddChannelCommand(BaseAdminCommand):
     command_name: str = "gemini_add_channel"
     command_description: str = "添加自定义API渠道"

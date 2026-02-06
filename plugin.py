@@ -29,7 +29,7 @@ from .draw_commands import CustomDrawCommand, TextToImageCommand, UniversalPromp
 from .admin_commands import (
     ChannelAddKeyCommand, ChannelListKeysCommand, ChannelResetKeyCommand,
     ChannelDeleteKeyCommand, ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
-    AddPromptCommand, DeletePromptCommand, ViewPromptCommand,
+    AddPromptCommand, DeletePromptCommand, ViewPromptCommand, ModifyPromptCommand,
     AddChannelCommand, DeleteChannelCommand, ToggleChannelCommand,
     ListChannelsCommand, ChannelSetStreamCommand, ChannelSetVideoCommand
 )
@@ -39,7 +39,7 @@ from .actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoActio
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.7.8"
+    plugin_version: str = "1.7.9"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -175,6 +175,7 @@ class GeminiDrawerPlugin(BasePlugin):
             (ChannelSetKeyErrorLimitCommand.get_command_info(), ChannelSetKeyErrorLimitCommand),
             (ChannelUpdateModelCommand.get_command_info(), ChannelUpdateModelCommand), 
             (AddPromptCommand.get_command_info(), AddPromptCommand),
+            (ModifyPromptCommand.get_command_info(), ModifyPromptCommand),
             (DeletePromptCommand.get_command_info(), DeletePromptCommand),
             (ViewPromptCommand.get_command_info(), ViewPromptCommand),
             (AddChannelCommand.get_command_info(), AddChannelCommand),

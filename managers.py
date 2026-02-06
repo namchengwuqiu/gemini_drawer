@@ -363,6 +363,14 @@ class DataManager:
             return True
         return False
 
+    def update_prompt(self, name: str, prompt: str) -> bool:
+        """修改已存在的提示词"""
+        if name in self.data.get("prompts", {}):
+            self.data["prompts"][name] = prompt
+            self.save_data()
+            return True
+        return False
+
     def get_channels(self) -> Dict[str, Any]:
         # 每次调用时从文件重新加载，支持实时更新
         self.data = self._load_data()
