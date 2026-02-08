@@ -106,6 +106,19 @@ class BaseDrawCommand(BaseCommand, ABC):
             logger.warning(f"获取 chat_id 失败: {e}")
             return None
 
+    def _get_current_group_id(self) -> Optional[str]:
+        """获取当前群 ID"""
+        try:
+            chat_stream = self.message.chat_stream
+            if chat_stream:
+                group_info = getattr(chat_stream, 'group_info', None)
+                if group_info and hasattr(group_info, 'group_id') and group_info.group_id:
+                    return str(group_info.group_id)
+            return None
+        except Exception as e:
+            logger.warning(f"获取 group_id 失败: {e}")
+            return None
+
     async def _safe_recall(self, message_ids: List[str]) -> int:
         """安全地撤回消息列表，返回成功撤回的数量"""
         recalled_count = 0
@@ -287,6 +300,15 @@ class BaseDrawCommand(BaseCommand, ABC):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
+        
+        # 检查群黑名单
+        blacklist_groups = self.get_config("general.blacklist_groups", [])
+        current_group_id = self._get_current_group_id()
+        if current_group_id and blacklist_groups:
+            str_blacklist = [str(g) for g in blacklist_groups]
+            if current_group_id in str_blacklist:
+                logger.info(f"群 {current_group_id} 在黑名单中，拒绝执行绘图命令")
+                return True, "群黑名单", False
         
         # 检查管理员专用模式
         if self.get_config("behavior.admin_only_mode", False):
@@ -775,6 +797,15 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
+        
+        # 检查群黑名单
+        blacklist_groups = self.get_config("general.blacklist_groups", [])
+        current_group_id = self._get_current_group_id()
+        if current_group_id and blacklist_groups:
+            str_blacklist = [str(g) for g in blacklist_groups]
+            if current_group_id in str_blacklist:
+                logger.info(f"群 {current_group_id} 在黑名单中，拒绝执行多图绘图命令")
+                return True, "群黑名单", False
         
         if self.get_config("behavior.admin_only_mode", False):
             user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)

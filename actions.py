@@ -84,6 +84,14 @@ class ImageGenerateAction(BaseAction):
     
     async def execute(self) -> Tuple[bool, str]:
         """执行绘图动作"""
+        # 检查群黑名单
+        blacklist_groups = self.get_config("general.blacklist_groups", [])
+        if self.group_id and blacklist_groups:
+            str_blacklist = [str(g) for g in blacklist_groups]
+            if str(self.group_id) in str_blacklist:
+                logger.info(f"群 {self.group_id} 在黑名单中，拒绝执行绘图 Action")
+                return False, "群黑名单"
+        
         # 检查是否是指令触发
         if is_command_message(self.action_message):
              return False, "检测到指令前缀，忽略Action触发"
@@ -235,6 +243,14 @@ class SelfieGenerateAction(BaseAction):
             return original_prompt
 
     async def execute(self) -> Tuple[bool, str]:
+        # 检查群黑名单
+        blacklist_groups = self.get_config("general.blacklist_groups", [])
+        if self.group_id and blacklist_groups:
+            str_blacklist = [str(g) for g in blacklist_groups]
+            if str(self.group_id) in str_blacklist:
+                logger.info(f"群 {self.group_id} 在黑名单中，拒绝执行自拍 Action")
+                return False, "群黑名单"
+        
         # 检查是否是指令触发
         if is_command_message(self.action_message):
              return False, "检测到指令前缀，忽略Action触发"
@@ -416,6 +432,14 @@ class SelfieVideoAction(BaseAction):
             return original_prompt
 
     async def execute(self) -> Tuple[bool, str]:
+        # 检查群黑名单
+        blacklist_groups = self.get_config("general.blacklist_groups", [])
+        if self.group_id and blacklist_groups:
+            str_blacklist = [str(g) for g in blacklist_groups]
+            if str(self.group_id) in str_blacklist:
+                logger.info(f"群 {self.group_id} 在黑名单中，拒绝执行自拍视频 Action")
+                return False, "群黑名单"
+        
         # 检查是否是指令触发
         if is_command_message(self.action_message):
             return False, "检测到指令前缀，忽略Action触发"

@@ -39,7 +39,7 @@ from .actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoActio
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.7.9"
+    plugin_version: str = "1.8.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -55,7 +55,8 @@ class GeminiDrawerPlugin(BasePlugin):
     config_schema: dict = {
         "general": {
             "enable_gemini_drawer": ConfigField(type=bool, default=True, description="是否启用Gemini绘图插件"),
-            "admins": ConfigField(type=list, default=[], description="可以管理本插件的管理员QQ号列表")
+            "admins": ConfigField(type=list, default=[], description="可以管理本插件的管理员QQ号列表"),
+            "blacklist_groups": ConfigField(type=list, default=[], description="禁止使用本插件的群号黑名单列表")
         },
         "proxy": {
             "enable": ConfigField(type=bool, default=False, description="是否为 Gemini API 请求启用代理"),
