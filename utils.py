@@ -330,6 +330,162 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
     except Exception:
         return None
 
+async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
+    """从API响应中提取所有图片数据（URL或Base64），支持多图响应
+    
+    与 extract_image_data 不同，此函数会提取响应中的所有图片，
+    而不是只返回第一张。适用于一次返回多张图片的 API。
+    
+    Returns:
+        图片数据列表（URL或Base64字符串），如果没有找到则返回空列表
+    """
+    try:
+        results = []
+        
+        # 豆包格式响应解析 - 支持多张图
+        if "data" in response_data and isinstance(response_data["data"], list):
+            for item in response_data["data"]:
+                if isinstance(item, dict):
+                    if "url" in item and item["url"]:
+                        logger.info(f"从豆包响应中提取到图片URL: {item['url'][:100]}...")
+                        results.append(item["url"])
+                    elif "b64_json" in item and item["b64_json"]:
+                        logger.info("从豆包响应中提取到 base64 图片数据")
+                        results.append(item["b64_json"])
+            if results:
+                return results
+        
+        if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
+            choice = response_data["choices"][0]
+            content_data = None
+
+            delta = choice.get("delta")
+            if delta and "content" in delta:
+                content_data = delta["content"]
+            
+            message = choice.get("message")
+            if content_data is None and message:
+                if "content" in message:
+                    content_data = message["content"]
+            
+            # 检查 message.images 数组格式
+            if message and "images" in message and isinstance(message["images"], list):
+                for img_item in message["images"]:
+                    if isinstance(img_item, dict):
+                        img_type = img_item.get("type", "")
+                        if img_type == "image_url":
+                            image_url_obj = img_item.get("image_url", {})
+                            if isinstance(image_url_obj, dict) and "url" in image_url_obj:
+                                url = image_url_obj["url"]
+                                if url.startswith("data:image") and "base64," in url:
+                                    results.append(url.split("base64,")[1])
+                                else:
+                                    results.append(url)
+                        elif "url" in img_item and img_item["url"]:
+                            url = img_item["url"]
+                            if url.startswith("data:image") and "base64," in url:
+                                results.append(url.split("base64,")[1])
+                            else:
+                                results.append(url)
+                if results:
+                    logger.info(f"从 message.images 中提取到 {len(results)} 张图片")
+                    return results
+
+            if content_data is not None:
+                # 处理 content 为数组格式
+                if isinstance(content_data, list):
+                    for item in content_data:
+                        if isinstance(item, dict):
+                            item_type = item.get("type", "")
+                            if item_type == "image":
+                                image_obj = item.get("image", {})
+                                if isinstance(image_obj, dict):
+                                    if "data" in image_obj and image_obj["data"]:
+                                        results.append(image_obj["data"])
+                                    elif "url" in image_obj and image_obj["url"]:
+                                        results.append(image_obj["url"])
+                            elif item_type == "image_url":
+                                image_url_obj = item.get("image_url", {})
+                                if isinstance(image_url_obj, dict) and "url" in image_url_obj:
+                                    url = image_url_obj["url"]
+                                    if url.startswith("data:image") and "base64," in url:
+                                        results.append(url.split("base64,")[1])
+                                    else:
+                                        results.append(url)
+                            elif item_type == "text" and "text" in item:
+                                text_content = item["text"]
+                                if isinstance(text_content, str):
+                                    # 匹配所有 markdown 图片格式
+                                    all_matches = re.findall(r"!\[.*?\]\((.*?)\)", text_content)
+                                    for url in all_matches:
+                                        results.append(url)
+                    if results:
+                        logger.info(f"从 content 数组中提取到 {len(results)} 张图片")
+                        return results
+                
+                # 处理 content 为字符串格式（关键修改：使用 findall 提取所有图片）
+                elif isinstance(content_data, str):
+                    content_text = content_data
+                    
+                    # 匹配所有 markdown 图片格式 ![...](url)
+                    all_md_urls = re.findall(r"!\[.*?\]\((.*?)\)", content_text)
+                    if all_md_urls:
+                        for url in all_md_urls:
+                            log_url = url[:100] + "..." if len(url) > 100 else url
+                            logger.info(f"从响应中提取到图片URL: {log_url}")
+                            results.append(url)
+                        return results
+
+                    # 匹配裸露的HTTP/HTTPS URL（带图片后缀）
+                    all_img_urls = re.findall(r"https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|ico|tiff?)(?:\?[^\s]*)?", content_text, re.IGNORECASE)
+                    if all_img_urls:
+                        for url in all_img_urls:
+                            logger.info(f"从响应中提取到裸图片URL: {url[:100]}...")
+                            results.append(url)
+                        return results
+                    
+                    # 匹配所有 URL（排除非图片页面）
+                    all_urls = re.findall(r"https?://[^\s]+", content_text)
+                    for url in all_urls:
+                        if not any(kw in url.lower() for kw in ['dashboard', 'login', 'signin', 'register', 'admin']):
+                            results.append(url)
+                    if results:
+                        return results
+
+                    # 匹配 base64 图片数据
+                    all_b64 = re.findall(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
+                    if all_b64:
+                        for b64 in all_b64:
+                            results.append(b64)
+                        return results
+
+        # Gemini 格式
+        candidates = response_data.get("candidates")
+        if isinstance(candidates, list) and candidates:
+            content = candidates[0].get("content")
+            if isinstance(content, dict):
+                parts = content.get("parts")
+                if isinstance(parts, list):
+                    for part in parts:
+                        if not isinstance(part, dict):
+                            continue
+                        inline_data = part.get("inlineData") or part.get("inline_data")
+                        if isinstance(inline_data, dict):
+                            image_b64 = inline_data.get("data")
+                            if isinstance(image_b64, str):
+                                results.append(image_b64)
+                        text_content = part.get("text")
+                        if isinstance(text_content, str):
+                            all_b64 = re.findall(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", text_content)
+                            for b64 in all_b64:
+                                results.append(b64)
+        
+        if results:
+            logger.info(f"共提取到 {len(results)} 张图片")
+        return results
+    except Exception:
+        return []
+
 async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
     """从API响应中提取视频数据（Base64）
     

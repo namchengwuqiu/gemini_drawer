@@ -10,7 +10,7 @@ import httpx
 import re
 import os
 
-from .utils import extract_image_data, safe_json_dumps, download_image
+from .utils import extract_all_image_data, safe_json_dumps, download_image
 from .managers import key_manager, data_manager
 
 from src.plugin_system.apis import message_api
@@ -427,10 +427,10 @@ async def process_drawing_api_request(
                                     
                                     try:
                                         response_data = json.loads(data_str)
-                                        extracted = await extract_image_data(response_data)
+                                        extracted = await extract_all_image_data(response_data)
                                         if extracted:
                                             img_data = extracted
-                                            logger.info("从SSE流中成功提取图片数据。")
+                                            logger.info(f"从SSE流中成功提取 {len(extracted)} 张图片数据。")
                                             break
                                     except json.JSONDecodeError:
                                         pass
@@ -448,7 +448,7 @@ async def process_drawing_api_request(
 
                 if response.status_code == 200:
                     data = response.json()
-                    img_data = await extract_image_data(data)
+                    img_data = await extract_all_image_data(data)
                     if not img_data:
                         logger.warning(f"API 响应成功但未提取到图片。")
                         raise Exception(f"API未返回图片")
@@ -579,7 +579,7 @@ async def process_video_generation(
                     "model": model_name,
                     "content": doubao_content,
                     "duration": -1,  # 自动时长: 模型在 4~12 秒范围内自主选择
-                    "resolution": "720p"
+                    "resolution": "1080p"
                 }
                 
                 async with httpx.AsyncClient(proxy=proxy, timeout=60.0, follow_redirects=True) as client:

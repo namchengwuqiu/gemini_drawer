@@ -154,22 +154,27 @@ class ImageGenerateAction(BaseAction):
             
             if img_data:
                 # 3. 处理并发送图片
-                image_to_send_b64 = None
+                sent_count = 0
+                for single_img_data in img_data:
+                    image_to_send_b64 = None
+                    
+                    if single_img_data.startswith(('http://', 'https')):
+                        # 下载 URL 图片
+                        image_bytes = await download_image(single_img_data, proxy)
+                        if image_bytes:
+                            image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                    elif 'base64,' in single_img_data:
+                        # 提取 Base64
+                        image_to_send_b64 = single_img_data.split('base64,')[1]
+                    else:
+                        # 假定是纯 Base64
+                        image_to_send_b64 = single_img_data
+                    
+                    if image_to_send_b64:
+                        await self.send_image(image_to_send_b64)
+                        sent_count += 1
                 
-                if img_data.startswith(('http://', 'https')):
-                    # 下载 URL 图片
-                    image_bytes = await download_image(img_data, proxy)
-                    if image_bytes:
-                        image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
-                elif 'base64,' in img_data:
-                    # 提取 Base64
-                    image_to_send_b64 = img_data.split('base64,')[1]
-                else:
-                    # 假定是纯 Base64
-                    image_to_send_b64 = img_data
-                
-                if image_to_send_b64:
-                    await self.send_image(image_to_send_b64)
+                if sent_count > 0:
                     return True, f"成功生成并发送了关于'{prompt}'的图片"
                 else:
                     await self.send_text("图片生成成功，但处理失败。")
@@ -340,22 +345,27 @@ class SelfieGenerateAction(BaseAction):
             )
             
             if img_data:
-                image_to_send_b64 = None
+                sent_count = 0
+                for single_img_data in img_data:
+                    image_to_send_b64 = None
+                    
+                    # 处理不同格式的图片数据
+                    if single_img_data.startswith(('http://', 'https')):
+                        # 下载 URL 图片
+                        image_bytes = await download_image(single_img_data, proxy)
+                        if image_bytes:
+                            image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                    elif single_img_data.startswith('data:image') and 'base64,' in single_img_data:
+                        # 提取 data URL 中的 Base64 部分
+                        image_to_send_b64 = single_img_data.split('base64,')[1]
+                    else:
+                        image_to_send_b64 = single_img_data
+                    
+                    if image_to_send_b64:
+                        await self.send_image(image_to_send_b64)
+                        sent_count += 1
                 
-                # 处理不同格式的图片数据
-                if img_data.startswith(('http://', 'https')):
-                    # 下载 URL 图片
-                    image_bytes = await download_image(img_data, proxy)
-                    if image_bytes:
-                        image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
-                elif img_data.startswith('data:image') and 'base64,' in img_data:
-                    # 提取 data URL 中的 Base64 部分
-                    image_to_send_b64 = img_data.split('base64,')[1]
-                else:
-                    image_to_send_b64 = img_data
-                
-                if image_to_send_b64:
-                    await self.send_image(image_to_send_b64)
+                if sent_count > 0:
                     return True, "成功发送自拍"
                 else:
                     await self.send_text("自拍生成了，但是处理出错了。")

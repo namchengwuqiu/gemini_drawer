@@ -41,7 +41,7 @@ from src.common.logger import get_logger
 
 from .utils import (
     download_image, convert_if_gif, get_image_mime_type, 
-    safe_json_dumps, extract_image_data, extract_video_data
+    safe_json_dumps, extract_image_data, extract_all_image_data, extract_video_data
 )
 
 from .managers import key_manager, data_manager
@@ -581,10 +581,10 @@ class BaseDrawCommand(BaseCommand, ABC):
                                         
                                         try:
                                             response_data = json.loads(data_str)
-                                            extracted_data = await extract_image_data(response_data)
+                                            extracted_data = await extract_all_image_data(response_data)
                                             if extracted_data:
                                                 img_data = extracted_data
-                                                logger.info("从SSE流中成功提取图片数据。")
+                                                logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
                                                 break
                                         except json.JSONDecodeError:
                                             pass
@@ -605,7 +605,7 @@ class BaseDrawCommand(BaseCommand, ABC):
 
                     if response.status_code == 200:
                         data = response.json()
-                        img_data = await extract_image_data(data)
+                        img_data = await extract_all_image_data(data)
                         if not img_data:
                             logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
                             raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
@@ -626,85 +626,91 @@ class BaseDrawCommand(BaseCommand, ABC):
                             stream_id = stream_info.get('stream_id')
 
                         if stream_id:
-                            image_to_send_b64 = None
-                            if img_data.startswith(('http://', 'https')):
-                                image_bytes = await download_image(img_data, proxy)
-                                if image_bytes:
-                                    image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
-                            elif 'base64,' in img_data:
-                                image_to_send_b64 = img_data.split('base64,')[1]
-                            else:
-                                image_to_send_b64 = img_data
-                            
-                            if image_to_send_b64:
-                                reply_with_image = self.get_config("behavior.reply_with_image", True)
-                                trigger_msg = None
-                                
-                                if reply_with_image:
-                                    try:
-                                        from src.common.data_models.database_data_model import DatabaseMessages
-                                        msg_info = self.message.message_info
-                                        user_info = msg_info.user_info
-                                        group_info = getattr(msg_info, 'group_info', None)
-                                        chat_stream = self.message.chat_stream
-                                        
-                                        trigger_msg = DatabaseMessages(
-                                            message_id=msg_info.message_id,
-                                            time=msg_info.time,
-                                            chat_id=self._get_current_chat_id() or "",
-                                            processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
-                                            user_id=user_info.user_id if user_info else "",
-                                            user_nickname=user_info.user_nickname if user_info else "",
-                                            user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                            user_platform=user_info.platform if user_info else "",
-                                            chat_info_group_id=group_info.group_id if group_info else None,
-                                            chat_info_group_name=group_info.group_name if group_info else None,
-                                            chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
-                                            chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
-                                            chat_info_platform=chat_stream.platform if chat_stream else "",
-                                            chat_info_user_id=user_info.user_id if user_info else "",
-                                            chat_info_user_nickname=user_info.user_nickname if user_info else "",
-                                            chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                            chat_info_user_platform=user_info.platform if user_info else "",
-                                        )
-                                    except Exception as e:
-                                        logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
-                                        trigger_msg = None
-                                
-                                # 检查是否有图片说明文字（如随机风格名）
-                                caption = self.get_image_caption()
-                                
-                                if caption:
-                                    # 发送图文混合消息
-                                    from src.common.data_models.message_data_model import ReplySetModel, ReplyContent, ReplyContentType
-                                    hybrid_content = [
-                                        ReplyContent(content_type=ReplyContentType.TEXT, content=caption),
-                                        ReplyContent(content_type=ReplyContentType.IMAGE, content=image_to_send_b64)
-                                    ]
-                                    reply_set = ReplySetModel(reply_data=[
-                                        ReplyContent(content_type=ReplyContentType.HYBRID, content=hybrid_content)
-                                    ])
-                                    await send_api.custom_reply_set_to_stream(
-                                        reply_set=reply_set,
-                                        stream_id=stream_id,
-                                        set_reply=False,
-                                        reply_message=trigger_msg,
-                                        storage_message=False
-                                    )
-                                    logger.info(f"[发送] 发送图文混合消息，说明: {caption}")
+                            sent_count = 0
+                            for img_idx, single_img_data in enumerate(img_data):
+                                image_to_send_b64 = None
+                                if single_img_data.startswith(('http://', 'https')):
+                                    image_bytes = await download_image(single_img_data, proxy)
+                                    if image_bytes:
+                                        image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                elif 'base64,' in single_img_data:
+                                    image_to_send_b64 = single_img_data.split('base64,')[1]
                                 else:
-                                    # 普通图片发送
-                                    await send_api.image_to_stream(
-                                        image_base64=image_to_send_b64,
-                                        stream_id=stream_id,
-                                        set_reply=trigger_msg is not None,
-                                        reply_message=trigger_msg,
-                                        storage_message=False
-                                    )
+                                    image_to_send_b64 = single_img_data
                                 
+                                if image_to_send_b64:
+                                    reply_with_image = self.get_config("behavior.reply_with_image", True)
+                                    trigger_msg = None
+                                    
+                                    if reply_with_image:
+                                        try:
+                                            from src.common.data_models.database_data_model import DatabaseMessages
+                                            msg_info = self.message.message_info
+                                            user_info = msg_info.user_info
+                                            group_info = getattr(msg_info, 'group_info', None)
+                                            chat_stream = self.message.chat_stream
+                                            
+                                            trigger_msg = DatabaseMessages(
+                                                message_id=msg_info.message_id,
+                                                time=msg_info.time,
+                                                chat_id=self._get_current_chat_id() or "",
+                                                processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
+                                                user_id=user_info.user_id if user_info else "",
+                                                user_nickname=user_info.user_nickname if user_info else "",
+                                                user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                                user_platform=user_info.platform if user_info else "",
+                                                chat_info_group_id=group_info.group_id if group_info else None,
+                                                chat_info_group_name=group_info.group_name if group_info else None,
+                                                chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
+                                                chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
+                                                chat_info_platform=chat_stream.platform if chat_stream else "",
+                                                chat_info_user_id=user_info.user_id if user_info else "",
+                                                chat_info_user_nickname=user_info.user_nickname if user_info else "",
+                                                chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                                chat_info_user_platform=user_info.platform if user_info else "",
+                                            )
+                                        except Exception as e:
+                                            logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
+                                            trigger_msg = None
+                                    
+                                    # 检查是否有图片说明文字（如随机风格名），仅第一张图片发送
+                                    caption = self.get_image_caption() if img_idx == 0 else ""
+                                    
+                                    if caption:
+                                        # 发送图文混合消息
+                                        from src.common.data_models.message_data_model import ReplySetModel, ReplyContent, ReplyContentType
+                                        hybrid_content = [
+                                            ReplyContent(content_type=ReplyContentType.TEXT, content=caption),
+                                            ReplyContent(content_type=ReplyContentType.IMAGE, content=image_to_send_b64)
+                                        ]
+                                        reply_set = ReplySetModel(reply_data=[
+                                            ReplyContent(content_type=ReplyContentType.HYBRID, content=hybrid_content)
+                                        ])
+                                        await send_api.custom_reply_set_to_stream(
+                                            reply_set=reply_set,
+                                            stream_id=stream_id,
+                                            set_reply=False,
+                                            reply_message=trigger_msg,
+                                            storage_message=False
+                                        )
+                                        logger.info(f"[发送] 发送图文混合消息，说明: {caption}")
+                                    else:
+                                        # 普通图片发送
+                                        await send_api.image_to_stream(
+                                            image_base64=image_to_send_b64,
+                                            stream_id=stream_id,
+                                            set_reply=trigger_msg is not None,
+                                            reply_message=trigger_msg,
+                                            storage_message=False
+                                        )
+                                    sent_count += 1
+                                else:
+                                    logger.error(f"第 {img_idx+1} 张图片下载或转换失败")
+                            
+                            if sent_count > 0:
                                 await self._notify_success(elapsed)
                             else:
-                                raise Exception("图片下载或转换失败")
+                                raise Exception("所有提取的图片下载或转换失败")
                         else:
                             raise Exception("无法从当前消息中确定stream_id")
                     except Exception as e:
@@ -1066,10 +1072,10 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                         if data_str == "DONE" or data_str == "[DONE]": break
                                         try:
                                             response_data = json.loads(data_str)
-                                            extracted_data = await extract_image_data(response_data)
+                                            extracted_data = await extract_all_image_data(response_data)
                                             if extracted_data:
                                                 img_data = extracted_data
-                                                logger.info("从SSE流中成功提取图片数据。")
+                                                logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
                                                 break
                                         except json.JSONDecodeError: pass
                     except Exception as e:
@@ -1086,7 +1092,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
 
                     if response.status_code == 200:
                         data = response.json()
-                        img_data = await extract_image_data(data)
+                        img_data = await extract_all_image_data(data)
                         if not img_data:
                             logger.warning(f"API 响应成功但未提取到图片。")
                             raise Exception(f"API未返回图片")
@@ -1107,61 +1113,67 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                             stream_id = stream_info.get('stream_id')
 
                         if stream_id:
-                            image_to_send_b64 = None
-                            if img_data.startswith(('http://', 'https')):
-                                image_bytes = await download_image(img_data, proxy)
-                                if image_bytes:
-                                    image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
-                            elif 'base64,' in img_data:
-                                image_to_send_b64 = img_data.split('base64,')[1]
-                            else:
-                                image_to_send_b64 = img_data
-                            
-                            if image_to_send_b64:
-                                reply_with_image = self.get_config("behavior.reply_with_image", True)
-                                trigger_msg = None
+                            sent_count = 0
+                            for img_idx, single_img_data in enumerate(img_data):
+                                image_to_send_b64 = None
+                                if single_img_data.startswith(('http://', 'https')):
+                                    image_bytes = await download_image(single_img_data, proxy)
+                                    if image_bytes:
+                                        image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
+                                elif 'base64,' in single_img_data:
+                                    image_to_send_b64 = single_img_data.split('base64,')[1]
+                                else:
+                                    image_to_send_b64 = single_img_data
                                 
-                                if reply_with_image:
-                                    try:
-                                        from src.common.data_models.database_data_model import DatabaseMessages
-                                        msg_info = self.message.message_info
-                                        user_info = msg_info.user_info
-                                        group_info = getattr(msg_info, 'group_info', None)
-                                        chat_stream = self.message.chat_stream
-                                        
-                                        trigger_msg = DatabaseMessages(
-                                            message_id=msg_info.message_id,
-                                            time=msg_info.time,
-                                            chat_id=self._get_current_chat_id() or "",
-                                            processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
-                                            user_id=user_info.user_id if user_info else "",
-                                            user_nickname=user_info.user_nickname if user_info else "",
-                                            user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                            chat_info_group_id=group_info.group_id if group_info else None,
-                                            chat_info_group_name=group_info.group_name if group_info else None,
-                                            chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
-                                            chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
-                                            chat_info_platform=chat_stream.platform if chat_stream else "",
-                                            chat_info_user_id=user_info.user_id if user_info else "",
-                                            chat_info_user_nickname=user_info.user_nickname if user_info else "",
-                                            chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                            chat_info_user_platform=user_info.platform if user_info else "",
-                                        )
-                                    except Exception as e:
-                                        logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
-                                        trigger_msg = None
-                                
-                                await send_api.image_to_stream(
-                                    image_base64=image_to_send_b64,
-                                    stream_id=stream_id,
-                                    set_reply=trigger_msg is not None,
-                                    reply_message=trigger_msg,
-                                    storage_message=False
-                                )
-                                
+                                if image_to_send_b64:
+                                    reply_with_image = self.get_config("behavior.reply_with_image", True)
+                                    trigger_msg = None
+                                    
+                                    if reply_with_image and img_idx == 0:  # 仅对第一张回复
+                                        try:
+                                            from src.common.data_models.database_data_model import DatabaseMessages
+                                            msg_info = self.message.message_info
+                                            user_info = msg_info.user_info
+                                            group_info = getattr(msg_info, 'group_info', None)
+                                            chat_stream = self.message.chat_stream
+                                            
+                                            trigger_msg = DatabaseMessages(
+                                                message_id=msg_info.message_id,
+                                                time=msg_info.time,
+                                                chat_id=self._get_current_chat_id() or "",
+                                                processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
+                                                user_id=user_info.user_id if user_info else "",
+                                                user_nickname=user_info.user_nickname if user_info else "",
+                                                user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                                chat_info_group_id=group_info.group_id if group_info else None,
+                                                chat_info_group_name=group_info.group_name if group_info else None,
+                                                chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
+                                                chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
+                                                chat_info_platform=chat_stream.platform if chat_stream else "",
+                                                chat_info_user_id=user_info.user_id if user_info else "",
+                                                chat_info_user_nickname=user_info.user_nickname if user_info else "",
+                                                chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
+                                                chat_info_user_platform=user_info.platform if user_info else "",
+                                            )
+                                        except Exception as e:
+                                            logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
+                                            trigger_msg = None
+                                    
+                                    await send_api.image_to_stream(
+                                        image_base64=image_to_send_b64,
+                                        stream_id=stream_id,
+                                        set_reply=trigger_msg is not None,
+                                        reply_message=trigger_msg,
+                                        storage_message=False
+                                    )
+                                    sent_count += 1
+                                else:
+                                    logger.error(f"第 {img_idx+1} 张图片下载或转换失败")
+
+                            if sent_count > 0:
                                 await self._notify_success(elapsed)
                             else:
-                                raise Exception("图片下载或转换失败")
+                                raise Exception("所有提取的图片下载或转换失败")
                         else:
                             raise Exception("无法从当前消息中确定stream_id")
                     except Exception as e:
