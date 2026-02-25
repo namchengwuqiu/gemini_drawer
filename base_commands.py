@@ -559,8 +559,12 @@ class BaseDrawCommand(BaseCommand, ABC):
                 img_data = None
                 use_stream = endpoint.get("stream", False)
                 
+                debug_mode = self.get_config("behavior.debug_mode", False)
+                
                 if use_stream:
                     try:
+                        debug_sse_lines = [] if debug_mode else None
+                        accumulated_content = ""
                         async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0, follow_redirects=True) as client:
                             async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
                                 if response.status_code != 200:
@@ -579,6 +583,9 @@ class BaseDrawCommand(BaseCommand, ABC):
                                         if data_str == "DONE" or data_str == "[DONE]":
                                             break
                                         
+                                        if debug_sse_lines is not None:
+                                            debug_sse_lines.append(data_str)
+                                        
                                         try:
                                             response_data = json.loads(data_str)
                                             extracted_data = await extract_all_image_data(response_data)
@@ -586,8 +593,34 @@ class BaseDrawCommand(BaseCommand, ABC):
                                                 img_data = extracted_data
                                                 logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
                                                 break
+                                            
+                                            # 累积 delta.content（用于流结束后提取 URL）
+                                            if "choices" in response_data and response_data["choices"]:
+                                                delta = response_data["choices"][0].get("delta", {})
+                                                chunk_content = delta.get("content", "")
+                                                if chunk_content:
+                                                    accumulated_content += chunk_content
                                         except json.JSONDecodeError:
                                             pass
+                        
+                        # 流结束后：如果逐 chunk 没提取到，尝试从累积内容中提取
+                        if not img_data and accumulated_content:
+                            logger.info(f"[图片] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
+                            pseudo_response = {
+                                "choices": [{
+                                    "message": {
+                                        "content": accumulated_content
+                                    }
+                                }]
+                            }
+                            img_data = await extract_all_image_data(pseudo_response)
+                            if img_data:
+                                logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
+                        
+                        if not img_data and debug_mode and debug_sse_lines:
+                            logger.warning(f"[调试模式] SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
+                            for idx, dl in enumerate(debug_sse_lines):
+                                logger.warning(f"[调试模式] SSE[{idx}]: {dl[:500]}")
                     except httpx.RequestError as e:
                         logger.error(f"SSE 请求错误: {e}")
                         raise
@@ -607,7 +640,11 @@ class BaseDrawCommand(BaseCommand, ABC):
                         data = response.json()
                         img_data = await extract_all_image_data(data)
                         if not img_data:
-                            logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
+                            if debug_mode:
+                                logger.warning(f"[调试模式] 非流式响应未提取到图片，原始响应:")
+                                logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+                            else:
+                                logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
                             raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
                     else:
                         raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
@@ -1055,8 +1092,12 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 img_data = None
                 use_stream = endpoint.get("stream", False)
                 
+                debug_mode = self.get_config("behavior.debug_mode", False)
+                
                 if use_stream:
                     try:
+                        debug_sse_lines = [] if debug_mode else None
+                        accumulated_content = ""
                         async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0, follow_redirects=True) as client:
                             async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
                                 if response.status_code != 200:
@@ -1070,6 +1111,10 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                     if line.startswith('data:'):
                                         data_str = line.replace('data:', '').strip()
                                         if data_str == "DONE" or data_str == "[DONE]": break
+                                        
+                                        if debug_sse_lines is not None:
+                                            debug_sse_lines.append(data_str)
+                                        
                                         try:
                                             response_data = json.loads(data_str)
                                             extracted_data = await extract_all_image_data(response_data)
@@ -1077,7 +1122,33 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                                 img_data = extracted_data
                                                 logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
                                                 break
+                                            
+                                            # 累积 delta.content
+                                            if "choices" in response_data and response_data["choices"]:
+                                                delta = response_data["choices"][0].get("delta", {})
+                                                chunk_content = delta.get("content", "")
+                                                if chunk_content:
+                                                    accumulated_content += chunk_content
                                         except json.JSONDecodeError: pass
+                        
+                        # 流结束后：尝试从累积内容中提取
+                        if not img_data and accumulated_content:
+                            logger.info(f"[多图] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
+                            pseudo_response = {
+                                "choices": [{
+                                    "message": {
+                                        "content": accumulated_content
+                                    }
+                                }]
+                            }
+                            img_data = await extract_all_image_data(pseudo_response)
+                            if img_data:
+                                logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
+                        
+                        if not img_data and debug_mode and debug_sse_lines:
+                            logger.warning(f"[调试模式] 多图SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
+                            for idx, dl in enumerate(debug_sse_lines):
+                                logger.warning(f"[调试模式] SSE[{idx}]: {dl[:500]}")
                     except Exception as e:
                         logger.error(f"SSE 请求错误: {e}")
                         raise
@@ -1094,7 +1165,11 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                         data = response.json()
                         img_data = await extract_all_image_data(data)
                         if not img_data:
-                            logger.warning(f"API 响应成功但未提取到图片。")
+                            if debug_mode:
+                                logger.warning(f"[调试模式] 多图非流式响应未提取到图片，原始响应:")
+                                logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+                            else:
+                                logger.warning(f"API 响应成功但未提取到图片。")
                             raise Exception(f"API未返回图片")
                     else:
                         raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
@@ -1297,7 +1372,8 @@ class BaseVideoCommand(BaseCommand, ABC):
             mime_type=mime_type,
             endpoints=endpoints_to_try,
             proxy=proxy,
-            logger=logger
+            logger=logger,
+            debug_mode=self.get_config("behavior.debug_mode", False)
         )
 
         if video_data:

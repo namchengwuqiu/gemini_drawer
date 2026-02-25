@@ -149,7 +149,8 @@ class ImageGenerateAction(BaseAction):
                 mime_type=mime_type,
                 proxy=proxy,
                 logger=logger,
-                config_getter=self.get_config
+                config_getter=self.get_config,
+                debug_mode=self.get_config("behavior.debug_mode", False)
             )
             
             if img_data:
@@ -341,7 +342,8 @@ class SelfieGenerateAction(BaseAction):
                 mime_type=mime_type,
                 proxy=proxy,
                 logger=logger,
-                config_getter=self.get_config
+                config_getter=self.get_config,
+                debug_mode=self.get_config("behavior.debug_mode", False)
             )
             
             if img_data:
@@ -523,7 +525,8 @@ class SelfieVideoAction(BaseAction):
                 mime_type=mime_type,
                 endpoints=endpoints,
                 proxy=proxy,
-                logger=logger
+                logger=logger,
+                debug_mode=self.get_config("behavior.debug_mode", False)
             )
             
             if video_data:

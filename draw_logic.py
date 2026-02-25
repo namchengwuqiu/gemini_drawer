@@ -267,7 +267,8 @@ async def process_drawing_api_request(
     mime_type: Optional[str],
     proxy: Optional[str],
     logger,
-    config_getter
+    config_getter,
+    debug_mode: bool = False
 ) -> Tuple[Optional[str], str]:
     """
     处理绘图API请求，包含失败重试和多渠道轮询逻辑
@@ -410,6 +411,8 @@ async def process_drawing_api_request(
             
             if use_stream:
                 try:
+                    debug_sse_lines = [] if debug_mode else None
+                    accumulated_content = ""
                     async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0, follow_redirects=True) as client:
                         async with client.stream("POST", request_url, json=current_payload, headers=headers) as response:
                             if response.status_code != 200:
@@ -425,6 +428,9 @@ async def process_drawing_api_request(
                                     data_str = line.replace('data:', '').strip()
                                     if data_str == "DONE" or data_str == "[DONE]": break
                                     
+                                    if debug_sse_lines is not None:
+                                        debug_sse_lines.append(data_str)
+                                    
                                     try:
                                         response_data = json.loads(data_str)
                                         extracted = await extract_all_image_data(response_data)
@@ -432,8 +438,34 @@ async def process_drawing_api_request(
                                             img_data = extracted
                                             logger.info(f"从SSE流中成功提取 {len(extracted)} 张图片数据。")
                                             break
+                                        
+                                        # 累积 delta.content
+                                        if "choices" in response_data and response_data["choices"]:
+                                            delta = response_data["choices"][0].get("delta", {})
+                                            chunk_content = delta.get("content", "")
+                                            if chunk_content:
+                                                accumulated_content += chunk_content
                                     except json.JSONDecodeError:
                                         pass
+                    
+                    # 流结束后：尝试从累积内容中提取
+                    if not img_data and accumulated_content:
+                        logger.info(f"[图片] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
+                        pseudo_response = {
+                            "choices": [{
+                                "message": {
+                                    "content": accumulated_content
+                                }
+                            }]
+                        }
+                        img_data = await extract_all_image_data(pseudo_response)
+                        if img_data:
+                            logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
+                    
+                    if not img_data and debug_mode and debug_sse_lines:
+                        logger.warning(f"[调试模式] SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
+                        for idx, dl in enumerate(debug_sse_lines):
+                            logger.warning(f"[调试模式] SSE[{idx}]: {dl[:500]}")
                 except Exception as e:
                     logger.error(f"SSE 请求错误: {e}")
                     raise
@@ -450,7 +482,11 @@ async def process_drawing_api_request(
                     data = response.json()
                     img_data = await extract_all_image_data(data)
                     if not img_data:
-                        logger.warning(f"API 响应成功但未提取到图片。")
+                        if debug_mode:
+                            logger.warning(f"[调试模式] 非流式响应未提取到图片，原始响应:")
+                            logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+                        else:
+                            logger.warning(f"API 响应成功但未提取到图片。")
                         raise Exception(f"API未返回图片")
                 else:
                     error_text = response.text
@@ -534,7 +570,8 @@ async def process_video_generation(
     mime_type: Optional[str],
     endpoints: List[Dict[str, Any]],
     proxy: Optional[str],
-    logger
+    logger,
+    debug_mode: bool = False
 ) -> Tuple[Optional[str], str]:
     """
     处理视频生成请求，返回 (video_base64_data, error_message)
@@ -641,6 +678,8 @@ async def process_video_generation(
                 
                 async with httpx.AsyncClient(proxy=proxy, timeout=300.0, follow_redirects=True) as client:
                     if use_stream:
+                        # 流式模式：累积所有 content，流结束后统一提取
+                        accumulated_content = ""
                         async with client.stream("POST", api_url, json=openai_payload, headers=headers) as response:
                             if response.status_code != 200:
                                 raw_body = await response.aread()
@@ -657,17 +696,44 @@ async def process_video_generation(
                                         break
                                     try:
                                         response_data = json.loads(data_str)
+                                        # 快速路径：尝试逐 chunk 提取 base64 数据
                                         extracted = await extract_video_data(response_data)
-                                        if extracted:
+                                        if extracted and not extracted.startswith("url:"):
+                                            # 直接拿到了 base64 数据，无需累积
                                             video_data = extracted
                                             break
+                                        
+                                        # 累积 delta.content（用于流结束后提取 URL）
+                                        if "choices" in response_data and response_data["choices"]:
+                                            delta = response_data["choices"][0].get("delta", {})
+                                            chunk_content = delta.get("content", "")
+                                            if chunk_content:
+                                                accumulated_content += chunk_content
                                     except json.JSONDecodeError:
                                         pass
+                        
+                        # 流结束后：如果还没拿到 video_data，尝试从累积内容中提取
+                        if not video_data and accumulated_content:
+                            logger.info(f"[视频] 流式响应累积内容长度: {len(accumulated_content)}")
+                            if debug_mode:
+                                logger.warning(f"[调试模式] 视频流式响应累积内容: {accumulated_content[:2000]}")
+                            # 构造一个伪响应对象，用于 extract_video_data
+                            pseudo_response = {
+                                "choices": [{
+                                    "message": {
+                                        "content": accumulated_content
+                                    }
+                                }]
+                            }
+                            video_data = await extract_video_data(pseudo_response)
                     else:
                         response = await client.post(api_url, json=openai_payload, headers=headers)
                         if response.status_code == 200:
                             data = response.json()
                             video_data = await extract_video_data(data)
+                            if not video_data and debug_mode:
+                                logger.warning(f"[调试模式] 视频非流式响应未提取到数据，原始响应:")
+                                logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
                         else:
                             raise Exception(f"API请求失败: {response.status_code} - {response.text}")
             
@@ -687,6 +753,38 @@ async def process_video_generation(
                         video_data = await extract_video_data(data)
                     else:
                         raise Exception(f"API请求失败: {response.status_code} - {response.text}")
+            
+            # 如果提取到的是 URL，需要下载视频并转为 base64
+            if video_data and video_data.startswith("url:"):
+                video_url = video_data[4:]  # 去掉 "url:" 前缀
+                logger.info(f"[视频] 正在下载视频: {video_url[:100]}...")
+                dl_headers = {
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                    "Accept": "video/mp4,video/*,*/*;q=0.8",
+                    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+                    "Referer": video_url.split("?")[0],
+                    "Authorization": f"Bearer {api_key}",
+                }
+                try:
+                    async with httpx.AsyncClient(proxy=proxy, timeout=120.0, follow_redirects=True) as dl_client:
+                        dl_response = await dl_client.get(video_url, headers=dl_headers)
+                        if dl_response.status_code == 200 and dl_response.content:
+                            video_data = base64.b64encode(dl_response.content).decode('utf-8')
+                            logger.info(f"[视频] 视频下载完成，大小: {len(dl_response.content)} 字节")
+                        else:
+                            # 如果带 Auth 头失败，再尝试不带 Auth 头的纯浏览器请求
+                            logger.warning(f"[视频] 带认证头下载失败 (HTTP {dl_response.status_code})，尝试不带认证头...")
+                            del dl_headers["Authorization"]
+                            dl_response2 = await dl_client.get(video_url, headers=dl_headers)
+                            if dl_response2.status_code == 200 and dl_response2.content:
+                                video_data = base64.b64encode(dl_response2.content).decode('utf-8')
+                                logger.info(f"[视频] 视频下载完成（无认证头），大小: {len(dl_response2.content)} 字节")
+                            else:
+                                raise Exception(f"下载视频失败: HTTP {dl_response.status_code} / {dl_response2.status_code}")
+                except Exception as dl_err:
+                    logger.error(f"[视频] 下载视频失败: {dl_err}")
+                    video_data = None
+                    last_error = f"视频URL获取成功但下载失败: {dl_err}"
             
             if video_data:
                 key_manager.record_key_usage(api_key, True)

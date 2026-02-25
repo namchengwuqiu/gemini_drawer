@@ -39,7 +39,7 @@ from .actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoActio
 @register_plugin
 class GeminiDrawerPlugin(BasePlugin):
     plugin_name: str = "gemini_drawer"
-    plugin_version: str = "1.8.1"
+    plugin_version: str = "1.9.0"
     enable_plugin: bool = True
     dependencies: List[str] = []
     python_dependencies: List[str] = ["httpx", "Pillow", "toml"]
@@ -99,6 +99,7 @@ class GeminiDrawerPlugin(BasePlugin):
             "napcat_port": ConfigField(type=int, default=3033, description="NapCat 正向HTTP端口，用于发送视频文件")
         },
         "behavior": {
+            "debug_mode": ConfigField(type=bool, default=False, description="调试模式：开启后当图片/视频提取失败时，会在终端输出原始API响应内容，帮助排查问题"),
             "admin_only_mode": ConfigField(type=bool, default=False, description="管理员专用模式：开启后仅管理员可使用绘图功能，其他用户会收到'管理员已关闭功能'提示"),
             "auto_recall_status": ConfigField(type=bool, default=True, description="是否自动撤回绘图过程中的状态提示消息（如'🎨 正在提交绘图指令…'）"),
             "success_notify_poke": ConfigField(type=bool, default=True, description="生成成功后使用戳一戳通知用户（替代文字消息'✅ 生成完成'）"),

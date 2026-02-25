@@ -1,5 +1,20 @@
 # Gemini 绘图插件 更新日志
 
+## v1.9.0 (2026-02-25)
+
+### 新增功能
+- **调试模式** 🔍: 新增 `behavior.debug_mode` 配置项，开启后当图片/视频提取失败时，会在终端输出原始 API 响应内容，便于排查问题
+- **视频 URL 下载支持** 🎬: 支持从流式响应中提取视频 URL（如 Grok 返回的 `.mp4` 链接），自动下载并转为 base64 发送
+
+### 改进优化
+- **SSE 流式内容累积** 📦: 图片和视频的 SSE 流式处理逻辑全面升级
+  - 逐 chunk 提取失败后，会将所有 `delta.content` 累积起来，流结束后对完整内容再次尝试提取
+  - 适配 Grok 等 API 将图片/视频 URL 分散在多个 chunk 中返回的场景
+  - 覆盖 BaseDrawCommand、BaseMultiImageDrawCommand、process_drawing_api_request、process_video_generation 全部路径
+- **视频 URL 提取** 🔗: `extract_video_data` 函数新增对纯文本 `.mp4` URL 和 HTML `<source>` 标签中视频 URL 的匹配
+
+---
+
 ## v1.8.1 (2026-02-23)
 
 ### 改进优化

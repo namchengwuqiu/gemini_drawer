@@ -487,19 +487,17 @@ async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
         return []
 
 async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
-    """从API响应中提取视频数据（Base64）
+    """从API响应中提取视频数据（Base64 或 URL）
     
     支持的响应格式:
-    {
-        "choices": [{
-            "message": {
-                "content": "![image](data:video/mp4;base64,AAAAIGZ0eXBpc29tAA..."
-            }
-        }]
-    }
+    1. Base64: content 中包含 data:video/mp4;base64,...
+    2. 视频URL（纯文本）: content 中直接包含 https://...mp4
+    3. 视频URL（HTML）: content 中包含 <source src="https://...mp4">
     
     Returns:
-        base64 编码的视频数据字符串，或 None
+        - base64 编码的视频数据字符串
+        - 或 "url:<视频URL>" 格式的字符串（表示需要下载）
+        - 或 None
     """
     try:
         if "choices" in response_data and isinstance(response_data["choices"], list) and response_data["choices"]:
@@ -530,6 +528,20 @@ async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
                 if match_video_raw:
                     logger.info("从响应中提取到视频 base64 数据 (裸 data URL 格式)")
                     return match_video_raw.group(1)
+                
+                # 匹配视频 URL（纯文本 .mp4 链接）
+                match_video_url = re.search(r"(https?://[^\s<>\"]+\.mp4)", content_data)
+                if match_video_url:
+                    video_url = match_video_url.group(1)
+                    logger.info(f"从响应中提取到视频 URL: {video_url[:100]}...")
+                    return f"url:{video_url}"
+                
+                # 匹配 HTML <source> 标签中的视频 URL
+                match_source_tag = re.search(r'<source[^>]+src="([^"]+)"', content_data)
+                if match_source_tag:
+                    video_url = match_source_tag.group(1)
+                    logger.info(f"从响应中提取到视频 URL (HTML source 标签): {video_url[:100]}...")
+                    return f"url:{video_url}"
         
         # Gemini 格式响应解析
         candidates = response_data.get("candidates")
