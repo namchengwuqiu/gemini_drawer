@@ -533,14 +533,14 @@ async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
                 match_video_url = re.search(r"(https?://[^\s<>\"]+\.mp4)", content_data)
                 if match_video_url:
                     video_url = match_video_url.group(1)
-                    logger.info(f"从响应中提取到视频 URL: {video_url[:100]}...")
+                    logger.info(f"从响应中提取到视频 URL: {video_url}")
                     return f"url:{video_url}"
                 
                 # 匹配 HTML <source> 标签中的视频 URL
                 match_source_tag = re.search(r'<source[^>]+src="([^"]+)"', content_data)
                 if match_source_tag:
                     video_url = match_source_tag.group(1)
-                    logger.info(f"从响应中提取到视频 URL (HTML source 标签): {video_url[:100]}...")
+                    logger.info(f"从响应中提取到视频 URL (HTML source 标签): {video_url}")
                     return f"url:{video_url}"
         
         # Gemini 格式响应解析

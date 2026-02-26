@@ -671,9 +671,17 @@ async def process_video_generation(
                 openai_payload = {
                     "model": endpoint.get("model", "video-preview"),
                     "messages": [{"role": "user", "content": content_list}],
-                    "stream": endpoint.get("stream", False)
+                    "stream": endpoint.get("stream", False),
+                    "video_config": {
+                        "video_length": 10,
+                        "resolution_name": "720p"
+                    }
                 }
-                
+
+                # current_payload = openai_payload
+
+                # logger.info(f"[视频] OpenAI格式: {safe_json_dumps(current_payload)}")
+
                 use_stream = endpoint.get("stream", False)
                 
                 async with httpx.AsyncClient(proxy=proxy, timeout=300.0, follow_redirects=True) as client:
