@@ -223,6 +223,17 @@ class KeyManager:
         logger.info(f"已删除渠道 {key_type} 的第 {index} 个 Key: {key_obj['value'][:8]}...")
         return True
 
+    def delete_keys_by_type(self, key_type: str) -> int:
+        """删除指定渠道的所有 Key，返回删除数量"""
+        keys = self.config.get('keys', [])
+        original_count = len(keys)
+        self.config['keys'] = [k for k in keys if k.get('type') != key_type]
+        deleted_count = original_count - len(self.config['keys'])
+        if deleted_count > 0:
+            self.save_config(self.config)
+            logger.info(f"已删除渠道 {key_type} 的所有 Key，共 {deleted_count} 个")
+        return deleted_count
+
 class DataManager:
     def __init__(self, data_file_path: Path = None):
         if data_file_path is None:

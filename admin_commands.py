@@ -431,7 +431,11 @@ class DeleteChannelCommand(BaseAdminCommand):
             await self.send_text("❌ 请提供名称！")
             return True, "缺少参数", True
         if data_manager.delete_channel(name):
-            await self.send_text(f"✅ 渠道 `{name}` 删除成功！")
+            deleted_keys_count = key_manager.delete_keys_by_type(name)
+            if deleted_keys_count > 0:
+                await self.send_text(f"✅ 渠道 `{name}` 删除成功！\n已同时清理该渠道下的 {deleted_keys_count} 个 Key。")
+            else:
+                await self.send_text(f"✅ 渠道 `{name}` 删除成功！")
         else:
             await self.send_text(f"❌ 未找到渠道 `{name}`。")
         return True, "删除操作", True
