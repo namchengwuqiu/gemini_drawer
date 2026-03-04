@@ -12,3 +12,6 @@ __pycache__/
 
 # Ignore selfie images directory
 images/
+
+# Ignore macOS system files
+.DS_Store
