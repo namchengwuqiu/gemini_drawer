@@ -243,8 +243,10 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                                     if url.startswith("data:image"):
                                         # data URL 格式，提取 base64 部分
                                         if "base64," in url:
-                                            logger.info("从响应中提取到图片 base64 数据 (data URL 格式)")
-                                            return url.split("base64,")[1]
+                                            b64_data = url.split("base64,")[1]
+                                            if len(b64_data) > 1000:
+                                                logger.info("从响应中提取到图片 base64 数据 (data URL 格式)")
+                                                return b64_data
                                     else:
                                         logger.info(f"从响应中提取到图片 URL: {url[:100]}...")
                                         return url
@@ -257,6 +259,12 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                                     match_url = re.search(r"!\[.*?\]\((.*?)\)", text_content)
                                     if match_url:
                                         image_url = match_url.group(1)
+                                        if "base64," in image_url:
+                                            b64_data = image_url.split("base64,")[1]
+                                            if len(b64_data) < 1000:
+                                                continue
+                                            logger.info("从文本中提取到图片 base64 数据 (markdown 格式)")
+                                            return b64_data
                                         logger.info(f"从文本中提取到图片 URL: {image_url[:100] if len(image_url) > 100 else image_url}...")
                                         return image_url
                     
@@ -269,9 +277,17 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                     match_url = re.search(r"!\[.*?\]\((.*?)\)", content_text)
                     if match_url:
                         image_url = match_url.group(1)
-                        log_url = image_url[:100] + "..." if len(image_url) > 100 else image_url
-                        logger.info(f"从响应中提取到图片URL: {log_url}")
-                        return image_url
+                        if "base64," in image_url:
+                            b64_data = image_url.split("base64,")[1]
+                            if len(b64_data) < 1000:
+                                pass # ignore hallucinated short base64
+                            else:
+                                logger.info("从响应中提取到图片 base64 数据 (markdown 格式)")
+                                return b64_data
+                        else:
+                            log_url = image_url[:100] + "..." if len(image_url) > 100 else image_url
+                            logger.info(f"从响应中提取到图片URL: {log_url}")
+                            return image_url
 
                     # 匹配裸露的HTTP/HTTPS URL
                     # 优先匹配常见的图片后缀
@@ -296,8 +312,10 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
 
                     match_b64 = re.search(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
                     if match_b64:
-                        logger.info("从响应中提取到 base64 图片数据 (字符串格式)")
-                        return match_b64.group(1)
+                        b64_data = match_b64.group(1)
+                        if len(b64_data) > 1000:
+                            logger.info("从响应中提取到 base64 图片数据 (字符串格式)")
+                            return b64_data
 
         candidates = response_data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
@@ -431,10 +449,18 @@ async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
                     all_md_urls = re.findall(r"!\[.*?\]\((.*?)\)", content_text)
                     if all_md_urls:
                         for url in all_md_urls:
-                            log_url = url[:100] + "..." if len(url) > 100 else url
-                            logger.info(f"从响应中提取到图片URL: {log_url}")
-                            results.append(url)
-                        return results
+                            if "base64," in url:
+                                b64_data = url.split("base64,")[1]
+                                if len(b64_data) < 1000:
+                                    continue
+                                logger.info("从响应中提取到图片 base64 数据 (markdown 格式)")
+                                results.append(b64_data)
+                            else:
+                                log_url = url[:100] + "..." if len(url) > 100 else url
+                                logger.info(f"从响应中提取到图片URL: {log_url}")
+                                results.append(url)
+                        if results:
+                            return results
 
                     # 匹配裸露的HTTP/HTTPS URL（带图片后缀）
                     all_img_urls = re.findall(r"https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|ico|tiff?)(?:\?[^\s]*)?", content_text, re.IGNORECASE)
@@ -456,8 +482,10 @@ async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
                     all_b64 = re.findall(r"data:image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
                     if all_b64:
                         for b64 in all_b64:
-                            results.append(b64)
-                        return results
+                            if len(b64) > 1000:
+                                results.append(b64)
+                        if results:
+                            return results
 
         # Gemini 格式
         candidates = response_data.get("candidates")

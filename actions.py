@@ -168,13 +168,15 @@ class ImageGenerateAction(BaseAction):
                         if image_bytes:
                             image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
                     elif 'base64,' in single_img_data:
-                        # 提取 Base64
-                        image_to_send_b64 = single_img_data.split('base64,')[1]
+                        # 提取 Base64 并清理空白字符
+                        image_to_send_b64 = single_img_data.split('base64,')[1].replace('\n', '').replace('\r', '').replace(' ', '')
                     else:
                         # 假定是纯 Base64
                         image_to_send_b64 = single_img_data
                     
                     if image_to_send_b64:
+                        if isinstance(image_to_send_b64, str):
+                            image_to_send_b64 = image_to_send_b64.replace('\n', '').replace('\r', '').replace(' ', '')
                         await self.send_image(image_to_send_b64)
                         sent_count += 1
                 
@@ -335,7 +337,7 @@ class SelfieGenerateAction(BaseAction):
             # 获取 proxy
             proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
             
-            await self.send_text("我现在就去拍一张，请稍等一下...")
+            # await self.send_text("我现在就去拍一张，请稍等一下...")
             
             # 调用绘图逻辑
             img_data, error = await process_drawing_api_request(
@@ -361,12 +363,14 @@ class SelfieGenerateAction(BaseAction):
                         if image_bytes:
                             image_to_send_b64 = base64.b64encode(image_bytes).decode('utf-8')
                     elif single_img_data.startswith('data:image') and 'base64,' in single_img_data:
-                        # 提取 data URL 中的 Base64 部分
-                        image_to_send_b64 = single_img_data.split('base64,')[1]
+                        # 提取 data URL 中的 Base64 部分并清理空白字符
+                        image_to_send_b64 = single_img_data.split('base64,')[1].replace('\n', '').replace('\r', '').replace(' ', '')
                     else:
                         image_to_send_b64 = single_img_data
                     
                     if image_to_send_b64:
+                        if isinstance(image_to_send_b64, str):
+                            image_to_send_b64 = image_to_send_b64.replace('\n', '').replace('\r', '').replace(' ', '')
                         await self.send_image(image_to_send_b64)
                         sent_count += 1
                 
