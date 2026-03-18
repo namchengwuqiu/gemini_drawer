@@ -508,7 +508,7 @@ class SelfieVideoAction(BaseAction):
             full_prompt = await self._polish_video_prompt(full_prompt)
             
             logger.info(f"Generating selfie video with prompt: {full_prompt}")
-            await self.send_text("我现在就去录一段视频，请稍等一下...")
+            # await self.send_text("我现在就去录一段视频，请稍等一下...")
             
             # 使用复用函数
             from .draw_logic import get_video_endpoints, process_video_generation, send_video_via_napcat
@@ -552,6 +552,7 @@ class SelfieVideoAction(BaseAction):
                 )
                 
                 if success:
+                    await self.send_text("当当当！专门为你拍的视频来啦，快夸夸我！(≧▽≦)✨")
                     return True, "成功发送自拍视频"
                 else:
                     await self.send_text(f"❌ 视频发送失败: {send_error}")
