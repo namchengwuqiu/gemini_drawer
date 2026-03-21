@@ -465,8 +465,8 @@ class BaseDrawCommand(BaseCommand, ABC):
                 client_proxy = proxy 
                 
                 is_openai = False
-                
                 is_doubao = False
+                is_tsai = False
                 
                 if endpoint_type == 'lmarena':
                     is_openai = True
@@ -483,6 +483,11 @@ class BaseDrawCommand(BaseCommand, ABC):
                 elif "generateContent" in api_url:
                     is_openai = False
                     request_url = f"{api_url}?key={api_key}"
+                elif endpoint_type.startswith("custom_tsart") or "tavr.top" in api_url.lower() or "tsart.lat" in api_url.lower() or "endpoint=image" in api_url.lower():
+                    is_tsai = True
+                    is_openai = False
+                    is_doubao = False
+                    base_url = api_url.split("?")[0]
                 else:
                     logger.warning(f"无法识别的API地址格式: {api_url}，跳过。请检查配置。")
                     continue
@@ -519,6 +524,24 @@ class BaseDrawCommand(BaseCommand, ABC):
                         logger.info(f"构建豆包文生图请求: model={model_name}, prompt={user_text_prompt[:50]}...")
                     
                     current_payload = doubao_payload
+                
+                elif is_tsai:
+                    headers["x-api-key"] = api_key
+                    if image_bytes and mime_type:
+                        request_url = f"{base_url}?endpoint=image_editing"
+                        current_payload = {
+                            "prompt": user_text_prompt,
+                            "image": f"data:{mime_type};base64,{base64_img}",
+                            "seed": -1
+                        }
+                    else:
+                        request_url = f"{base_url}?endpoint=image_generation"
+                        workflow = endpoint.get("model", "rr3")
+                        current_payload = {
+                            "prompt": user_text_prompt,
+                            "workflow": workflow,
+                            "seed": -1
+                        }
                 
                 elif is_openai:
                     if api_key:
@@ -630,24 +653,55 @@ class BaseDrawCommand(BaseCommand, ABC):
                 
                 else:
                     try:
-                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
-                            response = await client.post(request_url, json=current_payload, headers=headers)
+                        if is_tsai:
+                            async with httpx.AsyncClient(proxy=client_proxy, timeout=60.0, follow_redirects=True) as client:
+                                response = await client.post(request_url, json=current_payload, headers=headers)
+                                if response.status_code != 200:
+                                    raise Exception(f"创建任务失败: {response.status_code} - {response.text}")
+
+                                resp_json = response.json()
+                                task_id = resp_json.get("data", {}).get("id")
+                                if not task_id:
+                                    raise Exception(f"未能获取TS-AI任务ID: {resp_json}")
+
+                                poll_url = f"{base_url}?endpoint=task_status&task_id={task_id}"
+                                for _ in range(100):
+                                    await asyncio.sleep(3)
+                                    poll_resp = await client.get(poll_url, headers=headers)
+                                    if poll_resp.status_code != 200:
+                                        continue
+
+                                    poll_data = poll_resp.json()
+                                    status = poll_data.get("data", {}).get("status")
+                                    if status == "completed":
+                                        image_url = poll_data["data"]["result"]["image_url"]
+                                        img_data = [image_url]
+                                        break
+                                    elif status == "failed":
+                                        error_msg = poll_data.get("data", {}).get("error", "未知错误")
+                                        raise Exception(f"TS-AI生成失败: {error_msg}")
+                                else:
+                                    raise Exception("TS-AI任务轮询超时")
+                        else:
+                            async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
+                                response = await client.post(request_url, json=current_payload, headers=headers)
                     except httpx.RequestError as e:
                         logger.error(f"httpx.RequestError for endpoint {endpoint_type} ({request_url}): {e}")
                         raise
 
-                    if response.status_code == 200:
-                        data = response.json()
-                        img_data = await extract_all_image_data(data)
-                        if not img_data:
-                            if debug_mode:
-                                logger.warning(f"[调试模式] 非流式响应未提取到图片，原始响应:")
-                                logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
-                            else:
-                                logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
-                            raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
-                    else:
-                        raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+                    if not is_tsai:
+                        if response.status_code == 200:
+                            data = response.json()
+                            img_data = await extract_all_image_data(data)
+                            if not img_data:
+                                if debug_mode:
+                                    logger.warning(f"[调试模式] 非流式响应未提取到图片，原始响应:")
+                                    logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+                                else:
+                                    logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
+                                raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
+                        else:
+                            raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
 
                 if img_data:
                     if endpoint_type != 'lmarena':
@@ -1011,6 +1065,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 
                 is_openai = False
                 is_doubao = False
+                is_tsai = False
                 
                 if endpoint_type == 'lmarena':
                     is_openai = True
@@ -1026,6 +1081,11 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 elif "generateContent" in api_url:
                     is_openai = False
                     request_url = f"{api_url}?key={api_key}"
+                elif endpoint_type.startswith("custom_tsart") or "tavr.top" in api_url.lower() or "tsart.lat" in api_url.lower() or "endpoint=image" in api_url.lower():
+                    is_tsai = True
+                    is_openai = False
+                    is_doubao = False
+                    base_url = api_url.split("?")[0]
                 else:
                     logger.warning(f"无法识别的API地址格式: {api_url}，跳过。请检查配置。")
                     continue
@@ -1056,6 +1116,29 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                     doubao_payload["image"] = image_list
                     
                     current_payload = doubao_payload
+                
+                elif is_tsai:
+                    headers["x-api-key"] = api_key
+                    if images:
+                        first_image = convert_if_gif(images[0])
+                        first_image_b64 = base64.b64encode(first_image).decode('utf-8')
+                        first_image_mime = get_image_mime_type(first_image)
+                        if len(images) > 1:
+                            logger.info(f"TS-AI 多图暂仅使用第 1 张参考图，其余 {len(images) - 1} 张将被忽略。")
+                        request_url = f"{base_url}?endpoint=image_editing"
+                        current_payload = {
+                            "prompt": user_text_prompt,
+                            "image": f"data:{first_image_mime};base64,{first_image_b64}",
+                            "seed": -1
+                        }
+                    else:
+                        request_url = f"{base_url}?endpoint=image_generation"
+                        workflow = endpoint.get("model", "rr3")
+                        current_payload = {
+                            "prompt": user_text_prompt,
+                            "workflow": workflow,
+                            "seed": -1
+                        }
                 
                 elif is_openai:
                     if api_key:
@@ -1155,24 +1238,55 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 
                 else:
                     try:
-                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
-                            response = await client.post(request_url, json=current_payload, headers=headers)
+                        if is_tsai:
+                            async with httpx.AsyncClient(proxy=client_proxy, timeout=60.0, follow_redirects=True) as client:
+                                response = await client.post(request_url, json=current_payload, headers=headers)
+                                if response.status_code != 200:
+                                    raise Exception(f"创建任务失败: {response.status_code} - {response.text}")
+
+                                resp_json = response.json()
+                                task_id = resp_json.get("data", {}).get("id")
+                                if not task_id:
+                                    raise Exception(f"未能获取TS-AI任务ID: {resp_json}")
+
+                                poll_url = f"{base_url}?endpoint=task_status&task_id={task_id}"
+                                for _ in range(60):
+                                    await asyncio.sleep(3)
+                                    poll_resp = await client.get(poll_url, headers=headers)
+                                    if poll_resp.status_code != 200:
+                                        continue
+
+                                    poll_data = poll_resp.json()
+                                    status = poll_data.get("data", {}).get("status")
+                                    if status == "completed":
+                                        image_url = poll_data["data"]["result"]["image_url"]
+                                        img_data = [image_url]
+                                        break
+                                    elif status == "failed":
+                                        error_msg = poll_data.get("data", {}).get("error", "未知错误")
+                                        raise Exception(f"TS-AI生成失败: {error_msg}")
+                                else:
+                                    raise Exception("TS-AI任务轮询超时")
+                        else:
+                            async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
+                                response = await client.post(request_url, json=current_payload, headers=headers)
                     except httpx.RequestError as e:
                         logger.error(f"httpx.RequestError: {e}")
                         raise
 
-                    if response.status_code == 200:
-                        data = response.json()
-                        img_data = await extract_all_image_data(data)
-                        if not img_data:
-                            if debug_mode:
-                                logger.warning(f"[调试模式] 多图非流式响应未提取到图片，原始响应:")
-                                logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
-                            else:
-                                logger.warning(f"API 响应成功但未提取到图片。")
-                            raise Exception(f"API未返回图片")
-                    else:
-                        raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+                    if not is_tsai:
+                        if response.status_code == 200:
+                            data = response.json()
+                            img_data = await extract_all_image_data(data)
+                            if not img_data:
+                                if debug_mode:
+                                    logger.warning(f"[调试模式] 多图非流式响应未提取到图片，原始响应:")
+                                    logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+                                else:
+                                    logger.warning(f"API 响应成功但未提取到图片。")
+                                raise Exception(f"API未返回图片")
+                        else:
+                            raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
 
                 if img_data:
                     if endpoint_type != 'lmarena':

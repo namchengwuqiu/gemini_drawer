@@ -34,13 +34,7 @@ class HelpCommand(BaseCommand):
         header_content = [(ReplyContentType.TEXT, header_text)]
 
         user_text = "✨ 用户指令 ✨\n--------------------\n"
-        if prompts_config:
-            user_text += "【预设风格】(点击指令即可复制)\n"
-            sorted_prompts = sorted(prompts_config.keys())
-            user_text += "\n".join([f"▪️ /+ {name}" for name in sorted_prompts])
-            user_text += "\n\n"
-        
-        user_text += "【自定义风格】\n"
+        user_text += "【绘图指令】\n"
         user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片。\n"
         user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图。\n"
         user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用。\n"
@@ -48,7 +42,14 @@ class HelpCommand(BaseCommand):
         user_text += "▪️ /图生视频 {描述词}: 图生视频，需配合图片使用。\n"
         user_text += "▪️ /文生视频 {描述词}: 文生视频，只需文字描述。\n\n"
         user_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容。\n\n"
-        user_text += "【使用方法】\n1. 回复图片 + 指令\n2. @用户 + 指令\n3. 发送图片 + 指令\n4. 直接发送指令 (使用自己头像)"
+        user_text += "【使用方法】\n1. 回复图片 + 指令\n2. @用户 + 指令\n3. 发送图片 + 指令\n4. 直接发送指令 (使用自己头像)\n\n"
+
+
+        if prompts_config:
+            user_text += "【预设风格】(点击指令即可复制)\n"
+            sorted_prompts = sorted(prompts_config.keys())
+            user_text += "\n".join([f"▪️ /+ {name}" for name in sorted_prompts])
+            user_text += "\n\n"
         
         user_content = [(ReplyContentType.TEXT, user_text)]
         nodes_to_send = [("1", bot_name, header_content), ("1", bot_name, user_content)]

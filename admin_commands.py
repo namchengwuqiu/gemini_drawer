@@ -322,9 +322,11 @@ class AddChannelCommand(BaseAdminCommand):
             is_doubao_image = "/images/generations" in rest_part
             is_doubao_video = "/contents/generations/tasks" in rest_part
             is_doubao = is_doubao_image or is_doubao_video
+            is_tsai_video = "endpoint=video" in rest_part
+            is_tsai = "tsart.lat" in rest_part or "tavr.top" in rest_part or "endpoint=" in rest_part or "linux.tsart.lat" in rest_part
             
-            if not is_openai and not is_gemini and not is_doubao:
-                await self.send_text("❌ URL 格式不正确！\n支持的格式：\n- OpenAI: 包含 /chat/completions\n- Gemini: 包含 generateContent\n- 豆包图片: 包含 /images/generations\n- 豆包视频: 包含 /contents/generations/tasks")
+            if not is_openai and not is_gemini and not is_doubao and not is_tsai:
+                await self.send_text("❌ URL 格式不正确！\n支持的格式：\n- OpenAI: 包含 /chat/completions\n- Gemini: 包含 generateContent\n- 豆包图片: 包含 /images/generations\n- 豆包视频: 包含 /contents/generations/tasks\n- TS-AI: 包含 tsart.lat 或 tavr.top 或 endpoint=")
                 return True, "URL格式错误", True
 
             if is_openai:
@@ -364,6 +366,14 @@ class AddChannelCommand(BaseAdminCommand):
                      await self.send_text("❌ 豆包格式必须指定模型名称！")
                      return True, "缺少模型", True
 
+            elif is_tsai:
+                if last_colon_index != -1 and rest_part[:last_colon_index].strip().startswith("http"):
+                    possible_url = rest_part[:last_colon_index].strip()
+                    url = possible_url
+                    model = rest_part[last_colon_index+1:].strip()
+                else:
+                    url = rest_part.strip()
+            
             elif is_gemini:
                 url = rest_part.strip()
                 if not url.endswith(":generateContent") and "generateContent" not in url:
@@ -373,13 +383,13 @@ class AddChannelCommand(BaseAdminCommand):
             channel_info = {"url": url, "enabled": True, "stream": False}
             if model: channel_info["model"] = model
             # 自动标记视频渠道
-            if is_doubao_video:
+            if is_doubao_video or is_tsai_video:
                 channel_info["is_video"] = True
             data_manager.add_channel(name, channel_info)
 
-            api_type = "豆包视频" if is_doubao_video else ("豆包图片" if is_doubao_image else ("OpenAI" if is_openai else "Gemini"))
+            api_type = "豆包视频" if is_doubao_video else ("豆包图片" if is_doubao_image else ("OpenAI" if is_openai else ("Gemini" if is_gemini else "TS-AI")))
             msg = f"✅ 自定义渠道 `{name}` 添加成功！\n类型: {api_type}\n请使用 `/渠道添加key {name} <your-api-key>` 添加密钥。"
-            if is_doubao_video:
+            if is_doubao_video or is_tsai_video:
                 msg += "\n已自动标记为视频渠道。"
             await self.send_text(msg)
             return True, "添加成功", True

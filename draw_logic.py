@@ -305,6 +305,7 @@ async def process_drawing_api_request(
             
             is_openai = False
             is_doubao = False
+            is_tsai = False
             
             # 判断 API 类型
             if endpoint_type == 'lmarena':
@@ -322,6 +323,11 @@ async def process_drawing_api_request(
             elif "generateContent" in api_url:
                 is_openai = False
                 request_url = f"{api_url}?key={api_key}"
+            elif endpoint_type.startswith("custom_tsart") or "tavr.top" in api_url.lower() or "tsart.lat" in api_url.lower() or "endpoint=image" in api_url.lower():
+                is_tsai = True
+                is_openai = False
+                is_doubao = False
+                base_url = api_url.split("?")[0]
             else:
                 logger.warning(f"无法识别的API地址格式: {api_url}，跳过。请检查配置。")
                 continue
@@ -362,6 +368,27 @@ async def process_drawing_api_request(
                 
                 current_payload = doubao_payload
             
+            elif is_tsai:
+                headers["x-api-key"] = api_key
+                if image_bytes and mime_type:
+                    request_url = f"{base_url}?endpoint=image_editing"
+                    workflow = endpoint.get("model", "rr3")
+                    base64_img = base64.b64encode(image_bytes).decode('utf-8')
+                    tsai_payload = {
+                        "prompt": user_text_prompt,
+                        "image": f"data:{mime_type};base64,{base64_img}",
+                        "seed": -1
+                    }
+                else:
+                    request_url = f"{base_url}?endpoint=image_generation"
+                    workflow = endpoint.get("model", "rr3")
+                    tsai_payload = {
+                        "prompt": user_text_prompt,
+                        "workflow": workflow,
+                        "seed": -1
+                    }
+                current_payload = tsai_payload
+
             elif is_openai:
                 if api_key:
                     headers["Authorization"] = f"Bearer {api_key}"
@@ -472,25 +499,56 @@ async def process_drawing_api_request(
             
             else:
                 try:
-                    async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
-                        response = await client.post(request_url, json=current_payload, headers=headers)
+                    if is_tsai:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=60.0, follow_redirects=True) as client:
+                            response = await client.post(request_url, json=current_payload, headers=headers)
+                            if response.status_code != 200:
+                                raise Exception(f"创建任务失败: {response.status_code} - {response.text}")
+                            
+                            resp_json = response.json()
+                            task_id = resp_json.get("data", {}).get("id")
+                            if not task_id:
+                                raise Exception(f"未能获取TS-AI任务ID: {resp_json}")
+                                
+                            poll_url = f"{base_url}?endpoint=task_status&task_id={task_id}"
+                            for _ in range(60):
+                                await asyncio.sleep(3)
+                                poll_resp = await client.get(poll_url, headers=headers)
+                                if poll_resp.status_code != 200:
+                                    continue
+                                    
+                                poll_data = poll_resp.json()
+                                status = poll_data.get("data", {}).get("status")
+                                if status == "completed":
+                                    image_url = poll_data["data"]["result"]["image_url"]
+                                    img_data = [image_url]
+                                    break
+                                elif status == "failed":
+                                    error_msg = poll_data.get("data", {}).get("error", "未知错误")
+                                    raise Exception(f"TS-AI生成失败: {error_msg}")
+                            else:
+                                raise Exception("TS-AI任务轮询超时")
+                    else:
+                        async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
+                            response = await client.post(request_url, json=current_payload, headers=headers)
                 except httpx.RequestError as e:
                     logger.error(f"httpx.RequestError: {e}")
                     raise
 
-                if response.status_code == 200:
-                    data = response.json()
-                    img_data = await extract_all_image_data(data)
-                    if not img_data:
-                        if debug_mode:
-                            logger.warning(f"[调试模式] 非流式响应未提取到图片，原始响应:")
-                            logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
-                        else:
-                            logger.warning(f"API 响应成功但未提取到图片。")
-                        raise Exception(f"API未返回图片")
-                else:
-                    error_text = response.text
-                    raise Exception(f"API请求失败, 状态码: {response.status_code} - {error_text}")
+                if not is_tsai:
+                    if response.status_code == 200:
+                        data = response.json()
+                        img_data = await extract_all_image_data(data)
+                        if not img_data:
+                            if debug_mode:
+                                logger.warning(f"[调试模式] 非流式响应未提取到图片，原始响应:")
+                                logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+                            else:
+                                logger.warning(f"API 响应成功但未提取到图片。")
+                            raise Exception(f"API未返回图片")
+                    else:
+                        error_text = response.text
+                        raise Exception(f"API请求失败, 状态码: {response.status_code} - {error_text}")
 
             if img_data:
                 if endpoint_type != 'lmarena':
@@ -745,6 +803,57 @@ async def process_video_generation(
                         else:
                             raise Exception(f"API请求失败: {response.status_code} - {response.text}")
             
+            # TS-AI 视频生成
+            elif "api.tavr.top" in api_url or "api.tsart.lat" in api_url or "tsart.lat" in api_url or "endpoint=video_generation" in api_url:
+                base_url = api_url.split("?")[0]
+                request_url = f"{base_url}?endpoint=video_generation"
+                headers["x-api-key"] = api_key
+                
+                tsai_video_payload = {
+                    "prompt": prompt,
+                    "seed": -1
+                }
+                
+                if base64_img and mime_type:
+                    tsai_video_payload["mode"] = "i2v"
+                    tsai_video_payload["image"] = f"data:{mime_type};base64,{base64_img}"
+                else:
+                    tsai_video_payload["mode"] = "t2v"
+                    tsai_video_payload["width"] = 832
+                    tsai_video_payload["height"] = 480
+                    
+                async with httpx.AsyncClient(proxy=proxy, timeout=60.0, follow_redirects=True) as client:
+                    response = await client.post(request_url, json=tsai_video_payload, headers=headers)
+                    if response.status_code != 200:
+                        raise Exception(f"创建TS-AI视频任务失败: {response.status_code} - {response.text}")
+                    
+                    task_id = response.json().get("data", {}).get("id")
+                    if not task_id:
+                        raise Exception(f"未获取到TS-AI视频任务ID: {response.text}")
+                        
+                    logger.info(f"[视频] TS-AI任务已创建: {task_id}")
+                    
+                    poll_url = f"{base_url}?endpoint=task_status&task_id={task_id}"
+                    for _ in range(120): # 最多10分钟
+                        await asyncio.sleep(5)
+                        poll_resp = await client.get(poll_url, headers=headers)
+                        if poll_resp.status_code != 200:
+                            continue
+                            
+                        poll_data = poll_resp.json()
+                        status = poll_data.get("data", {}).get("status")
+                        if status == "completed":
+                            result_data = poll_data.get("data", {}).get("result", {})
+                            video_url = result_data.get("video_url") or result_data.get("image_url")
+                            if video_url:
+                                video_data = f"url:{video_url}"
+                            break
+                        elif status == "failed":
+                            error_msg = poll_data.get("data", {}).get("error", "未知错误")
+                            raise Exception(f"TS-AI视频生成失败: {error_msg}")
+                    else:
+                        raise Exception("TS-AI视频任务轮询超时")
+
             # Gemini 格式
             elif "generateContent" in api_url:
                 parts = [{"text": prompt}]
