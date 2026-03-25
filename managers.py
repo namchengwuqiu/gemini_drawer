@@ -36,13 +36,71 @@ from .utils import save_config_file
 
 logger = get_logger("gemini_drawer")
 
+
+def _get_external_data_dir() -> Path:
+    """获取插件外部数据目录，将数据存储在插件目录之外，
+    避免 WebUI 更新插件时因删除整个插件目录导致数据丢失。
+    
+    支持两种部署方式:
+    
+    Docker 部署 (docker-compose.yml):
+        /MaiMBot/              (WORKDIR)
+        ├── plugins/gemini_drawer/  <- 挂载自 data/MaiMBot/plugins/
+        └── data/                   <- 挂载自 data/MaiMBot/
+            └── gemini_drawer/      <- 外部数据目录
+    
+    直接部署:
+        data/MaiMBot/
+        ├── plugins/gemini_drawer/  <- 插件代码
+        └── gemini_drawer/          <- 外部数据目录
+    """
+    plugin_dir = Path(__file__).parent  # .../plugins/gemini_drawer
+    plugins_parent = plugin_dir.parent.parent  # Docker: /MaiMBot/  Host: data/MaiMBot/
+    
+    # Docker 环境: plugins/ 和 data/ 是同级目录，都在 /MaiMBot/ 下
+    # 检测方式: 如果 parent 下有 data/ 子目录且它不是当前插件的 data/
+    data_subdir = plugins_parent / "data"
+    if data_subdir.is_dir() and data_subdir != plugin_dir / "data":
+        external_dir = data_subdir / "gemini_drawer"
+    else:
+        # 直接部署: plugins/ 在 data/MaiMBot/ 下
+        external_dir = plugins_parent / "gemini_drawer"
+    
+    external_dir.mkdir(parents=True, exist_ok=True)
+    return external_dir
+
+
+def _migrate_internal_file(internal_file: Path, external_file: Path) -> bool:
+    """将插件内部数据文件迁移到外部目录
+    
+    如果外部文件不存在且内部文件存在，则复制数据。
+    迁移完成后保留内部文件作为备份（不删除）。
+    
+    Returns:
+        True 如果执行了迁移
+    """
+    if external_file.exists() or not internal_file.exists():
+        return False
+    
+    try:
+        import shutil
+        shutil.copy2(internal_file, external_file)
+        logger.info(f"已迁移数据文件: {internal_file.name} -> {external_file}")
+        return True
+    except Exception as e:
+        logger.error(f"迁移数据文件失败 {internal_file.name}: {e}")
+        return False
+
+
 class KeyManager:
     def __init__(self, keys_file_path: Path = None):
         if keys_file_path is None:
             self.plugin_dir = Path(__file__).parent
-            self.data_dir = self.plugin_dir / "data"
-            self.data_dir.mkdir(exist_ok=True)
+            self.data_dir = _get_external_data_dir()
             self.keys_file = self.data_dir / "keys.json"
+            # 从插件内部旧路径迁移数据
+            internal_keys = self.plugin_dir / "data" / "keys.json"
+            _migrate_internal_file(internal_keys, self.keys_file)
         else:
             self.keys_file = keys_file_path
             self.plugin_dir = self.keys_file.parent.parent 
@@ -238,9 +296,11 @@ class DataManager:
     def __init__(self, data_file_path: Path = None):
         if data_file_path is None:
             self.plugin_dir = Path(__file__).parent
-            self.data_dir = self.plugin_dir / "data"
-            self.data_dir.mkdir(exist_ok=True)
+            self.data_dir = _get_external_data_dir()
             self.data_file = self.data_dir / "data.json"
+            # 从插件内部旧路径迁移数据
+            internal_data = self.plugin_dir / "data" / "data.json"
+            _migrate_internal_file(internal_data, self.data_file)
         else:
             self.data_file = data_file_path
             self.plugin_dir = self.data_file.parent.parent
