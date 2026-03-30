@@ -19,7 +19,7 @@ def is_command_message(message: Any) -> bool:
     if not message:
         return False
         
-    target_commands = ["/绘图", "＃绘图", "/多图", "/bnn", "/文生视频","/图生视频"]
+    target_commands = ["/绘图", "＃绘图", "/多图", "/bnn", "/文生视频","/图生视频","/+"]
     
     def check_text(text: str) -> bool:
         if not text: return False
@@ -80,7 +80,7 @@ class ImageGenerateAction(BaseAction):
         "当用户说'生成人设'、'写个人设'、'来个人设'时，通常是指文字角色设定，不是图片，除非明确提到'画'或'图'",
         "用户让别人或AI去做某事（如'叫ai给你生成xx'）属于建议或讨论，不是对本bot的绘图指令，不应触发",
         "如果用户只是说'发张图'但没说发什么，可以尝试生成一张通用的美图",
-        "如果遇到/绘图、/bnn、/多图，这种带斜杠的指令，不要再调用此Action",
+        "如果遇到/绘图、/bnn、/多图、/+，这种带斜杠的指令，不要再调用此Action",
         "注意：不要连续触发，如果刚刚已经发送过图片或正在生成中，就不要再次触发此动作，除非用户再次主动要求"
     ]
     
