@@ -248,7 +248,7 @@ pip install -r requirements.txt
 本插件支持三种类型的后端，并会自动轮询尝试：
 
 1.  **LMArena (本地/自部署)**
-    - **特点**: 免费，需要在本地或服务器上自行部署 [LMArenaImagenAutomator](https://github.com/foxhui/LMArenaImagenAutomator)。
+    - **特点**: 免费，需要在本地或服务器上自行部署 [WebAI2API](https://github.com/foxhui/WebAI2API)。
     - **配置**: 在 `config.toml` 的 `[api]` 部分填入 `lmarena_api_url`。
 
 2.  **Google 官方 Key**
