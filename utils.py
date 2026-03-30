@@ -317,6 +317,15 @@ async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
                             logger.info("从响应中提取到 base64 图片数据 (字符串格式)")
                             return b64_data
 
+                    # 匹配无 data: 前缀的 base64 图片数据
+                    # 格式: image/jpeg;base64,... 或 image/png;base64,...
+                    match_b64_noprefix = re.search(r"(?:^|[\s,])image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
+                    if match_b64_noprefix:
+                        b64_data = match_b64_noprefix.group(1)
+                        if len(b64_data) > 1000:
+                            logger.info("从响应中提取到 base64 图片数据 (无data:前缀格式)")
+                            return b64_data
+
         candidates = response_data.get("candidates")
         if not isinstance(candidates, list) or not candidates:
             return None
@@ -485,6 +494,17 @@ async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
                             if len(b64) > 1000:
                                 results.append(b64)
                         if results:
+                            return results
+
+                    # 匹配无 data: 前缀的 base64 图片数据
+                    # 格式: image/jpeg;base64,... 或 image/png;base64,...
+                    all_b64_noprefix = re.findall(r"(?:^|[\s,])image/\w+;base64,([a-zA-Z0-9+/=\n]+)", content_text)
+                    if all_b64_noprefix:
+                        for b64 in all_b64_noprefix:
+                            if len(b64) > 1000:
+                                results.append(b64)
+                        if results:
+                            logger.info(f"从响应中提取到 {len(results)} 张图片 (无data:前缀格式)")
                             return results
 
         # Gemini 格式

@@ -1,5 +1,14 @@
 # Gemini 绘图插件 更新日志
 
+## v1.9.6 (2026-03-30)
+
+### 修复
+- **Base64 图片提取兼容性修复** 🖼️: 修复了部分第三方 API（如 `custom_web2api`）在 SSE 流中返回的 Base64 图片数据缺少 `data:` 前缀（格式为 `image/jpeg;base64,...` 而非 `data:image/jpeg;base64,...`）导致无法提取图片的问题。
+  - 在 `extract_image_data` 和 `extract_all_image_data` 中新增对无 `data:` 前缀格式的正则匹配
+  - 覆盖逐 chunk 提取和累积内容提取两条路径
+
+---
+
 ## v1.9.5 (2026-03-25)
 
 ### 修复
