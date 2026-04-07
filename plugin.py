@@ -91,10 +91,10 @@ class GeminiDrawerPlugin(BasePlugin):
         "api": {
             "enable_google": ConfigField(type=bool, default=True, description="是否启用Google官方API"),
             "api_url": ConfigField(type=str, default="https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image:generateContent", description="Google官方的Gemini API 端点"),
-            "enable_lmarena": ConfigField(type=bool, default=False, description="是否启用LMArena API"),
-            "lmarena_api_url": ConfigField(type=str, default="http://xxx:666/v1/chat/completions", description="LMArena API的基础URL"),
-            "lmarena_api_key": ConfigField(type=str, default="", description="LMArena API密钥 (可选, 使用Bearer Token)"),
-            "lmarena_model_name": ConfigField(type=str, default="gemini-3-pro-image-preview", description="LMArena 使用的模型名称"),
+            "enable_lmarena": ConfigField(type=bool, default=False, description="是否启用第三方API"),
+            "lmarena_api_url": ConfigField(type=str, default="http://xxx:666/v1/chat/completions", description="第三方API的基础URL"),
+            "lmarena_api_key": ConfigField(type=str, default="", description="第三方API密钥 (可选, 使用Bearer Token)"),
+            "lmarena_model_name": ConfigField(type=str, default="gemini-3-pro-image-preview", description="第三方API 使用的模型名称"),
             "napcat_host": ConfigField(type=str, default="napcat", description="NapCat HTTP服务器地址（Docker环境下设为'napcat'或容器名）"),
             "napcat_port": ConfigField(type=int, default=3033, description="NapCat 正向HTTP端口，用于发送视频文件")
         },
