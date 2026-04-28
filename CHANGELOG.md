@@ -1,5 +1,19 @@
 # Gemini 绘图插件 更新日志
 
+## v1.9.7 (2026-04-28)
+
+### 新增功能
+- **gpt-image-2 模型支持** 🎨: 新增对 OpenAI `gpt-image-2` 系列模型的完整支持。
+  - 自动识别渠道模型名称中包含 `gpt-image` 的配置
+  - 自动将 `/v1/chat/completions` 端点路由到正确的 `/v1/images/generations`（文生图）或 `/v1/images/edits`（图生图）
+  - 文生图模式使用标准 JSON 请求格式（`prompt` + `model` + `size`）
+  - 图生图模式使用 `multipart/form-data` 格式上传源图片
+  - 强制关闭流式模式（gpt-image 的 images API 不支持 SSE）
+  - 兼容现有的豆包格式响应解析（`data[].b64_json` / `data[].url`）
+  - **无需修改渠道 URL 配置**，插件会自动检测模型名并切换端点
+
+---
+
 ## v1.9.6 (2026-03-30)
 
 ### 修复

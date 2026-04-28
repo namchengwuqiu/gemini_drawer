@@ -306,12 +306,27 @@ async def process_drawing_api_request(
             is_openai = False
             is_doubao = False
             is_tsai = False
+            is_gpt_image = False
+            
+            # 获取模型名称（用于判断特殊模型类型）
+            endpoint_model = endpoint.get("model", "")
             
             # 判断 API 类型
             if endpoint_type == 'lmarena':
                 is_openai = True
                 request_url = f"{api_url}" 
                 client_proxy = None 
+            elif endpoint_model and "gpt-image" in endpoint_model.lower():
+                # gpt-image 系列模型只支持 /v1/images/generations 和 /v1/images/edits
+                is_gpt_image = True
+                is_openai = False
+                # 自动将 /v1/chat/completions 替换为正确的端点
+                base_api_url = api_url.replace("/v1/chat/completions", "").replace("/chat/completions", "").rstrip("/")
+                if image_bytes and mime_type:
+                    request_url = f"{base_api_url}/v1/images/edits"
+                else:
+                    request_url = f"{base_api_url}/v1/images/generations"
+                logger.info(f"检测到 gpt-image 模型，自动切换端点: {request_url}")
             elif "/chat/completions" in api_url:
                 is_openai = True
                 request_url = api_url
@@ -343,7 +358,65 @@ async def process_drawing_api_request(
                         break
             
             # 特定 API 格式转换
-            if is_doubao:
+            if is_gpt_image:
+                # gpt-image-2 使用 /v1/images/generations 或 /v1/images/edits
+                headers["Authorization"] = f"Bearer {api_key}"
+                model_name = endpoint_model or "gpt-image-2"
+                
+                if image_bytes and mime_type:
+                    # 图生图模式：使用 /v1/images/edits (multipart/form-data)
+                    # gpt-image 的 edits 端点需要 multipart 上传
+                    del headers["Content-Type"]  # 让 httpx 自动设置 multipart boundary
+                    
+                    # 构建 multipart 表单数据
+                    import io as _io
+                    image_file = _io.BytesIO(image_bytes)
+                    # 根据 mime_type 确定文件扩展名
+                    ext_map = {"image/png": "png", "image/jpeg": "jpg", "image/webp": "webp", "image/gif": "gif"}
+                    file_ext = ext_map.get(mime_type, "png")
+                    
+                    files = {
+                        "image": (f"input.{file_ext}", image_file, mime_type),
+                    }
+                    form_data = {
+                        "model": model_name,
+                        "prompt": user_text_prompt,
+                        "size": "auto",
+                    }
+                    
+                    logger.info(f"构建 gpt-image 图生图请求 (edits): model={model_name}")
+                    
+                    # 直接发送 multipart 请求
+                    async with httpx.AsyncClient(proxy=client_proxy, timeout=180.0, follow_redirects=True) as client:
+                        response = await client.post(request_url, data=form_data, files=files, headers=headers)
+                    
+                    if response.status_code == 200:
+                        data = response.json()
+                        img_data = await extract_all_image_data(data)
+                        if img_data:
+                            if endpoint_type != 'lmarena':
+                                key_manager.record_key_usage(api_key, True)
+                            elapsed = (datetime.now() - start_time).total_seconds()
+                            logger.info(f"使用 {endpoint_type} (gpt-image edits) 端点成功生成图片，耗时 {elapsed:.2f}s")
+                            return img_data, ""
+                        else:
+                            if debug_mode:
+                                logger.warning(f"[调试模式] gpt-image edits 响应未提取到图片，原始响应:")
+                                logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+                            raise Exception("gpt-image edits API未返回图片")
+                    else:
+                        raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
+                else:
+                    # 文生图模式：使用 /v1/images/generations (JSON)
+                    gpt_image_payload = {
+                        "model": model_name,
+                        "prompt": user_text_prompt,
+                        "size": "auto",
+                    }
+                    current_payload = gpt_image_payload
+                    logger.info(f"构建 gpt-image 文生图请求 (generations): model={model_name}")
+            
+            elif is_doubao:
                 headers["Authorization"] = f"Bearer {api_key}"
                 model_name = endpoint.get("model", "doubao-seedream-4-5-251128")
                 
@@ -435,6 +508,10 @@ async def process_drawing_api_request(
             
             img_data = None
             use_stream = endpoint.get("stream", False)
+            
+            # gpt-image 的 images API 不支持流式，强制关闭
+            if is_gpt_image:
+                use_stream = False
             
             if use_stream:
                 try:
