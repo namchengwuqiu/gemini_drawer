@@ -29,10 +29,10 @@ import base64
 from pathlib import Path
 from typing import List, Tuple, Type, Optional, Dict, Any
 from PIL import Image
-from src.common.logger import get_logger
+import logging
 
 # 日志记录器
-logger = get_logger("gemini_drawer")
+logger = logging.getLogger("plugin.gemini_drawer")
 
 def fix_broken_toml_config(file_path: Path):
     """

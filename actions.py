@@ -4,15 +4,15 @@ import asyncio
 from typing import Tuple, List, Dict, Optional, Any
 from datetime import datetime
 
-from src.plugin_system.apis import message_api, llm_api
-from src.plugin_system import BaseAction, ActionActivationType
-from src.common.logger import get_logger
+from maibot_sdk.compat.apis import message_api, llm_api
+from maibot_sdk.compat.base import BaseAction, ActionActivationType
+import logging
 
 from .draw_logic import get_drawing_endpoints, process_drawing_api_request, extract_source_image
 from .utils import download_image, convert_if_gif, get_image_mime_type
 from .managers import key_manager
 
-logger = get_logger("gemini_drawer_action")
+logger = logging.getLogger("plugin.gemini_drawer.action")
 
 def is_command_message(message: Any) -> bool:
     """检查消息是否是特定绘图指令 (/绘图, /多图, /bnn)，忽略 @mention"""

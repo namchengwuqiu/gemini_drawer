@@ -13,7 +13,7 @@ import os
 from .utils import extract_all_image_data, safe_json_dumps, download_image
 from .managers import key_manager, data_manager
 
-from src.plugin_system.apis import message_api
+from maibot_sdk.compat.apis import message_api
 try:
     from src.common.database.database_model import Images, Messages
 except ImportError:

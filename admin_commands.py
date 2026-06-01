@@ -25,7 +25,7 @@ Gemini Drawer 管理员命令模块
 import re
 from typing import Tuple, Optional
 from pathlib import Path
-from src.plugin_system import ReplyContentType
+from maibot_sdk.compat.base import ReplyContentType
 from .base_commands import BaseAdminCommand
 from .managers import key_manager, data_manager
 from .utils import logger, save_config_file
@@ -99,7 +99,7 @@ class ChannelListKeysCommand(BaseAdminCommand):
             channel_content = [(ReplyContentType.TEXT, "\n".join(channel_lines))]
             nodes_to_send.append(("1", bot_name, channel_content))
 
-        await self.send_forward(nodes_to_send)
+        await self._send_forward_via_ctx(nodes_to_send)
         return True, "查询成功", True
 
 class ChannelResetKeyCommand(BaseAdminCommand):
@@ -258,7 +258,7 @@ class ViewPromptCommand(BaseAdminCommand):
                 ("1", bot_name, [(ReplyContentType.TEXT, f"📝 提示词: {name}")]),
                 ("1", bot_name, [(ReplyContentType.TEXT, prompts[name])])
             ]
-            await self.send_forward(nodes_to_send)
+            await self._send_forward_via_ctx(nodes_to_send)
         else:
             await self.send_text(f"❌ 未找到提示词 `{name}`。")
         return True, "查看成功", True
@@ -533,7 +533,7 @@ class ListChannelsCommand(BaseAdminCommand):
             custom_content = [(ReplyContentType.TEXT, "\n".join(custom_lines))]
             nodes_to_send.append(("1", bot_name, custom_content))
         
-        await self.send_forward(nodes_to_send)
+        await self._send_forward_via_ctx(nodes_to_send)
         return True, "查询成功", True
 
 class ChannelSetStreamCommand(BaseAdminCommand):

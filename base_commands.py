@@ -35,19 +35,19 @@ from abc import ABC, abstractmethod
 from typing import Tuple, Optional, List, Dict, Any
 
 import httpx
-from src.plugin_system import BaseCommand
-from src.plugin_system.apis import message_api, send_api, chat_api
-from src.common.logger import get_logger
+from maibot_sdk.compat.base import BaseCommand
+from maibot_sdk.compat.apis import message_api, send_api, chat_api
+import logging
 
 from .utils import (
-    download_image, convert_if_gif, get_image_mime_type, 
+    download_image, convert_if_gif, get_image_mime_type,
     safe_json_dumps, extract_image_data, extract_all_image_data, extract_video_data
 )
 
 from .managers import key_manager, data_manager
 from .draw_logic import extract_source_image
 
-logger = get_logger("gemini_drawer")
+logger = logging.getLogger("plugin.gemini_drawer")
 
 class BaseAdminCommand(BaseCommand, ABC):
     permission: str = "owner"
@@ -55,7 +55,7 @@ class BaseAdminCommand(BaseCommand, ABC):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
-        
+
         user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
         if not user_id_from_msg:
             logger.warning("无法从 self.message.message_info.user_info 中获取 user_id")
@@ -65,16 +65,63 @@ class BaseAdminCommand(BaseCommand, ABC):
         str_user_id = str(user_id_from_msg)
         admin_list = self.get_config("general.admins", [])
         str_admin_list = [str(admin) for admin in admin_list]
-        
+
         if str_user_id not in str_admin_list:
             await self.send_text("❌ 仅管理员可用")
             return True, "无权限访问", True
-        
+
         return await self.handle_admin_command()
 
     @abstractmethod
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         raise NotImplementedError
+
+    async def _send_forward_via_ctx(self, nodes_to_send: list) -> bool:
+        """将旧格式的转发节点通过原生 ctx.send.forward() 发送
+
+        旧格式: [(user_id, nickname, [(ReplyContentType, content), ...]), ...]
+        新格式: [{"user_id": "0", "nickname": name, "segments": [{"type": "text", "content": text}]}, ...]
+        """
+        try:
+            if not hasattr(self, 'ctx') or not self.ctx:
+                # 降级为纯文本
+                all_text = "\n".join(
+                    "\n".join(seg[1] for seg in node[2] if seg[1])
+                    for node in nodes_to_send
+                )
+                await self.send_text(all_text)
+                return True
+
+            messages = []
+            for node in nodes_to_send:
+                _, nickname, segments = node
+                text_parts = []
+                for seg in segments:
+                    # seg = (ReplyContentType, content)
+                    text_parts.append(str(seg[1]))
+                messages.append({
+                    "user_id": "0",
+                    "nickname": nickname,
+                    "segments": [{"type": "text", "content": "\n".join(text_parts)}]
+                })
+
+            stream_id = self._get_stream_id()
+            if stream_id:
+                await self.ctx.send.forward(messages, stream_id)
+                return True
+            else:
+                # 降级
+                all_text = "\n".join(m["segments"][0]["content"] for m in messages)
+                await self.send_text(all_text)
+                return True
+        except Exception as e:
+            logger.warning(f"转发消息失败，降级为纯文本: {e}")
+            all_text = "\n".join(
+                "\n".join(seg[1] for seg in node[2] if seg[1])
+                for node in nodes_to_send
+            )
+            await self.send_text(all_text)
+            return True
 
 class BaseDrawCommand(BaseCommand, ABC):
     permission: str = "user"
@@ -89,13 +136,13 @@ class BaseDrawCommand(BaseCommand, ABC):
                 if stream_id:
                     logger.debug(f"使用 stream_id 作为 chat_id: {stream_id}")
                     return stream_id
-                
+
                 group_info = getattr(chat_stream, 'group_info', None)
                 if group_info and hasattr(group_info, 'group_id') and group_info.group_id:
                     chat_id = f"{chat_stream.platform}:{group_info.group_id}"
                     logger.debug(f"使用 group_id 构造 chat_id: {chat_id}")
                     return chat_id
-                    
+
                 user_info = getattr(chat_stream, 'user_info', None)
                 if user_info and hasattr(user_info, 'user_id') and user_info.user_id:
                     chat_id = f"{chat_stream.platform}:{user_info.user_id}"
@@ -120,19 +167,25 @@ class BaseDrawCommand(BaseCommand, ABC):
             return None
 
     async def _safe_recall(self, message_ids: List[str]) -> int:
-        """安全地撤回消息列表，返回成功撤回的数量"""
+        """安全地撤回消息列表，返回成功撤回的数量
+
+        使用 NapCat 适配器的跨插件 API: adapter.napcat.message.delete_msg
+        """
         recalled_count = 0
         for mid in message_ids:
             try:
-                result = await self.send_command(
-                    "DELETE_MSG",
-                    {"message_id": str(mid)},
-                    display_message="",
-                    storage_message=False
-                )
-                if result:
-                    recalled_count += 1
-                    logger.debug(f"成功撤回消息: {mid}")
+                if hasattr(self, 'ctx') and self.ctx:
+                    resp = await self.ctx.api.call(
+                        "adapter.napcat.message.delete_msg",
+                        message_id=str(mid)
+                    )
+                    if resp is not None and not (isinstance(resp, dict) and resp.get("success") is False):
+                        recalled_count += 1
+                        logger.debug(f"成功撤回消息: {mid}")
+                    else:
+                        logger.debug(f"撤回消息未成功: {mid}")
+                else:
+                    logger.debug(f"跳过撤回消息 {mid}（ctx 不可用）")
             except Exception as e:
                 logger.warning(f"撤回消息失败 {mid}: {e}")
         return recalled_count
@@ -142,29 +195,14 @@ class BaseDrawCommand(BaseCommand, ABC):
         if self.get_config("behavior.reply_with_image", True):
             logger.debug("[通知] 已启用回复图片模式，跳过额外通知")
             return
-        
+
         use_poke = self.get_config("behavior.success_notify_poke", True)
-        
+
         if use_poke:
-            try:
-                user_id = None
-                if hasattr(self.message, 'message_info') and self.message.message_info:
-                    user_info = getattr(self.message.message_info, 'user_info', None)
-                    if user_info:
-                        user_id = getattr(user_info, 'user_id', None)
-                
-                if user_id:
-                    logger.info(f"[通知] 使用戳一戳通知用户 {user_id}")
-                    await self.send_command(
-                        "SEND_POKE",
-                        {"qq_id": str(user_id)},
-                        display_message=f"✅ 生成完成 ({elapsed:.2f}s)",
-                        storage_message=False
-                    )
-                    return
-            except Exception as e:
-                logger.warning(f"[通知] 戳一戳失败，回退到文本通知: {e}")
-        
+            poke_ok = await self._send_poke_via_napcat()
+            if poke_ok:
+                return
+
         await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
 
     def get_image_caption(self) -> Optional[str]:
@@ -173,28 +211,61 @@ class BaseDrawCommand(BaseCommand, ABC):
 
     async def _notify_start(self) -> None:
         """开始处理时通知用户：使用戳一戳"""
+        poke_ok = await self._send_poke_via_napcat()
+        if not poke_ok:
+            await self.send_text("🎨 开始处理...")
+
+    async def _send_poke_via_napcat(self) -> bool:
+        """通过 NapCat 适配器发送戳一戳，返回是否成功
+
+        使用跨插件 API: adapter.napcat.message.send_poke
+        参考: https://github.com/TAIY2020/smart_poke_plugin
+        """
         try:
+            if not hasattr(self, 'ctx') or not self.ctx:
+                return False
+
             user_id = None
+            group_id = None
             if hasattr(self.message, 'message_info') and self.message.message_info:
                 user_info = getattr(self.message.message_info, 'user_info', None)
                 if user_info:
                     user_id = getattr(user_info, 'user_id', None)
-            
-            if user_id:
-                logger.info(f"[通知] 使用戳一戳通知用户开始处理 {user_id}")
-                await self.send_command(
-                    "SEND_POKE",
-                    {"qq_id": str(user_id)},
-                    display_message="🎨 开始处理...",
-                    storage_message=False
-                )
-                return
+
+            if not user_id:
+                return False
+
+            # 获取 group_id
+            if hasattr(self.message, 'message_info') and self.message.message_info:
+                g_info = getattr(self.message.message_info, 'group_info', None)
+                if g_info:
+                    group_id = getattr(g_info, 'group_id', None)
+
+            call_kwargs = {"user_id": int(user_id)}
+            if group_id:
+                call_kwargs["group_id"] = int(group_id)
+                call_kwargs["target_id"] = int(user_id)
+
+            resp = await self.ctx.api.call(
+                "adapter.napcat.message.send_poke", **call_kwargs
+            )
+
+            if resp is None:
+                logger.debug("[戳一戳] send_poke 无响应")
+                return False
+            if isinstance(resp, dict) and resp.get("success") is False:
+                logger.debug(f"[戳一戳] send_poke 失败: {resp.get('error')}")
+                return False
+
+            logger.info(f"[戳一戳] 已戳用户 {user_id}")
+            return True
         except Exception as e:
-            logger.warning(f"[通知] 戳一戳失败: {e}")
+            logger.warning(f"[戳一戳] 失败，回退到文本通知: {e}")
+            return False
 
     async def get_source_image_bytes(self) -> Optional[bytes]:
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
-        
+
         # 使用 draw_logic.py 中的共享逻辑
         image_bytes = await extract_source_image(self.message, proxy, logger)
         if image_bytes:
@@ -218,7 +289,7 @@ class BaseDrawCommand(BaseCommand, ABC):
         """
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
         images = []
-        
+
         async def _extract_images_from_segments(segments) -> List[bytes]:
             """从消息段中提取所有图片"""
             extracted = []
@@ -226,7 +297,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                 segments = segments.data
             if not isinstance(segments, list):
                 segments = [segments]
-            
+
             for seg in segments:
                 if seg.type == 'image' or seg.type == 'emoji':
                     if isinstance(seg.data, dict) and seg.data.get('url'):
@@ -241,7 +312,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                         except Exception:
                             continue
             return extracted
-        
+
         # 1. 从回复消息中提取图片
         if hasattr(self.message, 'reply') and self.message.reply:
             reply_msg = self.message.reply
@@ -250,18 +321,18 @@ class BaseDrawCommand(BaseCommand, ABC):
                 reply_images = await _extract_images_from_segments(reply_msg.message_segment)
                 images.extend(reply_images)
                 logger.info(f"[多图] 从回复消息中提取到 {len(reply_images)} 张图片")
-        
+
         # 2. 从当前消息中提取图片
         segments = self.message.message_segment
         current_images = await _extract_images_from_segments(segments)
         images.extend(current_images)
-        
+
         # 准备处理 @ 提及
         if hasattr(segments, 'type') and segments.type == 'seglist':
             segments = segments.data
         if not isinstance(segments, list):
             segments = [segments]
-        
+
         # 3. 收集 @ 提及的用户头像
         mentioned_users = []
         for seg in segments:
@@ -282,14 +353,14 @@ class BaseDrawCommand(BaseCommand, ABC):
                         mentioned_users.append(str(uid))
                 elif isinstance(seg.data, str):
                     mentioned_users.append(seg.data)
-        
+
         # 下载 @ 用户的头像
         for user_id in mentioned_users:
             logger.info(f"[多图] 获取 @{user_id} 的头像")
             img_bytes = await download_image(f"https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640", proxy)
             if img_bytes:
                 images.append(img_bytes)
-        
+
         logger.info(f"[多图] 共收集到 {len(images)} 张图片")
         return images
 
@@ -300,7 +371,7 @@ class BaseDrawCommand(BaseCommand, ABC):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
-        
+
         # 检查群黑名单
         blacklist_groups = self.get_config("general.blacklist_groups", [])
         current_group_id = self._get_current_group_id()
@@ -309,7 +380,7 @@ class BaseDrawCommand(BaseCommand, ABC):
             if current_group_id in str_blacklist:
                 logger.info(f"群 {current_group_id} 在黑名单中，拒绝执行绘图命令")
                 return True, "群黑名单", False
-        
+
         # 检查管理员专用模式
         if self.get_config("behavior.admin_only_mode", False):
             user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
@@ -317,11 +388,11 @@ class BaseDrawCommand(BaseCommand, ABC):
                 str_user_id = str(user_id_from_msg)
                 admin_list = self.get_config("general.admins", [])
                 str_admin_list = [str(admin) for admin in admin_list]
-                
+
                 if str_user_id not in str_admin_list:
                     await self.send_text("⚠️ 管理员已关闭绘图功能")
                     return True, "管理员专用模式", True
-        
+
         start_time = datetime.now()
         status_msg_start_time = time.time()
 
@@ -331,18 +402,18 @@ class BaseDrawCommand(BaseCommand, ABC):
 
         await self._notify_start()
         image_bytes = await self.get_source_image_bytes()
-        
+
         if not image_bytes and not self.allow_text_only:
             await self.send_text("❌ 未找到可供处理的图片或图片处理失败。" )
             return True, "缺少图片或处理失败", True
-        
+
         parts = []
         if image_bytes:
             image_bytes = convert_if_gif(image_bytes)
             base64_img = base64.b64encode(image_bytes).decode('utf-8')
             mime_type = get_image_mime_type(image_bytes)
             parts.append({"inline_data": {"mime_type": mime_type, "data": base64_img}})
-        
+
         parts.append({"text": prompt})
 
         payload = {
@@ -359,7 +430,7 @@ class BaseDrawCommand(BaseCommand, ABC):
 
         if self.get_config("api.enable_lmarena", True):
             lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
-            lmarena_key = self.get_config("api.lmarena_api_key", "") 
+            lmarena_key = self.get_config("api.lmarena_api_key", "")
             endpoints_to_try.append({
                 "type": "lmarena",
                 "url": lmarena_url,
@@ -374,7 +445,7 @@ class BaseDrawCommand(BaseCommand, ABC):
             c_model = None
             c_enabled = True
             c_is_video = False
-            
+
             if isinstance(channel_info, dict):
                 c_url = channel_info.get("url")
                 c_key = channel_info.get("key")
@@ -383,11 +454,11 @@ class BaseDrawCommand(BaseCommand, ABC):
                 c_is_video = channel_info.get("is_video", False)
             elif isinstance(channel_info, str) and ":" in channel_info:
                 c_url, c_key = channel_info.rsplit(":", 1)
-            
+
             # 跳过视频渠道
             if c_is_video:
                 continue
-            
+
             if c_url and c_key and c_enabled:
                 c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
                 endpoints_to_try.append({
@@ -403,7 +474,7 @@ class BaseDrawCommand(BaseCommand, ABC):
         for key_info in key_manager.get_all_keys():
             if key_info.get('status') != 'active':
                 continue
-            
+
             key_type = key_info.get('type')
             if not key_type:
                 key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
@@ -415,24 +486,24 @@ class BaseDrawCommand(BaseCommand, ABC):
                         "url": self.get_config("api.api_url"),
                         "key": key_info['value']
                     })
-            
+
             elif key_type in custom_channels:
                 channel_info = custom_channels[key_type]
                 c_enabled = True
                 c_url = ""
                 c_model = None
                 c_is_video = False
-                
+
                 if isinstance(channel_info, dict):
                     c_url = channel_info.get("url")
                     c_model = channel_info.get("model")
                     c_enabled = channel_info.get("enabled", True)
                     c_is_video = channel_info.get("is_video", False)
-                
+
                 # 跳过视频渠道
                 if c_is_video:
                     continue
-                
+
                 if c_enabled and c_url:
                     c_stream = channel_info.get("stream", False)
                     endpoints_to_try.append({
@@ -454,24 +525,24 @@ class BaseDrawCommand(BaseCommand, ABC):
             api_url = endpoint["url"]
             api_key = endpoint["key"]
             endpoint_type = endpoint["type"]
-            
+
             logger.info(f"尝试第 {i+1}/{len(endpoints_to_try)} 个端点: {endpoint_type} ({api_url})")
 
             headers = {"Content-Type": "application/json"}
             request_url = api_url
 
             try:
-                current_payload = payload 
-                client_proxy = proxy 
-                
+                current_payload = payload
+                client_proxy = proxy
+
                 is_openai = False
                 is_doubao = False
                 is_tsai = False
-                
+
                 if endpoint_type == 'lmarena':
                     is_openai = True
-                    request_url = f"{api_url}" 
-                    client_proxy = None 
+                    request_url = f"{api_url}"
+                    client_proxy = None
                 elif "/chat/completions" in api_url:
                     is_openai = True
                     request_url = api_url
@@ -498,13 +569,13 @@ class BaseDrawCommand(BaseCommand, ABC):
                     if "text" in p:
                         user_text_prompt = p["text"]
                         break
-                
+
                 if is_doubao:
                     # 火山豆包图片生成 API
                     headers["Authorization"] = f"Bearer {api_key}"
-                    
+
                     model_name = endpoint.get("model", "doubao-seedream-4-5-251128")
-                    
+
                     doubao_payload = {
                         "model": model_name,
                         "prompt": user_text_prompt,
@@ -513,7 +584,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                         "stream": False,
                         "watermark": False
                     }
-                    
+
                     # 如果有图片，添加到请求中（图生图模式）
                     if image_bytes:
                         # 豆包支持 data URL 格式的图片
@@ -522,9 +593,9 @@ class BaseDrawCommand(BaseCommand, ABC):
                         logger.info(f"构建豆包图生图请求: model={model_name}, prompt={user_text_prompt[:50]}...")
                     else:
                         logger.info(f"构建豆包文生图请求: model={model_name}, prompt={user_text_prompt[:50]}...")
-                    
+
                     current_payload = doubao_payload
-                
+
                 elif is_tsai:
                     headers["x-api-key"] = api_key
                     if image_bytes and mime_type:
@@ -542,11 +613,11 @@ class BaseDrawCommand(BaseCommand, ABC):
                             "workflow": workflow,
                             "seed": -1
                         }
-                
+
                 elif is_openai:
                     if api_key:
                         headers["Authorization"] = f"Bearer {api_key}"
-                    
+
                     openai_messages = [
                         {
                             "role": "user",
@@ -558,7 +629,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                             ]
                         },
                     ]
-                    
+
                     if image_bytes:
                         openai_messages[0]["content"].append({
                             "type": "image_url",
@@ -578,12 +649,12 @@ class BaseDrawCommand(BaseCommand, ABC):
                     current_payload = openai_payload
 
                 logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {safe_json_dumps(current_payload)}")
-                
+
                 img_data = None
                 use_stream = endpoint.get("stream", False)
-                
+
                 debug_mode = self.get_config("behavior.debug_mode", False)
-                
+
                 if use_stream:
                     try:
                         debug_sse_lines = [] if debug_mode else None
@@ -600,15 +671,15 @@ class BaseDrawCommand(BaseCommand, ABC):
                                         continue
                                     if line.startswith(':'):
                                         continue
-                                    
+
                                     if line.startswith('data:'):
                                         data_str = line.replace('data:', '').strip()
                                         if data_str == "DONE" or data_str == "[DONE]":
                                             break
-                                        
+
                                         if debug_sse_lines is not None:
                                             debug_sse_lines.append(data_str)
-                                        
+
                                         try:
                                             response_data = json.loads(data_str)
                                             extracted_data = await extract_all_image_data(response_data)
@@ -616,7 +687,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                                 img_data = extracted_data
                                                 logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
                                                 break
-                                            
+
                                             # 累积 delta.content（用于流结束后提取 URL）
                                             if "choices" in response_data and response_data["choices"]:
                                                 delta = response_data["choices"][0].get("delta", {})
@@ -625,7 +696,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                                     accumulated_content += chunk_content
                                         except json.JSONDecodeError:
                                             pass
-                        
+
                         # 流结束后：如果逐 chunk 没提取到，尝试从累积内容中提取
                         if not img_data and accumulated_content:
                             logger.info(f"[图片] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
@@ -639,7 +710,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                             img_data = await extract_all_image_data(pseudo_response)
                             if img_data:
                                 logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
-                        
+
                         if not img_data and debug_mode and debug_sse_lines:
                             logger.warning(f"[调试模式] SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
                             for idx, dl in enumerate(debug_sse_lines):
@@ -650,7 +721,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                     except Exception as e:
                         logger.error(f"SSE 流处理失败: {e}")
                         raise
-                
+
                 else:
                     try:
                         if is_tsai:
@@ -706,15 +777,12 @@ class BaseDrawCommand(BaseCommand, ABC):
                 if img_data:
                     if endpoint_type != 'lmarena':
                         key_manager.record_key_usage(api_key, True)
-                    
+
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
-                    
+
                     try:
-                        stream_id = None
-                        if hasattr(self.message, 'chat_stream') and self.message.chat_stream:
-                            stream_info = chat_api.get_stream_info(self.message.chat_stream)
-                            stream_id = stream_info.get('stream_id')
+                        stream_id = self._get_current_chat_id()
 
                         if stream_id:
                             sent_count = 0
@@ -728,11 +796,11 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     image_to_send_b64 = single_img_data.split('base64,')[1]
                                 else:
                                     image_to_send_b64 = single_img_data
-                                
+
                                 if image_to_send_b64:
                                     reply_with_image = self.get_config("behavior.reply_with_image", True)
                                     trigger_msg = None
-                                    
+
                                     if reply_with_image:
                                         try:
                                             from src.common.data_models.database_data_model import DatabaseMessages
@@ -740,16 +808,16 @@ class BaseDrawCommand(BaseCommand, ABC):
                                             user_info = msg_info.user_info
                                             group_info = getattr(msg_info, 'group_info', None)
                                             chat_stream = self.message.chat_stream
-                                            
+
                                             trigger_msg = DatabaseMessages(
-                                                message_id=msg_info.message_id,
-                                                time=msg_info.time,
+                                                message_id=getattr(msg_info, 'message_id', getattr(self.message, 'message_id', '')),
+                                                time=getattr(msg_info, 'time', 0),
                                                 chat_id=self._get_current_chat_id() or "",
                                                 processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
                                                 user_id=user_info.user_id if user_info else "",
                                                 user_nickname=user_info.user_nickname if user_info else "",
                                                 user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                                user_platform=user_info.platform if user_info else "",
+                                                user_platform=getattr(user_info, 'platform', getattr(self.message, 'platform', '')) if user_info else "",
                                                 chat_info_group_id=group_info.group_id if group_info else None,
                                                 chat_info_group_name=group_info.group_name if group_info else None,
                                                 chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
@@ -758,32 +826,32 @@ class BaseDrawCommand(BaseCommand, ABC):
                                                 chat_info_user_id=user_info.user_id if user_info else "",
                                                 chat_info_user_nickname=user_info.user_nickname if user_info else "",
                                                 chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                                chat_info_user_platform=user_info.platform if user_info else "",
+                                                chat_info_user_platform=getattr(user_info, 'platform', getattr(self.message, 'platform', '')) if user_info else "",
                                             )
                                         except Exception as e:
                                             logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
                                             trigger_msg = None
-                                    
+
                                     # 检查是否有图片说明文字（如随机风格名），仅第一张图片发送
                                     caption = self.get_image_caption() if img_idx == 0 else ""
-                                    
+
                                     if caption:
-                                        # 发送图文混合消息
-                                        from src.common.data_models.message_data_model import ReplySetModel, ReplyContent, ReplyContentType
-                                        hybrid_content = [
-                                            ReplyContent(content_type=ReplyContentType.TEXT, content=caption),
-                                            ReplyContent(content_type=ReplyContentType.IMAGE, content=image_to_send_b64)
-                                        ]
-                                        reply_set = ReplySetModel(reply_data=[
-                                            ReplyContent(content_type=ReplyContentType.HYBRID, content=hybrid_content)
-                                        ])
-                                        await send_api.custom_reply_set_to_stream(
-                                            reply_set=reply_set,
-                                            stream_id=stream_id,
-                                            set_reply=False,
-                                            reply_message=trigger_msg,
-                                            storage_message=False
-                                        )
+                                        # 发送图文混合消息（使用原生 send.hybrid API）
+                                        if hasattr(self, 'ctx') and self.ctx:
+                                            hybrid_segments = [
+                                                {"type": "text", "content": caption},
+                                                {"type": "image", "content": image_to_send_b64}
+                                            ]
+                                            await self.ctx.send.hybrid(hybrid_segments, stream_id)
+                                        else:
+                                            # 降级：分别发送文本和图片
+                                            await self.send_text(caption)
+                                            await send_api.image_to_stream(
+                                                image_base64=image_to_send_b64,
+                                                stream_id=stream_id,
+                                                set_reply=False,
+                                                storage_message=False
+                                            )
                                         logger.info(f"[发送] 发送图文混合消息，说明: {caption}")
                                     else:
                                         # 普通图片发送
@@ -797,7 +865,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     sent_count += 1
                                 else:
                                     logger.error(f"第 {img_idx+1} 张图片下载或转换失败")
-                            
+
                             if sent_count > 0:
                                 await self._notify_success(elapsed)
                             else:
@@ -809,7 +877,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                         await self.send_text("❌ 图片发送失败。" )
 
                     await self._recall_status_messages(status_msg_start_time)
-                    return True, "绘图成功", True 
+                    return True, "绘图成功", True
 
                 if not img_data:
                     raise Exception("审核不通过，未能从API响应中获取图片数据")
@@ -858,7 +926,7 @@ class BaseDrawCommand(BaseCommand, ABC):
     async def _recall_status_messages(self, status_msg_start_time: float) -> None:
         auto_recall = self.get_config("behavior.auto_recall_status", True)
         if not auto_recall: return
-        
+
         try:
             chat_id = self._get_current_chat_id()
             if not chat_id: return
@@ -894,7 +962,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
-        
+
         # 检查群黑名单
         blacklist_groups = self.get_config("general.blacklist_groups", [])
         current_group_id = self._get_current_group_id()
@@ -903,18 +971,18 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
             if current_group_id in str_blacklist:
                 logger.info(f"群 {current_group_id} 在黑名单中，拒绝执行多图绘图命令")
                 return True, "群黑名单", False
-        
+
         if self.get_config("behavior.admin_only_mode", False):
             user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
             if user_id_from_msg:
                 str_user_id = str(user_id_from_msg)
                 admin_list = self.get_config("general.admins", [])
                 str_admin_list = [str(admin) for admin in admin_list]
-                
+
                 if str_user_id not in str_admin_list:
                     await self.send_text("⚠️ 管理员已关闭绘图功能")
                     return True, "管理员专用模式", True
-        
+
         start_time = datetime.now()
         status_msg_start_time = time.time()
 
@@ -923,14 +991,14 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
             return True, "无效的Prompt", True
 
         await self._notify_start()
-        
+
         # 获取多张图片
         images = await self.get_multiple_source_images(min_count=2)
-        
+
         if len(images) < 2:
             await self.send_text("❌ 请至少提供2张图片（通过回复消息、@用户或直接发送）")
             return True, "图片数量不足", True
-        
+
         # 构造 Gemini 格式的 parts
         parts = []
         for i, img_bytes in enumerate(images):
@@ -940,7 +1008,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
             # 添加图片标签，帮助模型识别
             parts.append({"text": f"Image {i+1}:"})
             parts.append({"inline_data": {"mime_type": mime_type, "data": base64_img}})
-        
+
         parts.append({"text": f"Prompt: {prompt}"})
 
         payload = {
@@ -958,7 +1026,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
 
         if self.get_config("api.enable_lmarena", True):
             lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
-            lmarena_key = self.get_config("api.lmarena_api_key", "") 
+            lmarena_key = self.get_config("api.lmarena_api_key", "")
             endpoints_to_try.append({
                 "type": "lmarena",
                 "url": lmarena_url,
@@ -973,7 +1041,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
             c_model = None
             c_enabled = True
             c_is_video = False
-            
+
             if isinstance(channel_info, dict):
                 c_url = channel_info.get("url")
                 c_key = channel_info.get("key")
@@ -982,11 +1050,11 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 c_is_video = channel_info.get("is_video", False)
             elif isinstance(channel_info, str) and ":" in channel_info:
                 c_url, c_key = channel_info.rsplit(":", 1)
-            
+
             # 跳过视频渠道
             if c_is_video:
                 continue
-            
+
             if c_url and c_key and c_enabled:
                 c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
                 endpoints_to_try.append({
@@ -1002,7 +1070,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
         for key_info in key_manager.get_all_keys():
             if key_info.get('status') != 'active':
                 continue
-            
+
             key_type = key_info.get('type')
             if not key_type:
                 key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
@@ -1014,24 +1082,24 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                         "url": self.get_config("api.api_url"),
                         "key": key_info['value']
                     })
-            
+
             elif key_type in custom_channels:
                 channel_info = custom_channels[key_type]
                 c_enabled = True
                 c_url = ""
                 c_model = None
                 c_is_video = False
-                
+
                 if isinstance(channel_info, dict):
                     c_url = channel_info.get("url")
                     c_model = channel_info.get("model")
                     c_enabled = channel_info.get("enabled", True)
                     c_is_video = channel_info.get("is_video", False)
-                
+
                 # 跳过视频渠道
                 if c_is_video:
                     continue
-                
+
                 if c_enabled and c_url:
                     c_stream = channel_info.get("stream", False)
                     endpoints_to_try.append({
@@ -1053,24 +1121,24 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
             api_url = endpoint["url"]
             api_key = endpoint["key"]
             endpoint_type = endpoint["type"]
-            
+
             logger.info(f"尝试第 {i+1}/{len(endpoints_to_try)} 个端点: {endpoint_type} ({api_url})")
 
             headers = {"Content-Type": "application/json"}
             request_url = api_url
 
             try:
-                current_payload = payload 
-                client_proxy = proxy 
-                
+                current_payload = payload
+                client_proxy = proxy
+
                 is_openai = False
                 is_doubao = False
                 is_tsai = False
-                
+
                 if endpoint_type == 'lmarena':
                     is_openai = True
-                    request_url = f"{api_url}" 
-                    client_proxy = None 
+                    request_url = f"{api_url}"
+                    client_proxy = None
                 elif "/chat/completions" in api_url:
                     is_openai = True
                     request_url = api_url
@@ -1091,12 +1159,12 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                     continue
 
                 user_text_prompt = prompt
-                
+
                 if is_doubao:
                     headers["Authorization"] = f"Bearer {api_key}"
-                    
+
                     model_name = endpoint.get("model", "doubao-seedream-4-5-251128")
-                    
+
                     doubao_payload = {
                         "model": model_name,
                         "prompt": user_text_prompt,
@@ -1105,18 +1173,18 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                         "stream": False,
                         "watermark": False
                     }
-                    
+
                     image_list = []
                     for img in images:
                         img = convert_if_gif(img)
                         b64_img = base64.b64encode(img).decode('utf-8')
                         mime = get_image_mime_type(img)
                         image_list.append(f"data:{mime};base64,{b64_img}")
-                    
+
                     doubao_payload["image"] = image_list
-                    
+
                     current_payload = doubao_payload
-                
+
                 elif is_tsai:
                     headers["x-api-key"] = api_key
                     if images:
@@ -1139,13 +1207,13 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                             "workflow": workflow,
                             "seed": -1
                         }
-                
+
                 elif is_openai:
                     if api_key:
                         headers["Authorization"] = f"Bearer {api_key}"
-                    
+
                     content_list = [{"type": "text", "text": f"Prompt: {user_text_prompt}"}]
-                    
+
                     for i, img_bytes in enumerate(images):
                         img_bytes = convert_if_gif(img_bytes)
                         base64_img = base64.b64encode(img_bytes).decode('utf-8')
@@ -1157,7 +1225,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                         })
 
                     openai_messages = [{"role": "user", "content": content_list}]
-                    
+
                     model_name = endpoint.get("model")
                     if not model_name:
                         default_model = "gemini-3-pro-image-preview" if endpoint_type == 'lmarena' else "gemini-pro-vision"
@@ -1171,12 +1239,12 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                     current_payload = openai_payload
 
                 logger.info(f"准备向 {endpoint_type} 端点发送多图请求。")
-                
+
                 img_data = None
                 use_stream = endpoint.get("stream", False)
-                
+
                 debug_mode = self.get_config("behavior.debug_mode", False)
-                
+
                 if use_stream:
                     try:
                         debug_sse_lines = [] if debug_mode else None
@@ -1194,10 +1262,10 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                     if line.startswith('data:'):
                                         data_str = line.replace('data:', '').strip()
                                         if data_str == "DONE" or data_str == "[DONE]": break
-                                        
+
                                         if debug_sse_lines is not None:
                                             debug_sse_lines.append(data_str)
-                                        
+
                                         try:
                                             response_data = json.loads(data_str)
                                             extracted_data = await extract_all_image_data(response_data)
@@ -1205,7 +1273,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                                 img_data = extracted_data
                                                 logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
                                                 break
-                                            
+
                                             # 累积 delta.content
                                             if "choices" in response_data and response_data["choices"]:
                                                 delta = response_data["choices"][0].get("delta", {})
@@ -1213,7 +1281,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                                 if chunk_content:
                                                     accumulated_content += chunk_content
                                         except json.JSONDecodeError: pass
-                        
+
                         # 流结束后：尝试从累积内容中提取
                         if not img_data and accumulated_content:
                             logger.info(f"[多图] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
@@ -1227,7 +1295,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                             img_data = await extract_all_image_data(pseudo_response)
                             if img_data:
                                 logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
-                        
+
                         if not img_data and debug_mode and debug_sse_lines:
                             logger.warning(f"[调试模式] 多图SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
                             for idx, dl in enumerate(debug_sse_lines):
@@ -1235,7 +1303,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                     except Exception as e:
                         logger.error(f"SSE 请求错误: {e}")
                         raise
-                
+
                 else:
                     try:
                         if is_tsai:
@@ -1291,15 +1359,12 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 if img_data:
                     if endpoint_type != 'lmarena':
                         key_manager.record_key_usage(api_key, True)
-                    
+
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
-                    
+
                     try:
-                        stream_id = None
-                        if hasattr(self.message, 'chat_stream') and self.message.chat_stream:
-                            stream_info = chat_api.get_stream_info(self.message.chat_stream)
-                            stream_id = stream_info.get('stream_id')
+                        stream_id = self._get_current_chat_id()
 
                         if stream_id:
                             sent_count = 0
@@ -1313,11 +1378,11 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                     image_to_send_b64 = single_img_data.split('base64,')[1]
                                 else:
                                     image_to_send_b64 = single_img_data
-                                
+
                                 if image_to_send_b64:
                                     reply_with_image = self.get_config("behavior.reply_with_image", True)
                                     trigger_msg = None
-                                    
+
                                     if reply_with_image and img_idx == 0:  # 仅对第一张回复
                                         try:
                                             from src.common.data_models.database_data_model import DatabaseMessages
@@ -1325,10 +1390,10 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                             user_info = msg_info.user_info
                                             group_info = getattr(msg_info, 'group_info', None)
                                             chat_stream = self.message.chat_stream
-                                            
+
                                             trigger_msg = DatabaseMessages(
-                                                message_id=msg_info.message_id,
-                                                time=msg_info.time,
+                                                message_id=getattr(msg_info, 'message_id', getattr(self.message, 'message_id', '')),
+                                                time=getattr(msg_info, 'time', 0),
                                                 chat_id=self._get_current_chat_id() or "",
                                                 processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
                                                 user_id=user_info.user_id if user_info else "",
@@ -1342,12 +1407,12 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                                 chat_info_user_id=user_info.user_id if user_info else "",
                                                 chat_info_user_nickname=user_info.user_nickname if user_info else "",
                                                 chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                                chat_info_user_platform=user_info.platform if user_info else "",
+                                                chat_info_user_platform=getattr(user_info, 'platform', getattr(self.message, 'platform', '')) if user_info else "",
                                             )
                                         except Exception as e:
                                             logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
                                             trigger_msg = None
-                                    
+
                                     await send_api.image_to_stream(
                                         image_base64=image_to_send_b64,
                                         stream_id=stream_id,
@@ -1370,7 +1435,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                         await self.send_text("❌ 图片发送失败。" )
 
                     await self._recall_status_messages(status_msg_start_time)
-                    return True, "绘图成功", True 
+                    return True, "绘图成功", True
 
                 if not img_data:
                     raise Exception("审核不通过，未能从API响应中获取图片数据")
@@ -1396,7 +1461,7 @@ class BaseVideoCommand(BaseCommand, ABC):
     """
     视频生成命令基类
     仅使用标记为 is_video=True 的渠道进行视频生成
-    
+
     子类通过设置 requires_image 属性控制是否需要图片输入：
     - requires_image = True: 图生视频（需要图片）
     - requires_image = False: 文生视频（纯文字）
@@ -1429,7 +1494,7 @@ class BaseVideoCommand(BaseCommand, ABC):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         if not self.get_config("general.enable_gemini_drawer", True):
             return True, "Plugin disabled", False
-        
+
         # 检查管理员专用模式
         if self.get_config("behavior.admin_only_mode", False):
             user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
@@ -1437,11 +1502,11 @@ class BaseVideoCommand(BaseCommand, ABC):
                 str_user_id = str(user_id_from_msg)
                 admin_list = self.get_config("general.admins", [])
                 str_admin_list = [str(admin) for admin in admin_list]
-                
+
                 if str_user_id not in str_admin_list:
                     await self.send_text("⚠️ 管理员已关闭绘图功能")
                     return True, "管理员专用模式", True
-        
+
         start_time = datetime.now()
 
         prompt = await self.get_prompt()
@@ -1452,14 +1517,14 @@ class BaseVideoCommand(BaseCommand, ABC):
         image_bytes = None
         base64_img = None
         mime_type = None
-        
+
         if self.requires_image:
             image_bytes = await self.get_source_image_bytes()
-            
+
             if not image_bytes:
                 await self.send_text("❌ 图生视频需要一张图片作为输入！\n请回复图片或@用户或发送图片后使用此指令。")
                 return True, "缺少图片", True
-            
+
             # 构造请求 payload (带图片)
             image_bytes = convert_if_gif(image_bytes)
             base64_img = base64.b64encode(image_bytes).decode('utf-8')
@@ -1467,7 +1532,7 @@ class BaseVideoCommand(BaseCommand, ABC):
 
         # 使用复用函数获取端点
         from .draw_logic import get_video_endpoints, process_video_generation, send_video_via_napcat
-        
+
         endpoints_to_try = await get_video_endpoints(self.get_config, logger=logger)
 
         if not endpoints_to_try:
@@ -1478,7 +1543,7 @@ class BaseVideoCommand(BaseCommand, ABC):
         await self.send_text("🎬 开始生成视频，请稍候...")
 
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
-        
+
         # 使用复用函数生成视频
         video_data, last_error = await process_video_generation(
             prompt=prompt,
@@ -1492,35 +1557,35 @@ class BaseVideoCommand(BaseCommand, ABC):
 
         if video_data:
             elapsed = (datetime.now() - start_time).total_seconds()
-            
+
             # 获取群ID或用户ID
             group_id = None
             user_id = None
-            
+
             if hasattr(self.message, 'message_info') and self.message.message_info:
                 group_info = getattr(self.message.message_info, 'group_info', None)
                 if group_info and hasattr(group_info, 'group_id') and group_info.group_id:
                     group_id = str(group_info.group_id)
-                
+
                 user_info = getattr(self.message.message_info, 'user_info', None)
                 if user_info and hasattr(user_info, 'user_id'):
                     user_id = str(user_info.user_id)
-            
+
             if not group_id and hasattr(self.message, 'chat_id'):
                 chat_id = str(self.message.chat_id)
                 if chat_id.isdigit():
-                     group_id = chat_id 
+                     group_id = chat_id
 
             if not user_id and hasattr(self.message, 'user_id'):
                  user_id = str(self.message.user_id)
 
             if hasattr(self.message, 'message_type') and self.message.message_type == 'private':
                 group_id = None
-            
+
             # 发送视频
             napcat_host = self.get_config("api.napcat_host", "napcat")
             napcat_port = self.get_config("api.napcat_port", 3033)
-            
+
             success, send_error = await send_video_via_napcat(
                 video_base64=video_data,
                 group_id=group_id,
@@ -1529,7 +1594,7 @@ class BaseVideoCommand(BaseCommand, ABC):
                 napcat_port=napcat_port,
                 logger=logger
             )
-            
+
             if success:
                 await self.send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")
                 return True, "视频生成成功", True

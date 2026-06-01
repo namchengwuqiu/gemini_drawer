@@ -10,11 +10,11 @@ HelpCommand (/基咪绘图帮助):
     - 用户可用的绘图指令说明
     - 管理员专用命令（仅对管理员显示）
 
-帮助信息通过转发消息的方式发送，分为多个节点展示不同类别的内容。
+帮助信息通过原生 send.forward() 转发消息发送，分为多个节点展示不同类别的内容。
 管理员命令部分会根据发送者是否在管理员列表中动态显示。
 """
 from typing import Tuple, Optional
-from src.plugin_system import BaseCommand, ReplyContentType
+from maibot_sdk.compat.base import BaseCommand
 from .managers import data_manager
 
 class HelpCommand(BaseCommand):
@@ -26,40 +26,48 @@ class HelpCommand(BaseCommand):
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         prompts_config = data_manager.get_prompts()
         bot_name = "Gemini Drawer"
-        
+
+        # 节点1: 标题和介绍
         header_text = "🎨 Gemini 绘图插件帮助 🎨\n"
         header_text += "本插件基于 Google Gemini 系列模型，提供强大的图片二次创作能力。\n"
-        header_text += "--------------------\n"
-        header_text += "Tip: 管理员可以使用 /添加提示词 可以动态添加新指令哦！"
-        header_content = [(ReplyContentType.TEXT, header_text)]
+        header_text += "━━━━━━━━━━━━━━━━━━━━\n"
+        header_text += "💡 Tip: 管理员可以使用 /添加提示词 动态添加新指令哦！"
 
-        user_text = "✨ 用户指令 ✨\n--------------------\n"
+        # 节点2: 用户指令
+        user_text = "✨ 用户指令 ✨\n━━━━━━━━━━━━━━━━━━━━\n"
         user_text += "【绘图指令】\n"
-        user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片。\n"
-        user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图。\n"
-        user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用。\n"
-        user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图。\n"
-        user_text += "▪️ /图生视频 {描述词}: 图生视频，需配合图片使用。\n"
-        user_text += "▪️ /文生视频 {描述词}: 文生视频，只需文字描述。\n\n"
-        user_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容。\n\n"
-        user_text += "【使用方法】\n1. 回复图片 + 指令\n2. @用户 + 指令\n3. 发送图片 + 指令\n4. 直接发送指令 (使用自己头像)\n\n"
-
+        user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片\n"
+        user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图\n"
+        user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用\n"
+        user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图\n"
+        user_text += "▪️ /图生视频 {描述词}: 图生视频，需配合图片使用\n"
+        user_text += "▪️ /文生视频 {描述词}: 文生视频，只需文字描述\n"
+        user_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容\n\n"
+        user_text += "【使用方法】\n"
+        user_text += "1. 回复图片 + 指令\n"
+        user_text += "2. @用户 + 指令\n"
+        user_text += "3. 发送图片 + 指令\n"
+        user_text += "4. 直接发送指令 (使用自己头像)"
 
         if prompts_config:
-            user_text += "【预设风格】(点击指令即可复制)\n"
+            user_text += "\n\n【预设风格】\n"
             sorted_prompts = sorted(prompts_config.keys())
             user_text += "\n".join([f"▪️ /+ {name}" for name in sorted_prompts])
-            user_text += "\n\n"
-        
-        user_content = [(ReplyContentType.TEXT, user_text)]
-        nodes_to_send = [("1", bot_name, header_content), ("1", bot_name, user_content)]
 
+        # 构建原生 send.forward 格式的消息列表
+        # 格式参考 hello_world_plugin: {"user_id": "0", "nickname": "xxx", "segments": [{"type": "text", "content": "xxx"}]}
+        messages = [
+            {"user_id": "0", "nickname": bot_name, "segments": [{"type": "text", "content": header_text}]},
+            {"user_id": "0", "nickname": bot_name, "segments": [{"type": "text", "content": user_text}]},
+        ]
+
+        # 检查是否为管理员，追加管理员指令节点
         user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
         admin_list = self.get_config("general.admins", [])
         str_admin_list = [str(admin) for admin in admin_list]
 
         if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
-            admin_text = "🔑 管理员指令 🔑\n--------------------\n"
+            admin_text = "🔑 管理员指令 🔑\n━━━━━━━━━━━━━━━━━━━━\n"
             admin_text += "▪️ /渠道添加key: 添加渠道API Key\n"
             admin_text += "▪️ /渠道删除key: 删除渠道API Key\n"
             admin_text += "▪️ /渠道key列表: 查看各渠道Key状态\n"
@@ -76,8 +84,23 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /渠道设置流式 {名称} {true|false}: 设置渠道是否使用流式请求\n"
             admin_text += "▪️ /渠道设置视频 {名称} {true|false}: 设置渠道是否用于视频生成\n"
             admin_text += "▪️ /渠道列表: 查看所有渠道状态"
-            
-            nodes_to_send.append(("1", bot_name, [(ReplyContentType.TEXT, admin_text)]))
+            messages.append({"user_id": "0", "nickname": bot_name, "segments": [{"type": "text", "content": admin_text}]})
 
-        await self.send_forward(nodes_to_send)
+        # 使用原生 send.forward() API 发送转发消息
+        stream_id = self._get_stream_id()
+        if stream_id:
+            from maibot_sdk.compat._context_holder import get_context
+            ctx = get_context()
+            if ctx:
+                await ctx.send.forward(messages, stream_id)
+            else:
+                # 兜底: 如果无法获取原生上下文，则用纯文本发送
+                all_text = header_text + "\n\n" + user_text
+                if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
+                    all_text += "\n\n" + admin_text
+                await self.send_text(all_text)
+        else:
+            await self.send_text("❌ 无法获取消息流ID")
+            return False, "无法获取stream_id", True
+
         return True, "帮助信息已发送", True
