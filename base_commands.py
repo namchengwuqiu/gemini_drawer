@@ -128,7 +128,10 @@ class BaseDrawCommand(BaseCommand, ABC):
     allow_text_only: bool = False
 
     def _get_current_chat_id(self) -> Optional[str]:
-        """获取当前聊天的 chat_id（使用 stream_id）"""
+        """获取当前聊天的 chat_id（优先使用框架注入的 stream_id）"""
+        # 优先使用框架注入的 _stream_id
+        if self._stream_id:
+            return self._stream_id
         try:
             chat_stream = self.message.chat_stream
             if chat_stream:
@@ -348,7 +351,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                 # 处理 at 类型的消息段
                 if isinstance(seg.data, dict):
                      # 尝试多种可能的键名
-                    uid = seg.data.get('qq') or seg.data.get('user_id') or seg.data.get('id')
+                    uid = seg.data.get('qq') or seg.data.get('user_id') or seg.data.get('id') or seg.data.get('target_user_id')
                     if uid:
                         mentioned_users.append(str(uid))
                 elif isinstance(seg.data, str):
@@ -782,7 +785,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                     logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
 
                     try:
-                        stream_id = self._get_current_chat_id()
+                        stream_id = self._get_stream_id()
 
                         if stream_id:
                             sent_count = 0
@@ -801,68 +804,45 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     reply_with_image = self.get_config("behavior.reply_with_image", True)
                                     trigger_msg = None
 
-                                    if reply_with_image:
-                                        try:
-                                            from src.common.data_models.database_data_model import DatabaseMessages
-                                            msg_info = self.message.message_info
-                                            user_info = msg_info.user_info
-                                            group_info = getattr(msg_info, 'group_info', None)
-                                            chat_stream = self.message.chat_stream
+                                    if reply_with_image and img_idx == 0:  # 仅对第一张回复
+                                        trigger_msg = self.message
 
-                                            trigger_msg = DatabaseMessages(
-                                                message_id=getattr(msg_info, 'message_id', getattr(self.message, 'message_id', '')),
-                                                time=getattr(msg_info, 'time', 0),
-                                                chat_id=self._get_current_chat_id() or "",
-                                                processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
-                                                user_id=user_info.user_id if user_info else "",
-                                                user_nickname=user_info.user_nickname if user_info else "",
-                                                user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                                user_platform=getattr(user_info, 'platform', getattr(self.message, 'platform', '')) if user_info else "",
-                                                chat_info_group_id=group_info.group_id if group_info else None,
-                                                chat_info_group_name=group_info.group_name if group_info else None,
-                                                chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
-                                                chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
-                                                chat_info_platform=chat_stream.platform if chat_stream else "",
-                                                chat_info_user_id=user_info.user_id if user_info else "",
-                                                chat_info_user_nickname=user_info.user_nickname if user_info else "",
-                                                chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                                chat_info_user_platform=getattr(user_info, 'platform', getattr(self.message, 'platform', '')) if user_info else "",
-                                            )
-                                        except Exception as e:
-                                            logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
-                                            trigger_msg = None
+                                    # 如果 trigger_msg 是 CompatMessage 等自定义对象，提取其底层的原始字典，避免 RPC 序列化失败
+                                    reply_msg_data = getattr(trigger_msg, '_raw_data', trigger_msg) if trigger_msg else None
 
                                     # 检查是否有图片说明文字（如随机风格名），仅第一张图片发送
                                     caption = self.get_image_caption() if img_idx == 0 else ""
 
-                                    if caption:
-                                        # 发送图文混合消息（使用原生 send.hybrid API）
-                                        if hasattr(self, 'ctx') and self.ctx:
-                                            hybrid_segments = [
-                                                {"type": "text", "content": caption},
-                                                {"type": "image", "content": image_to_send_b64}
-                                            ]
-                                            await self.ctx.send.hybrid(hybrid_segments, stream_id)
-                                        else:
-                                            # 降级：分别发送文本和图片
-                                            await self.send_text(caption)
-                                            await send_api.image_to_stream(
-                                                image_base64=image_to_send_b64,
-                                                stream_id=stream_id,
-                                                set_reply=False,
-                                                storage_message=False
-                                            )
-                                        logger.info(f"[发送] 发送图文混合消息，说明: {caption}")
+                                    if hasattr(self, 'ctx') and self.ctx:
+                                        # 始终使用 hybrid API 来确保我们可以带上 @ 提及
+                                        hybrid_segments = []
+                                        if trigger_msg and getattr(trigger_msg, 'user_id', None):
+                                            hybrid_segments.append({"type": "at", "data": {"target_user_id": trigger_msg.user_id}})
+                                        
+                                        if caption:
+                                            hybrid_segments.append({"type": "text", "content": f" {caption}\n"})
+                                        elif trigger_msg:
+                                            hybrid_segments.append({"type": "text", "content": "\n"}) # 换行分隔头像和图片
+                                            
+                                        hybrid_segments.append({"type": "image", "content": image_to_send_b64})
+                                        
+                                        # 不再使用有坑的 set_reply，直接在消息段里带上 @提及
+                                        send_ok = await self.ctx.send.hybrid(hybrid_segments, stream_id)
+                                        if caption:
+                                            logger.info(f"[发送] 发送图文混合消息，说明: {caption}")
                                     else:
-                                        # 普通图片发送
-                                        await send_api.image_to_stream(
-                                            image_base64=image_to_send_b64,
-                                            stream_id=stream_id,
-                                            set_reply=trigger_msg is not None,
-                                            reply_message=trigger_msg,
-                                            storage_message=False
+                                        # 兼容旧版本 API
+                                        if caption:
+                                            await self.send_text(caption)
+                                        send_ok = await self.ctx.send.image(
+                                            image_to_send_b64, stream_id,
+                                            set_reply=trigger_msg is not None, reply_message=reply_msg_data
                                         )
-                                    sent_count += 1
+
+                                    if send_ok:
+                                        sent_count += 1
+                                    else:
+                                        logger.warning(f"第 {img_idx+1} 张图片发送返回失败 (stream_id={stream_id})")
                                 else:
                                     logger.error(f"第 {img_idx+1} 张图片下载或转换失败")
 
@@ -901,7 +881,7 @@ class BaseDrawCommand(BaseCommand, ABC):
     async def _delayed_recall_fail_message(self, fail_msg_send_time: float, fail_msg_content: str) -> None:
         try:
             await asyncio.sleep(5)
-            chat_id = self._get_current_chat_id()
+            chat_id = self._get_stream_id()
             if not chat_id: return
             await asyncio.sleep(1)
             current_time = time.time()
@@ -928,7 +908,7 @@ class BaseDrawCommand(BaseCommand, ABC):
         if not auto_recall: return
 
         try:
-            chat_id = self._get_current_chat_id()
+            chat_id = self._get_stream_id()
             if not chat_id: return
             await asyncio.sleep(2)
             current_time = time.time()
@@ -1364,7 +1344,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                     logger.info(f"使用 {endpoint_type} 端点成功生成图片，耗时 {elapsed:.2f}s")
 
                     try:
-                        stream_id = self._get_current_chat_id()
+                        stream_id = self._get_stream_id()
 
                         if stream_id:
                             sent_count = 0
@@ -1384,43 +1364,20 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                     trigger_msg = None
 
                                     if reply_with_image and img_idx == 0:  # 仅对第一张回复
-                                        try:
-                                            from src.common.data_models.database_data_model import DatabaseMessages
-                                            msg_info = self.message.message_info
-                                            user_info = msg_info.user_info
-                                            group_info = getattr(msg_info, 'group_info', None)
-                                            chat_stream = self.message.chat_stream
+                                        trigger_msg = self.message
+                                        
+                                    # 如果 trigger_msg 是 CompatMessage，提取 _raw_data 以避免 RPC 序列化错误
+                                    reply_msg_data = getattr(trigger_msg, '_raw_data', trigger_msg) if trigger_msg else None
 
-                                            trigger_msg = DatabaseMessages(
-                                                message_id=getattr(msg_info, 'message_id', getattr(self.message, 'message_id', '')),
-                                                time=getattr(msg_info, 'time', 0),
-                                                chat_id=self._get_current_chat_id() or "",
-                                                processed_plain_text=self.message.processed_plain_text or self.message.raw_message,
-                                                user_id=user_info.user_id if user_info else "",
-                                                user_nickname=user_info.user_nickname if user_info else "",
-                                                user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                                chat_info_group_id=group_info.group_id if group_info else None,
-                                                chat_info_group_name=group_info.group_name if group_info else None,
-                                                chat_info_group_platform=getattr(group_info, 'group_platform', None) if group_info else None,
-                                                chat_info_stream_id=chat_stream.stream_id if chat_stream else "",
-                                                chat_info_platform=chat_stream.platform if chat_stream else "",
-                                                chat_info_user_id=user_info.user_id if user_info else "",
-                                                chat_info_user_nickname=user_info.user_nickname if user_info else "",
-                                                chat_info_user_cardname=getattr(user_info, 'user_cardname', None) if user_info else None,
-                                                chat_info_user_platform=getattr(user_info, 'platform', getattr(self.message, 'platform', '')) if user_info else "",
-                                            )
-                                        except Exception as e:
-                                            logger.warning(f"构造触发消息失败: {e}，将使用普通发送模式")
-                                            trigger_msg = None
-
-                                    await send_api.image_to_stream(
-                                        image_base64=image_to_send_b64,
-                                        stream_id=stream_id,
-                                        set_reply=trigger_msg is not None,
-                                        reply_message=trigger_msg,
-                                        storage_message=False
+                                    # 使用原生 ctx.send.image API 发送图片
+                                    send_ok = await self.ctx.send.image(
+                                        image_to_send_b64, stream_id,
+                                        set_reply=trigger_msg is not None, reply_message=reply_msg_data
                                     )
-                                    sent_count += 1
+                                    if send_ok:
+                                        sent_count += 1
+                                    else:
+                                        logger.warning(f"第 {img_idx+1} 张图片发送返回失败 (stream_id={stream_id})")
                                 else:
                                     logger.error(f"第 {img_idx+1} 张图片下载或转换失败")
 
@@ -1470,7 +1427,10 @@ class BaseVideoCommand(BaseCommand, ABC):
     requires_image: bool = True  # 默认需要图片，子类可覆盖
 
     def _get_current_chat_id(self) -> Optional[str]:
-        """获取当前聊天的 chat_id（使用 stream_id）"""
+        """获取当前聊天的 chat_id（优先使用框架注入的 stream_id）"""
+        # 优先使用框架注入的 _stream_id
+        if self._stream_id:
+            return self._stream_id
         try:
             chat_stream = self.message.chat_stream
             if chat_stream:

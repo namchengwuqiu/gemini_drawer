@@ -114,22 +114,33 @@ async def extract_source_image(
             if not isinstance(segments, list):
                 segments = [segments]
             
+            if logger: logger.info(f"[调试] 提取@，当前 segments: {[({'type': s.type, 'data': s.data} if hasattr(s, 'type') else str(s)) for s in segments]}")
+            
             for seg in segments:
                 # 检查 type='at'
                 if seg.type == 'at':
                     if isinstance(seg.data, dict):
-                        qq = seg.data.get('qq') or seg.data.get('user_id')
+                        qq = seg.data.get('qq') or seg.data.get('user_id') or seg.data.get('id') or seg.data.get('target_user_id')
                         if qq and str(qq) != 'all':
                             return await _download_avatar(str(qq))
-                # 检查 type='text' 中的 @<nick:id>
+                    elif isinstance(seg.data, str) and str(seg.data) != 'all':
+                        return await _download_avatar(str(seg.data))
+                # 检查 type='text' 中的 @<nick:id> 和 @id
                 elif seg.type == 'text' and isinstance(seg.data, str):
                     matches = re.findall(r'@<[^:>]+:([^:>]+)>', seg.data)
                     for user_id in matches:
                         return await _download_avatar(str(user_id))
+                    matches = re.findall(r'@(\d+)', seg.data)
+                    for user_id in matches:
+                        return await _download_avatar(str(user_id))
         
-        # 情况 B: DatabaseMessages (检查文本中的 @<nick:id>)
+        # 情况 B: DatabaseMessages (检查文本中的 @<nick:id> 和 @id)
         text = getattr(message, 'processed_plain_text', '') or getattr(message, 'display_message', '') or ''
+        if logger: logger.info(f"[调试] 提取@，当前纯文本: {text}")
         at_matches = re.findall(r'@<[^:>]+:([^:>]+)>', text)
+        for user_id in at_matches:
+             return await _download_avatar(str(user_id))
+        at_matches = re.findall(r'@(\d+)', text)
         for user_id in at_matches:
              return await _download_avatar(str(user_id))
             

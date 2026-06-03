@@ -59,7 +59,16 @@ class CompatChatStream:
         self.user_info = user_info
         self.group_info = group_info
 
+class CompatMessageString(str):
+    @property
+    def components(self):
+        return []
+
 class CompatMessage:
+    def deepcopy(self):
+        import copy
+        return copy.deepcopy(self)
+
     def __init__(self, raw_data: Any):
         if raw_data is not None and not isinstance(raw_data, dict):
             if hasattr(raw_data, "model_dump"):
@@ -88,6 +97,18 @@ class CompatMessage:
         self.session_id = str(_get_val(["session_id", "stream_id", "message_id"], ""))
         self.processed_plain_text = _get_val(["processed_plain_text", "plain_text", "display_message"], "")
         self.platform = _get_val(["platform"], "qq")
+
+        ts_val = _get_val(["time", "timestamp"])
+        if ts_val:
+            try:
+                from datetime import datetime
+                self.timestamp = datetime.fromtimestamp(float(ts_val))
+            except Exception:
+                from datetime import datetime
+                self.timestamp = datetime.now()
+        else:
+            from datetime import datetime
+            self.timestamp = datetime.now()
 
         # 2. Re-construct message_info
         msg_info = _get_val(["message_info", "message_base_info"], {})
@@ -170,7 +191,7 @@ class CompatMessage:
         if not compat_segments and self.processed_plain_text:
             compat_segments.append(CompatMessageSegment("text", self.processed_plain_text))
 
-        self.raw_message = self.processed_plain_text or ""
+        self.raw_message = CompatMessageString(self.processed_plain_text or "")
 
         if len(compat_segments) == 1:
             self.message_segment = compat_segments[0]
@@ -253,7 +274,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         except Exception:
             pass
 
-        self.ctx.logger.info("Gemini Drawer 插件 v1.9.8 已成功以原生 v1.0 架构加载！")
+        self.ctx.logger.info("Gemini Drawer 插件 v1.9.9 已成功以原生 v1.0 架构加载！")
 
     async def on_unload(self) -> None:
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
@@ -326,6 +347,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                     if attr == "message" and val is not None:
                         val = to_compat_message(val)
                     setattr(instance, attr, val)
+            
+            instance.ctx = self.ctx
             return await instance.execute()
         finally:
             _context_holder.deactivate_plugin(token)
