@@ -333,7 +333,7 @@ class SelfieGenerateAction(BaseAction):
             endpoints = await get_drawing_endpoints(self.get_config)
             
             # 构建 payload (Gemini 格式)
-            from .draw_logic import get_image_mime_type, process_drawing_api_request, download_image
+            from .draw_logic import process_drawing_api_request
             import base64
             mime_type = get_image_mime_type(image_bytes)
             b64_img = base64.b64encode(image_bytes).decode('utf-8')
@@ -533,7 +533,7 @@ class SelfieVideoAction(BaseAction):
             logger.info(f"Generating selfie video with prompt: {full_prompt}")
             
             # 使用复用函数
-            from .draw_logic import get_video_endpoints, process_video_generation, send_video_via_napcat, get_image_mime_type
+            from .draw_logic import get_video_endpoints, process_video_generation, send_video_via_napcat
             import base64
             
             # 获取视频端点
