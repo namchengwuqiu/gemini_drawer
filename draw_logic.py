@@ -62,18 +62,36 @@ async def extract_source_image(
 
     # 2. 尝试从回复的消息中提取
     async def _extract_from_reply() -> Optional[bytes]:
-        # 情况 A: MaiMessages 对象 (Runtime)
+        # 情况 A: 递归检查 reply (因为 message.reply 可能本身是 CompatMessage 但不含图)
         if hasattr(message, 'reply') and message.reply:
-            return await extract_source_image(message.reply, proxy, logger)
+            if hasattr(message.reply, 'message_segment'):
+                img = await extract_source_image(message.reply, proxy, logger)
+                if img: return img
         
         # 情况 B: DatabaseMessages 对象 (Historical)
         if Messages:
             reply_to_id = getattr(message, 'reply_to', None)
+            if not reply_to_id and hasattr(message, 'reply') and message.reply:
+                reply_to_id = getattr(message.reply, 'message_id', None)
+            
             if reply_to_id and isinstance(reply_to_id, str):
                 try:
-                    reply_msg = Messages.get_or_none(Messages.message_id == reply_to_id)
-                    if reply_msg:
-                        return await extract_source_image(reply_msg, proxy, logger)
+                    from src.common.database.database import get_db_session
+                    from sqlmodel import select
+                    from src.common.data_models.mai_message_data_model import MaiMessage
+                    from src.common.data_models.message_component_data_model import ImageComponent, EmojiComponent
+                    
+                    with get_db_session() as session:
+                        statement = select(Messages).where(Messages.message_id == reply_to_id).limit(1)
+                        reply_msg = session.exec(statement).first()
+                        if reply_msg:
+                            mai_msg = MaiMessage.from_db_instance(reply_msg)
+                            for comp in mai_msg.raw_message.components:
+                                if isinstance(comp, (ImageComponent, EmojiComponent)):
+                                    await comp.load_image_binary()
+                                    if comp.binary_data:
+                                        if logger: logger.info("从数据库引用的消息中提取到图片")
+                                        return comp.binary_data
                 except Exception as e:
                     if logger: logger.warning(f"Failed to fetch reply message from DB: {e}")
         return None
@@ -84,19 +102,30 @@ async def extract_source_image(
         if hasattr(message, 'message_segment'):
             return await _extract_image_from_segments(message.message_segment)
         
-        # 情况 B: DatabaseMessages 对象 (Historical) - 检查 processed_plain_text 中的 [picid:xxx]
-        if Images:
-            text = getattr(message, 'processed_plain_text', '') or getattr(message, 'display_message', '') or ''
-            matches = re.findall(r'\[picid:([^\]]+)\]', text)
-            for pic_id in matches:
+        # 情况 B: 当前消息如果也是一个 MaiMessage 或 DatabaseMessages
+        if Messages:
+            # Check if this is already a db record or mai message
+            msg_id = getattr(message, 'message_id', None)
+            if msg_id:
                 try:
-                    img_record = Images.get_or_none(Images.image_id == pic_id)
-                    if img_record and img_record.path:
-                        if os.path.exists(img_record.path):
-                            with open(img_record.path, 'rb') as f:
-                                return f.read()
+                    from src.common.database.database import get_db_session
+                    from sqlmodel import select
+                    from src.common.data_models.mai_message_data_model import MaiMessage
+                    from src.common.data_models.message_component_data_model import ImageComponent, EmojiComponent
+                    
+                    with get_db_session() as session:
+                        statement = select(Messages).where(Messages.message_id == msg_id).limit(1)
+                        db_msg = session.exec(statement).first()
+                        if db_msg:
+                            mai_msg = MaiMessage.from_db_instance(db_msg)
+                            for comp in mai_msg.raw_message.components:
+                                if isinstance(comp, (ImageComponent, EmojiComponent)):
+                                    await comp.load_image_binary()
+                                    if comp.binary_data:
+                                        if logger: logger.info("从当前消息(数据库回查)中提取到图片")
+                                        return comp.binary_data
                 except Exception as e:
-                    if logger: logger.warning(f"Failed to load image from path for picid {pic_id}: {e}")
+                    if logger: logger.warning(f"Failed to fetch current message from DB: {e}")
         return None
 
     # 4. 尝试从 @的用户头像提取
