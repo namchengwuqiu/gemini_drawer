@@ -98,13 +98,18 @@ class ImageGenerateAction(BaseAction):
         if is_command_message(self.action_message):
              return False, "检测到指令前缀，忽略Action触发"
 
-        prompt = self.action_data.get("prompt", "").strip()
+        prompt = self.action_parameters.get('prompt', '')
         if not prompt:
-            await self.send_text("你想画什么呢？说清楚一点嘛。")
-            return False, "Prompt为空"
+            return False, "没有提供绘图提示词"
             
+        import asyncio
+        asyncio.create_task(self._draw_and_send(prompt, "自然语言绘图"))
+        
+        # 立即返回，防止 LLM Tool Call 超时
+        return True, f"已在后台开始为你绘制关于'{prompt}'的图片，请耐心等待..."
+
+    async def _draw_and_send(self, prompt: str, mode: str):
         logger.info(f"执行绘图 Action，Prompt: {prompt}")
-        # await self.send_text("🎨 正在绘制中...")
         
         # 0. 尝试获取图片输入 (图生图支持)
         image_bytes = None
@@ -285,15 +290,23 @@ class SelfieGenerateAction(BaseAction):
             return False, "未找到人设底图"
 
         try:
+            import asyncio
+            user_action = self.action_data.get("requested_action", "").strip()
+            asyncio.create_task(self._do_selfie_background(ref_image_path, user_action))
+            return True, "我已经收到啦，这就去后台拍一张发给你，请耐心等待哦！"
+        except Exception as e:
+            logger.error(f"Selfie Action Start Error: {e}")
+            return False, str(e)
+
+    async def _do_selfie_background(self, ref_image_path, user_action: str):
+        try:
             with open(ref_image_path, "rb") as f:
                 image_bytes = f.read()
 
             base_prompt = self.get_config("selfie.base_prompt")
             random_actions = self.get_config("selfie.random_actions")
             
-            # 获取用户指定的动作（如果有）
             import random
-            user_action = self.action_data.get("requested_action", "").strip()
             
             if user_action:
                 # 使用用户指定的动作
@@ -320,6 +333,8 @@ class SelfieGenerateAction(BaseAction):
             endpoints = await get_drawing_endpoints(self.get_config)
             
             # 构建 payload (Gemini 格式)
+            from .draw_logic import get_image_mime_type, process_drawing_api_request, download_image
+            import base64
             mime_type = get_image_mime_type(image_bytes)
             b64_img = base64.b64encode(image_bytes).decode('utf-8')
             
@@ -339,8 +354,6 @@ class SelfieGenerateAction(BaseAction):
             
             # 获取 proxy
             proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
-            
-            # await self.send_text("我现在就去拍一张，请稍等一下...")
             
             # 调用绘图逻辑
             img_data, error = await process_drawing_api_request(
@@ -377,19 +390,14 @@ class SelfieGenerateAction(BaseAction):
                         await self.send_image(image_to_send_b64)
                         sent_count += 1
                 
-                if sent_count > 0:
-                    return True, "成功发送自拍"
-                else:
+                if sent_count <= 0:
                     await self.send_text("自拍生成了，但是处理出错了。")
-                    return False, "数据处理失败"
             else:
                 await self.send_text(f"自拍生成失败了: {error}")
-                return False, f"生成失败: {error}"
 
         except Exception as e:
-            logger.error(f"Selfie Action Error: {e}")
+            logger.error(f"Selfie Action Background Error: {e}")
             await self.send_text(f"处理自拍时发生了错误: {e}")
-            return False, str(e)
 
 
 class SelfieVideoAction(BaseAction):
@@ -485,11 +493,19 @@ class SelfieVideoAction(BaseAction):
             return False, "未找到人设底图"
 
         try:
+            import asyncio
+            user_action = self.action_data.get("requested_action", "").strip()
+            asyncio.create_task(self._do_video_background(ref_image_path, user_action))
+            return True, "我已经收到啦，这就去后台录一段视频发给你，请耐心等待哦！"
+        except Exception as e:
+            logger.error(f"Selfie Video Action Start Error: {e}")
+            return False, str(e)
+
+    async def _do_video_background(self, ref_image_path, user_action: str):
+        try:
             with open(ref_image_path, "rb") as f:
                 image_bytes = f.read()
 
-            # 获取动作参数或随机选择
-            user_action = self.action_data.get("requested_action", "").strip()
             if user_action:
                 action = user_action
                 logger.info(f"使用用户指定的视频动作: {action}")
@@ -515,17 +531,17 @@ class SelfieVideoAction(BaseAction):
             full_prompt = await self._polish_video_prompt(full_prompt)
             
             logger.info(f"Generating selfie video with prompt: {full_prompt}")
-            # await self.send_text("我现在就去录一段视频，请稍等一下...")
             
             # 使用复用函数
-            from .draw_logic import get_video_endpoints, process_video_generation, send_video_via_napcat
+            from .draw_logic import get_video_endpoints, process_video_generation, send_video_via_napcat, get_image_mime_type
+            import base64
             
             # 获取视频端点
             endpoints = await get_video_endpoints(self.get_config, logger=logger)
             
             if not endpoints:
                 await self.send_text("❌ 没有配置视频生成渠道，无法录制视频。")
-                return False, "无视频渠道"
+                return
             
             # 准备图片数据
             mime_type = get_image_mime_type(image_bytes)
@@ -545,14 +561,13 @@ class SelfieVideoAction(BaseAction):
             
             if video_data:
                 # 发送视频
-                # 使用 BaseAction 基类在初始化时已解析的 group_id 和 user_id
                 napcat_host = self.get_config("api.napcat_host", "napcat")
                 napcat_port = self.get_config("api.napcat_port", 3033)
                 
                 success, send_error = await send_video_via_napcat(
                     video_base64=video_data,
-                    group_id=self.group_id,  # 直接使用基类属性
-                    user_id=self.user_id,    # 直接使用基类属性
+                    group_id=self.group_id,
+                    user_id=self.user_id,
                     napcat_host=napcat_host,
                     napcat_port=napcat_port,
                     logger=logger
@@ -560,15 +575,11 @@ class SelfieVideoAction(BaseAction):
                 
                 if success:
                     await self.send_text("当当当！专门为你拍的视频来啦，快夸夸我！(≧▽≦)✨")
-                    return True, "成功发送自拍视频"
                 else:
                     await self.send_text(f"❌ 视频发送失败: {send_error}")
-                    return False, f"发送失败: {send_error}"
             else:
                 await self.send_text(f"视频生成失败了: {error}")
-                return False, f"生成失败: {error}"
 
         except Exception as e:
-            logger.error(f"Selfie Video Action Error: {e}")
+            logger.error(f"Selfie Video Action Background Error: {e}")
             await self.send_text(f"录制视频时发生了错误: {e}")
-            return False, str(e)

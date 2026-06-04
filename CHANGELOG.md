@@ -1,5 +1,13 @@
 # Gemini 绘图插件 更新日志
 
+## v1.9.11 (2026-06-04)
+
+### 修复与优化
+- **Action 超时阻塞修复** 🚀: 修复了长耗时自然语言绘图和视频动作（`gemini_generate_image`、`gemini_selfie`、`gemini_selfie_video`）被主程序 Planner 强制 60 秒 RPC 超时阻断的问题。通过 `asyncio.create_task` 后台异步化重构，工具调用将在瞬间返回反馈，生成任务自动在后台执行并下发结果，彻底告别出图超时和假死现象。
+- **废弃 API 彻底清理** 🧹: 清理了自拍润色和历史回溯功能中残存的旧版 `llm_api`、`chat_api` 导入，全面拥抱 SDK v2 的原生 `self.ctx.llm` 与数据库检索。
+
+---
+
 ## v1.9.10 (2026-06-04)
 
 ### 修复
