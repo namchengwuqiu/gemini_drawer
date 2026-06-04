@@ -471,7 +471,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             "如果用户只是说'发张图'但没说发什么，可以尝试生成一张通用的美图",
             "注意：如果遇到/绘图、/bnn、/多图、/+，这种带斜杠的指令消息，不要再调用此Action",
             "注意：不要连续触发，如果刚刚已经发送过图片或正在生成中，就不要再次触发此动作，除非用户再次主动要求"
-        ]
+        ],
+        timeout_ms=DRAW_COMMAND_TIMEOUT_MS
     )
     async def handle_generate_image(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str]:
         return await self._run_action(ImageGenerateAction, stream_id, **kwargs)
@@ -487,7 +488,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             "当用户明确要求看我的照片、自拍、长什么样时使用",
             "看看你的照片", "发张自拍",
             "注意：不要连续发，如果刚刚已经发送过自拍或正在生成中，就不要再次触发此动作"
-        ]
+        ],
+        timeout_ms=DRAW_COMMAND_TIMEOUT_MS
     )
     async def handle_selfie(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str]:
         return await self._run_action(SelfieGenerateAction, stream_id, **kwargs)
@@ -503,7 +505,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             "当用户明确要求看我的视频、动态、动作时使用",
             "发个视频看看", "想看你跳舞", "来段视频",
             "注意：不要连续发，如果刚刚已经发送过视频或正在生成中，就不要再次触发此动作"
-        ]
+        ],
+        timeout_ms=VIDEO_COMMAND_TIMEOUT_MS
     )
     async def handle_selfie_video(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str]:
         return await self._run_action(SelfieVideoAction, stream_id, **kwargs)

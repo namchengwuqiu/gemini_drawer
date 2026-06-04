@@ -51,7 +51,9 @@
     "api.call",
     "config.get",
     "llm.generate",
-    "database.get"
+    "llm.get_available_models",
+    "database.get",
+    "message.get_by_time_in_chat"
   ],
   "i18n": {
     "default_locale": "zh-CN",

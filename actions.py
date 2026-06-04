@@ -1,10 +1,8 @@
-
 import base64
 import asyncio
 from typing import Tuple, List, Dict, Optional, Any
 from datetime import datetime
 
-from maibot_sdk.compat.apis import message_api, llm_api
 from maibot_sdk.compat.base import BaseAction, ActionActivationType
 import logging
 
@@ -218,36 +216,40 @@ class SelfieGenerateAction(BaseAction):
             return original_prompt
         
         try:
-            models = llm_api.get_available_models()
             model_name = self.get_config("selfie.polish_model", "replyer")
-            model_config = models.get(model_name)
             
-            if not model_config:
-                logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
-                return original_prompt
-            
-            polish_template = self.get_config(
-                "selfie.polish_template",
-                "请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的一份提示词，不要输出其他内容。原始主题：'{original_prompt}'"
-            )
-            prompt = polish_template.format(original_prompt=original_prompt)
-            
-            logger.info(f"正在润色自拍提示词: {original_prompt}")
-            success, polished_prompt, reasoning, used_model = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_config,
-                request_type="gemini_drawer.selfie_polish",
-                temperature=0.5,
-                max_tokens=512
-            )
-            
-            if success and polished_prompt:
-                # 添加图片引导前缀，确保生成基于附带的图片
-                final_prompt = f"根据图中人物按以下要求生成图片：{polished_prompt.strip()}"
-                logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
-                return final_prompt
+            if hasattr(self, 'ctx') and self.ctx:
+                available_models = await self.ctx.llm.get_available_models()
+                if model_name not in available_models:
+                    logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
+                    return original_prompt
+                
+                polish_template = self.get_config(
+                    "selfie.polish_template",
+                    "请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的一份提示词，不要输出其他内容。原始主题：'{original_prompt}'"
+                )
+                prompt = polish_template.format(original_prompt=original_prompt)
+                
+                logger.info(f"正在润色自拍提示词: {original_prompt}")
+                result = await self.ctx.llm.generate(
+                    prompt=prompt,
+                    model=model_name,
+                    request_type="gemini_drawer.selfie_polish",
+                    temperature=0.5,
+                    max_tokens=512
+                )
+                
+                if result.get("success") and result.get("response"):
+                    polished_prompt = result.get("response")
+                    # 添加图片引导前缀，确保生成基于附带的图片
+                    final_prompt = f"根据图中人物按以下要求生成图片：{polished_prompt.strip()}"
+                    logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
+                    return final_prompt
+                else:
+                    logger.warning(f"润色失败，使用原始提示词")
+                    return original_prompt
             else:
-                logger.warning(f"润色失败，使用原始提示词")
+                logger.warning(f"当前上下文不支持模型调用，使用原始提示词")
                 return original_prompt
                 
         except Exception as e:
@@ -415,36 +417,40 @@ class SelfieVideoAction(BaseAction):
             return original_prompt
         
         try:
-            models = llm_api.get_available_models()
             model_name = self.get_config("selfie.polish_model", "replyer")
-            model_config = models.get(model_name)
             
-            if not model_config:
-                logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
-                return original_prompt
-            
-            polish_template = self.get_config(
-                "selfie.video_polish_template",
-                "请将以下视频动作描述润色为更适合AI视频生成的提示词，让动作描述更加流畅、生动、有画面感。只输出润色后的一份提示词，不要输出其他内容。原始描述：'{original_prompt}'"
-            )
-            prompt = polish_template.format(original_prompt=original_prompt)
-            
-            logger.info(f"正在润色视频提示词: {original_prompt}")
-            success, polished_prompt, reasoning, used_model = await llm_api.generate_with_model(
-                prompt=prompt,
-                model_config=model_config,
-                request_type="gemini_drawer.selfie_video_polish",
-                temperature=0.5,
-                max_tokens=512
-            )
-            
-            if success and polished_prompt:
-                # 添加图片引导前缀，确保生成基于附带的图片
-                final_prompt = f"根据图中人物按以下要求生成视频：{polished_prompt.strip()}"
-                logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
-                return final_prompt
+            if hasattr(self, 'ctx') and self.ctx:
+                available_models = await self.ctx.llm.get_available_models()
+                if model_name not in available_models:
+                    logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
+                    return original_prompt
+                
+                polish_template = self.get_config(
+                    "selfie.video_polish_template",
+                    "请将以下视频动作描述润色为更适合AI视频生成的提示词，让动作描述更加流畅、生动、有画面感。只输出润色后的一份提示词，不要输出其他内容。原始描述：'{original_prompt}'"
+                )
+                prompt = polish_template.format(original_prompt=original_prompt)
+                
+                logger.info(f"正在润色视频提示词: {original_prompt}")
+                result = await self.ctx.llm.generate(
+                    prompt=prompt,
+                    model=model_name,
+                    request_type="gemini_drawer.selfie_video_polish",
+                    temperature=0.5,
+                    max_tokens=512
+                )
+                
+                if result.get("success") and result.get("response"):
+                    polished_prompt = result.get("response")
+                    # 添加图片引导前缀，确保生成基于附带的图片
+                    final_prompt = f"根据图中人物按以下要求生成视频：{polished_prompt.strip()}"
+                    logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
+                    return final_prompt
+                else:
+                    logger.warning(f"润色失败，使用原始提示词")
+                    return original_prompt
             else:
-                logger.warning(f"润色失败，使用原始提示词")
+                logger.warning(f"当前上下文不支持模型调用，使用原始提示词")
                 return original_prompt
                 
         except Exception as e:

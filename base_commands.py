@@ -36,7 +36,6 @@ from typing import Tuple, Optional, List, Dict, Any
 
 import httpx
 from maibot_sdk.compat.base import BaseCommand
-from maibot_sdk.compat.apis import message_api, send_api, chat_api
 import logging
 
 from .utils import (
@@ -885,19 +884,23 @@ class BaseDrawCommand(BaseCommand, ABC):
             if not chat_id: return
             await asyncio.sleep(1)
             current_time = time.time()
-            bot_messages = message_api.get_messages_by_time_in_chat(
+            bot_messages = await self.ctx.message.get_by_time_in_chat(
                 chat_id=chat_id,
-                start_time=fail_msg_send_time - 2,
-                end_time=current_time + 5,
-                limit=10,
-                limit_mode="latest",
-                filter_mai=False
+                start_time=str(fail_msg_send_time - 2),
+                end_time=str(current_time + 5),
+                limit=10
             )
             for msg in bot_messages:
-                content = getattr(msg, 'processed_plain_text', '')
-                msg_id = getattr(msg, 'message_id', None)
-                msg_time = getattr(msg, 'time', 0)
-                if content.startswith("❌ 生成失败") and msg_time >= fail_msg_send_time - 2:
+                if isinstance(msg, dict):
+                    content = msg.get('processed_plain_text', '')
+                    msg_id = msg.get('message_id', None)
+                    msg_time = msg.get('timestamp', 0)
+                else:
+                    content = getattr(msg, 'processed_plain_text', '')
+                    msg_id = getattr(msg, 'message_id', None)
+                    msg_time = getattr(msg, 'time', getattr(msg, 'timestamp', 0))
+
+                if content.startswith("❌ 生成失败") and float(msg_time) >= fail_msg_send_time - 2:
                     if msg_id and not str(msg_id).startswith('send_api_'):
                         await self._safe_recall([str(msg_id)])
                         return
@@ -912,21 +915,25 @@ class BaseDrawCommand(BaseCommand, ABC):
             if not chat_id: return
             await asyncio.sleep(2)
             current_time = time.time()
-            bot_messages = message_api.get_messages_by_time_in_chat(
+            bot_messages = await self.ctx.message.get_by_time_in_chat(
                 chat_id=chat_id,
-                start_time=status_msg_start_time - 5,
-                end_time=current_time + 5,
-                limit=20,
-                limit_mode="latest",
-                filter_mai=False
+                start_time=str(status_msg_start_time - 5),
+                end_time=str(current_time + 5),
+                limit=20
             )
             status_prefixes = ("戳一戳", "✅ ")
             to_recall = []
             for msg in bot_messages:
-                msg_time = getattr(msg, 'time', 0)
-                content = getattr(msg, 'processed_plain_text', '')
-                msg_id = getattr(msg, 'message_id', None)
-                if msg_time >= status_msg_start_time - 1:
+                if isinstance(msg, dict):
+                    msg_time = msg.get('timestamp', 0)
+                    content = msg.get('processed_plain_text', '')
+                    msg_id = msg.get('message_id', None)
+                else:
+                    msg_time = getattr(msg, 'time', getattr(msg, 'timestamp', 0))
+                    content = getattr(msg, 'processed_plain_text', '')
+                    msg_id = getattr(msg, 'message_id', None)
+                    
+                if float(msg_time) >= status_msg_start_time - 1:
                     if content.startswith(status_prefixes):
                         if msg_id and not str(msg_id).startswith('send_api_'):
                             to_recall.append(str(msg_id))
