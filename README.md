@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.9.11s
+> **Version:** 1.9.11
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -9,7 +9,7 @@
 - **动态指令**：无需修改代码，仅通过修改配置文件即可轻松添加新的绘图风格和对应指令。
 - **多样化图片源**：支持多种方式获取原始图片，极大提升了使用的便利性。
 - **多 API Key 管理**：自动轮换并管理多个 API Key，保证服务稳定。
-- **多后端支持**：支持 Google 官方、第三方兼容 API (如 Bailili)、LMArena 后端以及火山豆包 API。
+- **多后端支持**：支持 Google 官方、openai格式、第三方兼容 API (如 Bailili)、LMArena 后端以及火山豆包 API。
 - **自定义指令**：支持使用 `/bnn` 指令进行完全自定义的 prompt 绘图。
 - **代理支持**：可为 API 请求配置 HTTP 代理。
 - **回复图片模式** 🆕：生成的图片以回复触发消息的方式发送，更直观的用户反馈。
