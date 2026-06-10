@@ -7,8 +7,8 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     name: str = Field(default="gemini_drawer", description="插件名称")
-    version: str = Field(default="1.9.11", description="插件版本")
-    config_version: str = Field(default="1.9.11", description="配置版本")
+    version: str = Field(default="1.9.12", description="插件版本")
+    config_version: str = Field(default="1.9.12", description="配置版本")
     enabled: bool = Field(default=True, description="是否启用插件")
 
 class GeneralConfig(PluginConfigBase):
@@ -97,6 +97,9 @@ class BehaviorConfig(PluginConfigBase):
     auto_recall_status: bool = Field(default=True, description="是否自动撤回绘图过程中的状态提示消息（如'🎨 正在提交绘图指令…'）")
     success_notify_poke: bool = Field(default=True, description="生成成功后使用戳一戳通知用户（替代文字消息'✅ 生成完成'）")
     reply_with_image: bool = Field(default=True, description="以回复触发消息的方式发送图片（开启后自动跳过成功通知）")
+    enable_banana_prompts: bool = Field(default=True, description="是否启用大香蕉网站提示词作为只读扩展词库")
+    show_restricted: bool = Field(default=False, description="是否显示大香蕉网站中标记为猎奇/重口/限制级的提示词")
+    banana_sync_on_load: bool = Field(default=False, description="插件加载时是否自动同步大香蕉提示词，关闭后仅手动同步")
 
 class GeminiDrawerConfig(PluginConfigBase):
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)

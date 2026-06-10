@@ -2,11 +2,13 @@ from typing import Any, Tuple, Optional, Type
 from pathlib import Path
 import re
 import base64
+import httpx
 from maibot_sdk import Action, Command, MaiBotPlugin
 from maibot_sdk.types import ActivationType
 from maibot_sdk.context import PluginContext
 
 from .config import GeminiDrawerConfig
+from .managers import data_manager
 
 from .help_command import HelpCommand
 from .draw_commands import (
@@ -19,13 +21,15 @@ from .admin_commands import (
     ChannelDeleteKeyCommand, ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
     AddPromptCommand, DeletePromptCommand, ViewPromptCommand, ModifyPromptCommand,
     AddChannelCommand, DeleteChannelCommand, ToggleChannelCommand,
-    ListChannelsCommand, ChannelSetStreamCommand, ChannelSetVideoCommand
+    ListChannelsCommand, ChannelSetStreamCommand, ChannelSetVideoCommand,
+    SyncBananaPromptsCommand, ToggleBananaRestrictedCommand, BananaPromptSearchCommand
 )
 from .actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoAction
 
 
 DRAW_COMMAND_TIMEOUT_MS = 300_000
 VIDEO_COMMAND_TIMEOUT_MS = 600_000
+BANANA_PROMPTS_URL = "https://raw.githubusercontent.com/unknowlei/nanobanana-website/main/public/data.json"
 
 
 # ── Compatibility wrapper classes ──
@@ -264,6 +268,16 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         except Exception as e:
             self.ctx.logger.warning(f"[GeminiDrawer] Failed to initialize selfie directory: {e}")
 
+        if self.config.behavior.banana_sync_on_load:
+            self.ctx.logger.info("[GeminiDrawer] 正在从大香蕉云端同步扩展词库...")
+            success, msg = await self.sync_banana_website_prompts()
+            if success:
+                self.ctx.logger.info(f"[GeminiDrawer] {msg}")
+            else:
+                self.ctx.logger.warning(f"[GeminiDrawer] 大香蕉扩展词库自动同步失败: {msg}")
+        else:
+            self.ctx.logger.info("[GeminiDrawer] 已跳过大香蕉扩展词库自动同步，可使用 /渠道同步大香蕉 手动同步")
+
         # 同步配置缓存到兼容层 config_api
         try:
             from maibot_sdk.compat.apis import config_api
@@ -275,6 +289,119 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             pass
 
         self.ctx.logger.info("Gemini Drawer 插件 v1.9.9 已成功以原生 v1.0 架构加载！")
+
+    async def sync_banana_website_prompts(self) -> Tuple[bool, str]:
+        """同步大香蕉提示词到独立 banana_prompts.json，不修改 data.json。"""
+        proxy = self.config.proxy.proxy_url if self.config.proxy.enable else None
+        try:
+            client_kwargs = {
+                "timeout": 15.0,
+                "follow_redirects": True,
+            }
+            if proxy:
+                client_kwargs["proxy"] = proxy
+
+            async with httpx.AsyncClient(**client_kwargs) as client:
+                response = await client.get(BANANA_PROMPTS_URL)
+
+            if response.status_code != 200:
+                return False, f"下载云端词库失败，HTTP 状态码: {response.status_code}"
+
+            try:
+                web_data = response.json()
+            except ValueError as e:
+                return False, f"云端词库不是有效 JSON: {e}"
+
+            if not isinstance(web_data, dict):
+                return False, "云端词库格式错误：顶层不是对象"
+
+            sections = web_data.get("sections")
+            if not isinstance(sections, list):
+                return False, "云端词库格式错误：sections 不是列表"
+
+            prompts = {}
+            seen_keys = set()
+            total_prompt_count = 0
+            restricted_count = 0
+            duplicate_count = 0
+            skipped_count = 0
+
+            for section in sections:
+                if not isinstance(section, dict):
+                    continue
+                section_id = str(section.get("id") or "").strip()
+                section_title = str(section.get("title") or section_id or "未分类").strip()
+                is_restricted = bool(section.get("isRestricted", False))
+                section_prompts = section.get("prompts", [])
+                if not isinstance(section_prompts, list):
+                    continue
+
+                for prompt in section_prompts:
+                    total_prompt_count += 1
+                    if not isinstance(prompt, dict):
+                        skipped_count += 1
+                        continue
+
+                    prompt_id = str(prompt.get("id") or "").strip()
+                    title = str(prompt.get("title") or "").strip()
+                    content = prompt.get("content")
+                    if not isinstance(content, str):
+                        skipped_count += 1
+                        continue
+                    content = content.strip()
+                    if not title or not content:
+                        skipped_count += 1
+                        continue
+
+                    key = f"大香蕉/{section_title}/{title}"
+                    if key in seen_keys:
+                        duplicate_count += 1
+                        short_id = prompt_id[-6:] if prompt_id else str(duplicate_count)
+                        key = f"{key}#{short_id}"
+                        while key in seen_keys:
+                            duplicate_count += 1
+                            key = f"大香蕉/{section_title}/{title}#{short_id}-{duplicate_count}"
+                    seen_keys.add(key)
+
+                    if is_restricted:
+                        restricted_count += 1
+
+                    prompts[key] = {
+                        "content": content,
+                        "prompt_id": prompt_id,
+                        "source_title": title,
+                        "section_id": section_id,
+                        "section_title": section_title,
+                        "restricted": is_restricted,
+                    }
+
+            if not prompts:
+                return False, f"同步失败：未解析到有效提示词，跳过 {skipped_count} 条"
+
+            from datetime import datetime, timezone
+            banana_data = {
+                "schema_version": 1,
+                "source_url": BANANA_PROMPTS_URL,
+                "synced_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+                "remote_last_updated": web_data.get("lastUpdated"),
+                "prompts": prompts,
+            }
+            data_manager.save_banana_data(banana_data)
+
+            return (
+                True,
+                "大香蕉词库同步完成："
+                f"sections={len(sections)}，远端prompts={total_prompt_count}，"
+                f"保存={len(prompts)}，restricted={restricted_count}，"
+                f"重名处理={duplicate_count}，跳过={skipped_count}，"
+                f"remote_last_updated={web_data.get('lastUpdated') or '未知'}"
+            )
+        except httpx.TimeoutException:
+            return False, "同步超时：访问大香蕉 GitHub raw 超过 15 秒"
+        except httpx.HTTPError as e:
+            return False, f"同步网络异常: {e}"
+        except Exception as e:
+            return False, f"同步发生未知异常: {e}"
 
     async def on_unload(self) -> None:
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
@@ -300,6 +427,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             instance = cmd_cls(message=compat_msg, plugin_config=self.get_plugin_config_data())
             instance._stream_id = stream_id
             instance.ctx = self.ctx  # 注入上下文，允许使用跨插件 API
+            instance.plugin = self  # 注入插件实例，供原生命令调用插件级辅助方法
             if matched_groups:
                 instance.set_matched_groups(matched_groups)
             res = await instance.execute()
@@ -452,6 +580,18 @@ class GeminiDrawerPlugin(MaiBotPlugin):
     @Command("gemini_channel_set_video", description=ChannelSetVideoCommand.command_description, pattern=ChannelSetVideoCommand.command_pattern)
     async def handle_channel_set_video(self, stream_id: str = "", message: Any = None, **kwargs: Any):
         return await self._run_command(ChannelSetVideoCommand, stream_id, message, kwargs.get("matched_groups"))
+
+    @Command("gemini_sync_banana", description=SyncBananaPromptsCommand.command_description, pattern=SyncBananaPromptsCommand.command_pattern)
+    async def handle_sync_banana(self, stream_id: str = "", message: Any = None, **kwargs: Any):
+        return await self._run_command(SyncBananaPromptsCommand, stream_id, message, kwargs.get("matched_groups"))
+
+    @Command("gemini_toggle_banana_restricted", description=ToggleBananaRestrictedCommand.command_description, pattern=ToggleBananaRestrictedCommand.command_pattern)
+    async def handle_toggle_banana_restricted(self, stream_id: str = "", message: Any = None, **kwargs: Any):
+        return await self._run_command(ToggleBananaRestrictedCommand, stream_id, message, kwargs.get("matched_groups"))
+
+    @Command("gemini_search_banana_prompts", description=BananaPromptSearchCommand.command_description, pattern=BananaPromptSearchCommand.command_pattern)
+    async def handle_search_banana_prompts(self, stream_id: str = "", message: Any = None, **kwargs: Any):
+        return await self._run_command(BananaPromptSearchCommand, stream_id, message, kwargs.get("matched_groups"))
 
     # ── Actions ──
 

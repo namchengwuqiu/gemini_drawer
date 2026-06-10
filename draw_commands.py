@@ -81,11 +81,14 @@ class UniversalPromptCommand(BaseDrawCommand):
         msg = self.message.raw_message
         logger.info(f"[Universal] 收到指令: {msg}")
         
-        match = re.search(r"(?:^|[\s\]])/\+\s*([^/\s]+)(?:$|[\s\[])", msg)
+        match = re.search(r"(?:^|[\s\]])/\+\s*(.+?)(?:$|\s*\[)", msg)
         if not match: return False, None, False
         
-        cmd_name = match.group(1)
-        prompts = data_manager.get_prompts()
+        cmd_name = match.group(1).strip()
+        prompts = data_manager.get_effective_prompts(
+            include_banana=self.get_config("behavior.enable_banana_prompts", True),
+            show_restricted=self.get_config("behavior.show_restricted", False),
+        )
         
         if cmd_name not in prompts:
             logger.info(f"[Universal] 未找到 Prompt: {cmd_name}")
@@ -135,7 +138,10 @@ class RandomPromptDrawCommand(BaseDrawCommand):
         self.selected_prompt_content = None
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
-        prompts = data_manager.get_prompts()
+        prompts = data_manager.get_effective_prompts(
+            include_banana=self.get_config("behavior.enable_banana_prompts", True),
+            show_restricted=self.get_config("behavior.show_restricted", False),
+        )
         
         if not prompts:
             await self.send_text("❌ 当前没有任何预设提示词！\n请先使用 `/添加提示词` 添加。")

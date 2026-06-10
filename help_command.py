@@ -25,6 +25,9 @@ class HelpCommand(BaseCommand):
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         prompts_config = data_manager.get_prompts()
+        banana_enabled = self.get_config("behavior.enable_banana_prompts", True)
+        banana_show_restricted = self.get_config("behavior.show_restricted", False)
+        banana_prompts = data_manager.get_banana_prompts(show_restricted=banana_show_restricted) if banana_enabled else {}
         bot_name = "Gemini Drawer"
 
         # 节点1: 标题和介绍
@@ -48,6 +51,14 @@ class HelpCommand(BaseCommand):
         user_text += "2. @用户 + 指令\n"
         user_text += "3. 发送图片 + 指令\n"
         user_text += "4. 直接发送指令 (使用自己头像)"
+
+        if banana_enabled:
+            user_text += "\n\n【大香蕉扩展词库】\n"
+            user_text += f"▪️ 当前可用 {len(banana_prompts)} 条"
+            user_text += "\n▪️ /大香蕉提示词 {关键词}: 搜索扩展提示词"
+            user_text += "\n▪️ 搜索结果可直接用 `/+ 完整名称` 调用"
+        else:
+            user_text += "\n\n【大香蕉扩展词库】\n▪️ 当前未启用"
 
         if prompts_config:
             user_text += "\n\n【预设风格】\n"
@@ -83,7 +94,9 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /禁用渠道: 禁用指定渠道\n"
             admin_text += "▪️ /渠道设置流式 {名称} {true|false}: 设置渠道是否使用流式请求\n"
             admin_text += "▪️ /渠道设置视频 {名称} {true|false}: 设置渠道是否用于视频生成\n"
-            admin_text += "▪️ /渠道列表: 查看所有渠道状态"
+            admin_text += "▪️ /渠道列表: 查看所有渠道状态\n"
+            admin_text += "▪️ /渠道同步大香蕉: 手动同步大香蕉扩展词库\n"
+            admin_text += "▪️ /渠道设置猎奇 开启|关闭: 显示或隐藏大香蕉限制级提示词"
             messages.append({"user_id": "0", "nickname": bot_name, "segments": [{"type": "text", "content": admin_text}]})
 
         # 使用原生 send.forward() API 发送转发消息

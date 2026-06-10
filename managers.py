@@ -298,11 +298,13 @@ class DataManager:
             self.plugin_dir = Path(__file__).parent
             self.data_dir = _get_external_data_dir()
             self.data_file = self.data_dir / "data.json"
+            self.banana_file = self.data_dir / "banana_prompts.json"
             # 从插件内部旧路径迁移数据
             internal_data = self.plugin_dir / "data" / "data.json"
             _migrate_internal_file(internal_data, self.data_file)
         else:
             self.data_file = data_file_path
+            self.banana_file = self.data_file.parent / "banana_prompts.json"
             self.plugin_dir = self.data_file.parent.parent
             
         self.data = self._load_data()
@@ -381,6 +383,95 @@ class DataManager:
                 json.dump(self.data, f, indent=4, ensure_ascii=False)
         except Exception as e:
             logger.error(f"Failed to save data.json: {e}")
+
+    def load_banana_data(self) -> Dict[str, Any]:
+        """读取大香蕉独立词库；失败时不影响本地 data.json。"""
+        if not self.banana_file.exists():
+            return {"schema_version": 1, "prompts": {}}
+        try:
+            with open(self.banana_file, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                logger.warning("banana_prompts.json 顶层不是对象，已忽略")
+                return {"schema_version": 1, "prompts": {}}
+            prompts = data.get("prompts", {})
+            if not isinstance(prompts, dict):
+                logger.warning("banana_prompts.json prompts 字段不是对象，已忽略")
+                data["prompts"] = {}
+            return data
+        except Exception as e:
+            logger.warning(f"读取 banana_prompts.json 失败，已忽略大香蕉扩展词库: {e}")
+            return {"schema_version": 1, "prompts": {}}
+
+    def save_banana_data(self, banana_data: Dict[str, Any]) -> None:
+        """原子写入大香蕉独立词库，不触碰 data.json。"""
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            tmp_file = self.banana_file.with_suffix(self.banana_file.suffix + ".tmp")
+            with open(tmp_file, 'w', encoding='utf-8') as f:
+                json.dump(banana_data, f, indent=2, ensure_ascii=False)
+            tmp_file.replace(self.banana_file)
+        except Exception as e:
+            logger.error(f"保存 banana_prompts.json 失败: {e}")
+            raise
+
+    def get_banana_prompt_entries(self, show_restricted: bool = False) -> Dict[str, Dict[str, Any]]:
+        """返回过滤后的大香蕉提示词条目，保留元数据用于搜索展示。"""
+        banana_data = self.load_banana_data()
+        raw_prompts = banana_data.get("prompts", {})
+        if not isinstance(raw_prompts, dict):
+            return {}
+
+        filtered: Dict[str, Dict[str, Any]] = {}
+        for name, entry in raw_prompts.items():
+            if isinstance(entry, str):
+                content = entry
+                restricted = False
+                normalized = {"content": content, "restricted": restricted}
+            elif isinstance(entry, dict):
+                content = entry.get("content", "")
+                restricted = bool(entry.get("restricted", False))
+                normalized = entry
+            else:
+                continue
+
+            if restricted and not show_restricted:
+                continue
+            if not isinstance(content, str) or not content.strip():
+                continue
+            filtered[str(name)] = normalized
+        return filtered
+
+    def get_banana_prompts(self, show_restricted: bool = False) -> Dict[str, str]:
+        entries = self.get_banana_prompt_entries(show_restricted=show_restricted)
+        prompts: Dict[str, str] = {}
+        for name, entry in entries.items():
+            content = entry.get("content", "")
+            if isinstance(content, str) and content.strip():
+                prompts[name] = content
+        return prompts
+
+    def get_effective_prompts(
+        self,
+        include_banana: bool = True,
+        show_restricted: bool = False,
+    ) -> Dict[str, str]:
+        """返回本地词库 + 只读大香蕉词库的运行时合并视图。"""
+        merged = dict(self.get_prompts())
+        if not include_banana:
+            return merged
+
+        for name, prompt in self.get_banana_prompts(show_restricted=show_restricted).items():
+            target_name = name
+            if target_name in merged:
+                suffix = "#banana"
+                target_name = f"{name}{suffix}"
+                counter = 2
+                while target_name in merged:
+                    target_name = f"{name}{suffix}{counter}"
+                    counter += 1
+            merged[target_name] = prompt
+        return merged
 
     def _migrate_from_toml(self):
         config_path = self.plugin_dir / "config.toml"

@@ -15,3 +15,6 @@ images/
 
 # Ignore macOS system files
 .DS_Store
+
+# Ignore plan file
+修改计划.text

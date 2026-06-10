@@ -595,3 +595,121 @@ class ChannelSetVideoCommand(BaseAdminCommand):
         data_manager.update_channel(channel_name, channel_info)
         await self.send_text(f"✅ 渠道 `{channel_name}` 视频模式已{'启用' if video_value else '禁用'}！")
         return True, "设置成功", True
+
+
+class SyncBananaPromptsCommand(BaseAdminCommand):
+    command_name: str = "gemini_sync_banana"
+    command_description: str = "手动同步大香蕉网站提示词到独立扩展词库"
+    command_pattern: str = r"^/渠道同步大香蕉$"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        plugin = getattr(self, "plugin", None)
+        if plugin is None or not hasattr(plugin, "sync_banana_website_prompts"):
+            await self.send_text("❌ 同步失败：无法访问插件同步服务。")
+            return False, "插件同步服务不可用", True
+
+        await self.send_text("🍌 正在同步大香蕉扩展词库，请稍候...")
+        success, message = await plugin.sync_banana_website_prompts()
+        await self.send_text(("✅ " if success else "❌ ") + message)
+        return success, message, True
+
+
+class ToggleBananaRestrictedCommand(BaseAdminCommand):
+    command_name: str = "gemini_toggle_banana_restricted"
+    command_description: str = "设置是否显示大香蕉限制级提示词"
+    command_pattern: str = r"^/渠道设置猎奇\s+(?P<action>开启|关闭)$"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        groups = getattr(self, "matched_groups", None)
+        action = ""
+        if isinstance(groups, dict):
+            action = str(groups.get("action") or "").strip()
+        else:
+            match = re.match(self.command_pattern, self.message.raw_message.strip())
+            if match:
+                action = match.group("action")
+
+        enabled = action == "开启"
+        config_path = Path(__file__).parent / "config.toml"
+
+        try:
+            import toml
+            if config_path.exists():
+                with open(config_path, 'r', encoding='utf-8') as f:
+                    config_data = toml.load(f)
+            else:
+                config_data = {}
+
+            if "behavior" not in config_data:
+                config_data["behavior"] = {}
+            config_data["behavior"]["show_restricted"] = enabled
+            save_config_file(config_path, config_data)
+
+            plugin = getattr(self, "plugin", None)
+            if plugin is not None:
+                try:
+                    if hasattr(plugin, "set_plugin_config"):
+                        plugin.set_plugin_config(config_data)
+                    else:
+                        plugin.config.behavior.show_restricted = enabled
+                    from maibot_sdk.compat.apis import config_api
+                    config_api.set_config_cache(
+                        global_cfg={},
+                        plugin_cfg=plugin.get_plugin_config_data()
+                    )
+                except Exception as e:
+                    logger.warning(f"刷新 show_restricted 配置缓存失败: {e}")
+
+            status = "显示" if enabled else "隐藏"
+            await self.send_text(f"✅ 大香蕉限制级提示词已设置为：{status}。\n该设置只影响读取过滤，不会重写 data.json 或 banana_prompts.json。")
+            return True, "设置成功", True
+        except Exception as e:
+            await self.send_text(f"❌ 设置失败：{e}")
+            return False, str(e), True
+
+
+class BananaPromptSearchCommand(BaseAdminCommand):
+    command_name: str = "gemini_search_banana_prompts"
+    command_description: str = "搜索大香蕉扩展提示词"
+    command_pattern: str = r"^/大香蕉提示词\s+(?P<keyword>.+)$"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        keyword = ""
+        groups = getattr(self, "matched_groups", None)
+        if isinstance(groups, dict):
+            keyword = str(groups.get("keyword") or "").strip()
+        if not keyword:
+            keyword = self.message.raw_message.replace("/大香蕉提示词", "", 1).strip()
+
+        if not keyword:
+            await self.send_text("❌ 请输入搜索关键词，例如：`/大香蕉提示词 猫娘`")
+            return True, "缺少关键词", True
+
+        show_restricted = bool(self.get_config("behavior.show_restricted", False))
+        entries = data_manager.get_banana_prompt_entries(show_restricted=show_restricted)
+        keyword_lower = keyword.lower()
+        matches = []
+
+        for key, entry in entries.items():
+            title = str(entry.get("source_title") or "")
+            section = str(entry.get("section_title") or "")
+            content = str(entry.get("content") or "")
+            haystack = f"{key}\n{title}\n{section}\n{content}".lower()
+            if keyword_lower in haystack:
+                matches.append((key, section, title, bool(entry.get("restricted", False))))
+
+        if not matches:
+            await self.send_text(f"❌ 未找到包含 `{keyword}` 的大香蕉提示词。")
+            return True, "无搜索结果", True
+
+        limit = 20
+        lines = [f"🍌 大香蕉提示词搜索：`{keyword}`，命中 {len(matches)} 条，显示前 {min(limit, len(matches))} 条："]
+        for key, section, title, restricted in matches[:limit]:
+            restricted_mark = " [restricted]" if restricted else ""
+            lines.append(f"▪️ /+ {key}{restricted_mark}")
+
+        if len(matches) > limit:
+            lines.append(f"\n还有 {len(matches) - limit} 条未显示，请换更精确的关键词。")
+
+        await self.send_text("\n".join(lines))
+        return True, "搜索完成", True
