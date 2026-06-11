@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
   "id": "namchengwuqiu.gemini_drawer",
-  "version": "1.9.12",
+  "version": "1.9.13",
   "name": "Gemini 绘图",
   "description": "使用 Google Gemini API或着其他第三方平台提供的绘图服务，根据图片和提示词生成新图片。（现已支持视频生成）",
   "author": {
@@ -27,7 +27,7 @@
     {
       "type": "python_package",
       "name": "httpx",
-      "version_spec": ">=0.20.0"
+      "version_spec": ">=0.26.0"
     },
     {
       "type": "python_package",

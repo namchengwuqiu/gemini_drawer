@@ -71,9 +71,11 @@ def fix_broken_toml_config(file_path: Path):
             
             # 2. 修复 admins 列表中的纯数字 (新增逻辑)
             if stripped.startswith('admins = ['):
-                in_admins_block = True
+                # 单行数组（admins = [123]）不进入块模式，避免误处理后续行。
+                if ']' not in stripped.split('[', 1)[1]:
+                    in_admins_block = True
                 fixed_lines.append(line)
-            elif in_admins_block and stripped == ']':
+            elif in_admins_block and re.match(r'^\]\s*,?\s*(#.*)?$', stripped):
                 in_admins_block = False
                 fixed_lines.append(line)
             elif in_admins_block:
@@ -151,6 +153,60 @@ def safe_json_dumps(obj: Any) -> str:
     
     truncated_obj = truncate_base64_values(obj)
     return json.dumps(truncated_obj, ensure_ascii=False)
+
+def extract_text_failure_reason(response_data: Dict[str, Any], max_length: int = 500) -> str:
+    """从成功响应里提取模型返回的拒绝/说明文本，供无图片时透传。"""
+    try:
+        error = response_data.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error.get("error")
+            if isinstance(message, str) and message.strip():
+                return truncate_for_log(message.strip(), max_length)
+        elif isinstance(error, str) and error.strip():
+            return truncate_for_log(error.strip(), max_length)
+
+        choices = response_data.get("choices")
+        if isinstance(choices, list) and choices:
+            choice = choices[0]
+            if isinstance(choice, dict):
+                message = choice.get("message")
+                if isinstance(message, dict):
+                    content = message.get("content")
+                    if isinstance(content, str) and content.strip():
+                        return truncate_for_log(content.strip(), max_length)
+                    if isinstance(content, list):
+                        text_parts = [
+                            item.get("text", "").strip()
+                            for item in content
+                            if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text", "").strip()
+                        ]
+                        if text_parts:
+                            return truncate_for_log("\n".join(text_parts), max_length)
+                finish_reason = choice.get("finish_reason") or choice.get("finishReason")
+                if isinstance(finish_reason, str) and finish_reason.strip():
+                    return truncate_for_log(finish_reason.strip(), max_length)
+
+        candidates = response_data.get("candidates")
+        if isinstance(candidates, list) and candidates:
+            candidate = candidates[0]
+            if isinstance(candidate, dict):
+                content = candidate.get("content")
+                if isinstance(content, dict):
+                    parts = content.get("parts")
+                    if isinstance(parts, list):
+                        text_parts = [
+                            part.get("text", "").strip()
+                            for part in parts
+                            if isinstance(part, dict) and isinstance(part.get("text"), str) and part.get("text", "").strip()
+                        ]
+                        if text_parts:
+                            return truncate_for_log("\n".join(text_parts), max_length)
+                finish_reason = candidate.get("finishReason") or candidate.get("finish_reason")
+                if isinstance(finish_reason, str) and finish_reason.strip():
+                    return truncate_for_log(finish_reason.strip(), max_length)
+    except Exception:
+        return ""
+    return ""
 
 async def extract_image_data(response_data: Dict[str, Any]) -> Optional[str]:
     """从API响应中提取图片数据（URL或Base64）"""
@@ -578,7 +634,7 @@ async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
                     return match_video_raw.group(1)
                 
                 # 匹配视频 URL（纯文本 .mp4 链接）
-                match_video_url = re.search(r"(https?://[^\s<>\"]+\.mp4)", content_data)
+                match_video_url = re.search(r"(https?://[^\s<>\"]+\.mp4(?:\?[^\s<>\"]*)?)", content_data)
                 if match_video_url:
                     video_url = match_video_url.group(1)
                     logger.info(f"从响应中提取到视频 URL: {video_url}")
@@ -638,6 +694,12 @@ async def download_image(url: str, proxy: Optional[str]) -> Optional[bytes]:
             if not response.content:
                 logger.error(f"下载图片失败: {url}, 响应内容为空")
                 return None
+            content_type = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            if content_type and not content_type.startswith("image/"):
+                detected_mime = get_image_mime_type(response.content)
+                if detected_mime == "application/octet-stream":
+                    logger.warning(f"下载URL并非图片内容: {url}, Content-Type: {content_type}")
+                    return None
             return response.content
     except httpx.RequestError as e:
         logger.error(f"下载图片请求异常: {url}, 错误: {e}")

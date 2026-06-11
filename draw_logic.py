@@ -5,15 +5,14 @@ import json
 import time
 from datetime import datetime
 from typing import Tuple, Optional, List, Dict, Any
+from urllib.parse import urlparse
 
 import httpx
 import re
-import os
 
-from .utils import extract_all_image_data, safe_json_dumps, download_image
+from .utils import extract_all_image_data, safe_json_dumps, download_image, extract_text_failure_reason
 from .managers import key_manager, data_manager
 
-from maibot_sdk.compat.apis import message_api
 try:
     from src.common.database.database_model import Images, Messages
 except ImportError:
@@ -50,7 +49,11 @@ async def extract_source_image(
             if seg.type == 'image' or seg.type == 'emoji':
                 if isinstance(seg.data, dict) and seg.data.get('url'):
                     if logger: logger.info(f"在消息段中找到URL图片 (类型: {seg.type})。")
-                    return await download_image(seg.data.get('url'), proxy)
+                    image_bytes = await download_image(seg.data.get('url'), proxy)
+                    if image_bytes:
+                        return image_bytes
+                    if logger: logger.warning(f"消息段URL图片下载失败，继续尝试后续片段 (类型: {seg.type})。")
+                    continue
                 elif isinstance(seg.data, str) and len(seg.data) > 200:
                     try:
                         if logger: logger.info(f"在消息段中找到Base64图片 (类型: {seg.type})。")
@@ -81,17 +84,20 @@ async def extract_source_image(
                     from src.common.data_models.mai_message_data_model import MaiMessage
                     from src.common.data_models.message_component_data_model import ImageComponent, EmojiComponent
                     
-                    with get_db_session() as session:
-                        statement = select(Messages).where(Messages.message_id == reply_to_id).limit(1)
-                        reply_msg = session.exec(statement).first()
-                        if reply_msg:
-                            mai_msg = MaiMessage.from_db_instance(reply_msg)
-                            for comp in mai_msg.raw_message.components:
-                                if isinstance(comp, (ImageComponent, EmojiComponent)):
-                                    await comp.load_image_binary()
-                                    if comp.binary_data:
-                                        if logger: logger.info("从数据库引用的消息中提取到图片")
-                                        return comp.binary_data
+                    def _fetch_reply_msg():
+                        with get_db_session() as session:
+                            statement = select(Messages).where(Messages.message_id == reply_to_id).limit(1)
+                            return session.exec(statement).first()
+
+                    reply_msg = await asyncio.to_thread(_fetch_reply_msg)
+                    if reply_msg:
+                        mai_msg = MaiMessage.from_db_instance(reply_msg)
+                        for comp in mai_msg.raw_message.components:
+                            if isinstance(comp, (ImageComponent, EmojiComponent)):
+                                await comp.load_image_binary()
+                                if comp.binary_data:
+                                    if logger: logger.info("从数据库引用的消息中提取到图片")
+                                    return comp.binary_data
                 except Exception as e:
                     if logger: logger.warning(f"Failed to fetch reply message from DB: {e}")
         return None
@@ -113,17 +119,20 @@ async def extract_source_image(
                     from src.common.data_models.mai_message_data_model import MaiMessage
                     from src.common.data_models.message_component_data_model import ImageComponent, EmojiComponent
                     
-                    with get_db_session() as session:
-                        statement = select(Messages).where(Messages.message_id == msg_id).limit(1)
-                        db_msg = session.exec(statement).first()
-                        if db_msg:
-                            mai_msg = MaiMessage.from_db_instance(db_msg)
-                            for comp in mai_msg.raw_message.components:
-                                if isinstance(comp, (ImageComponent, EmojiComponent)):
-                                    await comp.load_image_binary()
-                                    if comp.binary_data:
-                                        if logger: logger.info("从当前消息(数据库回查)中提取到图片")
-                                        return comp.binary_data
+                    def _fetch_current_msg():
+                        with get_db_session() as session:
+                            statement = select(Messages).where(Messages.message_id == msg_id).limit(1)
+                            return session.exec(statement).first()
+
+                    db_msg = await asyncio.to_thread(_fetch_current_msg)
+                    if db_msg:
+                        mai_msg = MaiMessage.from_db_instance(db_msg)
+                        for comp in mai_msg.raw_message.components:
+                            if isinstance(comp, (ImageComponent, EmojiComponent)):
+                                await comp.load_image_binary()
+                                if comp.binary_data:
+                                    if logger: logger.info("从当前消息(数据库回查)中提取到图片")
+                                    return comp.binary_data
                 except Exception as e:
                     if logger: logger.warning(f"Failed to fetch current message from DB: {e}")
         return None
@@ -143,7 +152,15 @@ async def extract_source_image(
             if not isinstance(segments, list):
                 segments = [segments]
             
-            if logger: logger.info(f"[调试] 提取@，当前 segments: {[({'type': s.type, 'data': s.data} if hasattr(s, 'type') else str(s)) for s in segments]}")
+            if logger:
+                segment_preview = [
+                    ({'type': s.type, 'data': s.data} if hasattr(s, 'type') else str(s))
+                    for s in segments
+                ]
+                try:
+                    logger.debug(f"[调试] 提取@，当前 segments: {safe_json_dumps(segment_preview)}")
+                except TypeError:
+                    logger.debug(f"[调试] 提取@，当前 segments: {str(segment_preview)[:500]}")
             
             for seg in segments:
                 # 检查 type='at'
@@ -159,17 +176,17 @@ async def extract_source_image(
                     matches = re.findall(r'@<[^:>]+:([^:>]+)>', seg.data)
                     for user_id in matches:
                         return await _download_avatar(str(user_id))
-                    matches = re.findall(r'@(\d+)', seg.data)
+                    matches = re.findall(r'@(\d{5,11})\b', seg.data)
                     for user_id in matches:
                         return await _download_avatar(str(user_id))
         
         # 情况 B: DatabaseMessages (检查文本中的 @<nick:id> 和 @id)
         text = getattr(message, 'processed_plain_text', '') or getattr(message, 'display_message', '') or ''
-        if logger: logger.info(f"[调试] 提取@，当前纯文本: {text}")
+        if logger: logger.debug(f"[调试] 提取@，当前纯文本: {text[:500]}")
         at_matches = re.findall(r'@<[^:>]+:([^:>]+)>', text)
         for user_id in at_matches:
              return await _download_avatar(str(user_id))
-        at_matches = re.findall(r'@(\d+)', text)
+        at_matches = re.findall(r'@(\d{5,11})\b', text)
         for user_id in at_matches:
              return await _download_avatar(str(user_id))
             
@@ -197,7 +214,7 @@ async def extract_source_image(
     
     return None
 
-    
+async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
     """
     根据配置获取所有可用的绘图API端点
     Args:
@@ -205,7 +222,6 @@ async def extract_source_image(
     Returns:
         端点列表
     """
-async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
     endpoints_to_try = []
 
     # 1. LM Arena
@@ -309,7 +325,7 @@ async def process_drawing_api_request(
     logger,
     config_getter,
     debug_mode: bool = False
-) -> Tuple[Optional[str], str]:
+) -> Tuple[Optional[List[str]], str]:
     """
     处理绘图API请求，包含失败重试和多渠道轮询逻辑
     Args:
@@ -322,8 +338,8 @@ async def process_drawing_api_request(
         config_getter: 配置获取函数
     
     Returns:
-        (image_data_str, error_message)
-        image_data_str: 图片数据（Base64或URL），成功时返回
+        (image_data_list, error_message)
+        image_data_list: 图片数据列表（Base64或URL），成功时返回
         error_message: 错误信息（如果全部失败）
     """
     last_error = ""
@@ -349,7 +365,7 @@ async def process_drawing_api_request(
             is_gpt_image = False
             
             # 获取模型名称（用于判断特殊模型类型）
-            endpoint_model = endpoint.get("model", "")
+            endpoint_model = endpoint.get("model") or ""
             
             # 判断 API 类型
             if endpoint_type == 'lmarena':
@@ -458,7 +474,7 @@ async def process_drawing_api_request(
             
             elif is_doubao:
                 headers["Authorization"] = f"Bearer {api_key}"
-                model_name = endpoint.get("model", "doubao-seedream-4-5-251128")
+                model_name = endpoint.get("model") or "doubao-seedream-4-5-251128"
                 
                 doubao_payload = {
                     "model": model_name,
@@ -485,16 +501,17 @@ async def process_drawing_api_request(
                 headers["x-api-key"] = api_key
                 if image_bytes and mime_type:
                     request_url = f"{base_url}?endpoint=image_editing"
-                    workflow = endpoint.get("model", "rr3")
+                    workflow = endpoint.get("model") or "rr3"
                     base64_img = base64.b64encode(image_bytes).decode('utf-8')
                     tsai_payload = {
                         "prompt": user_text_prompt,
+                        "workflow": workflow,
                         "image": f"data:{mime_type};base64,{base64_img}",
                         "seed": -1
                     }
                 else:
                     request_url = f"{base_url}?endpoint=image_generation"
-                    workflow = endpoint.get("model", "rr3")
+                    workflow = endpoint.get("model") or "rr3"
                     tsai_payload = {
                         "prompt": user_text_prompt,
                         "workflow": workflow,
@@ -547,10 +564,11 @@ async def process_drawing_api_request(
             logger.info(f"准备向 {endpoint_type} 端点发送请求。")
             
             img_data = None
+            failure_reason = ""
             use_stream = endpoint.get("stream", False)
             
-            # gpt-image 的 images API 不支持流式，强制关闭
-            if is_gpt_image:
+            # gpt-image、豆包、TS-AI 图像接口不支持当前流式解析路径，强制关闭
+            if is_gpt_image or is_doubao or is_tsai:
                 use_stream = False
             
             if use_stream:
@@ -569,7 +587,7 @@ async def process_drawing_api_request(
                                 if line.startswith(':'): continue
                                 
                                 if line.startswith('data:'):
-                                    data_str = line.replace('data:', '').strip()
+                                    data_str = line[5:].strip()
                                     if data_str == "DONE" or data_str == "[DONE]": break
                                     
                                     if debug_sse_lines is not None:
@@ -577,16 +595,14 @@ async def process_drawing_api_request(
                                     
                                     try:
                                         response_data = json.loads(data_str)
-                                        extracted = await extract_all_image_data(response_data)
-                                        if extracted:
-                                            img_data = extracted
-                                            logger.info(f"从SSE流中成功提取 {len(extracted)} 张图片数据。")
-                                            break
-                                        
-                                        # 累积 delta.content
+                                        # 只累积流式正文，避免在半截 base64 chunk 上误提取并截断。
                                         if "choices" in response_data and response_data["choices"]:
-                                            delta = response_data["choices"][0].get("delta", {})
+                                            choice = response_data["choices"][0]
+                                            delta = choice.get("delta", {})
                                             chunk_content = delta.get("content", "")
+                                            message = choice.get("message", {})
+                                            if not chunk_content and isinstance(message, dict):
+                                                chunk_content = message.get("content", "")
                                             if chunk_content:
                                                 accumulated_content += chunk_content
                                     except json.JSONDecodeError:
@@ -594,7 +610,7 @@ async def process_drawing_api_request(
                     
                     # 流结束后：尝试从累积内容中提取
                     if not img_data and accumulated_content:
-                        logger.info(f"[图片] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
+                        logger.info(f"[图片] SSE流结束，尝试从累积内容中提取图片 (长度: {len(accumulated_content)})")
                         pseudo_response = {
                             "choices": [{
                                 "message": {
@@ -605,13 +621,15 @@ async def process_drawing_api_request(
                         img_data = await extract_all_image_data(pseudo_response)
                         if img_data:
                             logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
+                        else:
+                            failure_reason = extract_text_failure_reason(pseudo_response)
                     
                     if not img_data and debug_mode and debug_sse_lines:
                         logger.warning(f"[调试模式] SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
                         for idx, dl in enumerate(debug_sse_lines):
                             logger.warning(f"[调试模式] SSE[{idx}]: {dl[:500]}")
                 except Exception as e:
-                    logger.error(f"SSE 请求错误: {e}")
+                    logger.error(f"SSE 请求错误: {type(e).__name__}: {e!r}")
                     raise
             
             else:
@@ -649,7 +667,7 @@ async def process_drawing_api_request(
                         async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
                             response = await client.post(request_url, json=current_payload, headers=headers)
                 except httpx.RequestError as e:
-                    logger.error(f"httpx.RequestError: {e}")
+                    logger.error(f"httpx.RequestError: {type(e).__name__}: {e!r}")
                     raise
 
                 if not is_tsai:
@@ -662,7 +680,8 @@ async def process_drawing_api_request(
                                 logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
                             else:
                                 logger.warning(f"API 响应成功但未提取到图片。")
-                            raise Exception(f"API未返回图片")
+                            reason = extract_text_failure_reason(data)
+                            raise Exception(f"API未返回图片, 原因: {reason or '未知'}")
                     else:
                         error_text = response.text
                         raise Exception(f"API请求失败, 状态码: {response.status_code} - {error_text}")
@@ -676,10 +695,12 @@ async def process_drawing_api_request(
                 return img_data, ""
 
             if not img_data:
+                if failure_reason:
+                    raise Exception(f"API未返回图片, 原因: {failure_reason}")
                 raise Exception("审核不通过，未能从API响应中获取图片数据")
 
         except Exception as e:
-            logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
+            logger.warning(f"端点 {endpoint_type} 尝试失败: {type(e).__name__}: {e}")
             if endpoint_type != 'lmarena':
                 is_quota_error = "429" in str(e)
                 key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
@@ -786,7 +807,7 @@ async def process_video_generation(
                         "image_url": {"url": f"data:{mime_type};base64,{base64_img}"}
                     })
                 
-                model_name = endpoint.get("model", "doubao-seedance-1-5-pro-251215")
+                model_name = endpoint.get("model") or "doubao-seedance-1-5-pro-251215"
                 doubao_payload = {
                     "model": model_name,
                     "content": doubao_content,
@@ -818,9 +839,11 @@ async def process_video_generation(
                         
                         if status == "succeeded":
                             content = poll_data.get("content", {})
-                            video_url = content.get("video_url") or content.get("url")
-                            if isinstance(content, list) and len(content) > 0:
+                            video_url = None
+                            if isinstance(content, list) and len(content) > 0 and isinstance(content[0], dict):
                                 video_url = content[0].get("video_url") or content[0].get("url")
+                            elif isinstance(content, dict):
+                                video_url = content.get("video_url") or content.get("url")
                             
                             if video_url:
                                 video_resp = await client.get(video_url)
@@ -844,7 +867,7 @@ async def process_video_generation(
                     })
                 
                 openai_payload = {
-                    "model": endpoint.get("model", "video-preview"),
+                    "model": endpoint.get("model") or "video-preview",
                     "messages": [{"role": "user", "content": content_list}],
                     "stream": endpoint.get("stream", False),
                     "video_config": {
@@ -874,22 +897,19 @@ async def process_video_generation(
                                 if not line or line.startswith(':'):
                                     continue
                                 if line.startswith('data:'):
-                                    data_str = line.replace('data:', '').strip()
+                                    data_str = line[5:].strip()
                                     if data_str in ["DONE", "[DONE]"]:
                                         break
                                     try:
                                         response_data = json.loads(data_str)
-                                        # 快速路径：尝试逐 chunk 提取 base64 数据
-                                        extracted = await extract_video_data(response_data)
-                                        if extracted and not extracted.startswith("url:"):
-                                            # 直接拿到了 base64 数据，无需累积
-                                            video_data = extracted
-                                            break
-                                        
-                                        # 累积 delta.content（用于流结束后提取 URL）
+                                        # 只累积流式正文，避免在半截 base64 chunk 上误提取并截断。
                                         if "choices" in response_data and response_data["choices"]:
-                                            delta = response_data["choices"][0].get("delta", {})
+                                            choice = response_data["choices"][0]
+                                            delta = choice.get("delta", {})
                                             chunk_content = delta.get("content", "")
+                                            message = choice.get("message", {})
+                                            if not chunk_content and isinstance(message, dict):
+                                                chunk_content = message.get("content", "")
                                             if chunk_content:
                                                 accumulated_content += chunk_content
                                     except json.JSONDecodeError:
@@ -997,8 +1017,11 @@ async def process_video_generation(
                     "Accept": "video/mp4,video/*,*/*;q=0.8",
                     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
                     "Referer": video_url.split("?")[0],
-                    "Authorization": f"Bearer {api_key}",
                 }
+                api_host = urlparse(api_url).hostname
+                video_host = urlparse(video_url).hostname
+                if api_key and api_host and video_host and api_host == video_host:
+                    dl_headers["Authorization"] = f"Bearer {api_key}"
                 try:
                     async with httpx.AsyncClient(proxy=proxy, timeout=120.0, follow_redirects=True) as dl_client:
                         dl_response = await dl_client.get(video_url, headers=dl_headers)
@@ -1006,17 +1029,19 @@ async def process_video_generation(
                             video_data = base64.b64encode(dl_response.content).decode('utf-8')
                             logger.info(f"[视频] 视频下载完成，大小: {len(dl_response.content)} 字节")
                         else:
-                            # 如果带 Auth 头失败，再尝试不带 Auth 头的纯浏览器请求
-                            logger.warning(f"[视频] 带认证头下载失败 (HTTP {dl_response.status_code})，尝试不带认证头...")
-                            del dl_headers["Authorization"]
-                            dl_response2 = await dl_client.get(video_url, headers=dl_headers)
-                            if dl_response2.status_code == 200 and dl_response2.content:
-                                video_data = base64.b64encode(dl_response2.content).decode('utf-8')
-                                logger.info(f"[视频] 视频下载完成（无认证头），大小: {len(dl_response2.content)} 字节")
+                            if "Authorization" in dl_headers:
+                                logger.warning(f"[视频] 同域带认证头下载失败 (HTTP {dl_response.status_code})，尝试不带认证头...")
+                                dl_headers.pop("Authorization", None)
+                                dl_response2 = await dl_client.get(video_url, headers=dl_headers)
+                                if dl_response2.status_code == 200 and dl_response2.content:
+                                    video_data = base64.b64encode(dl_response2.content).decode('utf-8')
+                                    logger.info(f"[视频] 视频下载完成（无认证头），大小: {len(dl_response2.content)} 字节")
+                                else:
+                                    raise Exception(f"下载视频失败: HTTP {dl_response.status_code} / {dl_response2.status_code}")
                             else:
-                                raise Exception(f"下载视频失败: HTTP {dl_response.status_code} / {dl_response2.status_code}")
+                                raise Exception(f"下载视频失败: HTTP {dl_response.status_code}")
                 except Exception as dl_err:
-                    logger.error(f"[视频] 下载视频失败: {dl_err}")
+                    logger.error(f"[视频] 下载视频失败: {type(dl_err).__name__}: {dl_err!r}")
                     video_data = None
                     last_error = f"视频URL获取成功但下载失败: {dl_err}"
             
@@ -1030,7 +1055,7 @@ async def process_video_generation(
                 last_error = error_msg
                 
         except Exception as e:
-            logger.warning(f"[视频] 端点 {endpoint_type} 失败: {e}")
+            logger.warning(f"[视频] 端点 {endpoint_type} 失败: {type(e).__name__}: {e}")
             is_quota_error = "429" in str(e)
             key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
             last_error = str(e)

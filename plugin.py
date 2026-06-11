@@ -259,7 +259,6 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         # 初始化自拍目录
         try:
             if self.config.selfie.enable:
-                image_filename = self.config.selfie.reference_image_path
                 plugin_dir = Path(__file__).parent
                 images_dir = plugin_dir / "images"
                 if not images_dir.exists():
@@ -288,7 +287,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         except Exception:
             pass
 
-        self.ctx.logger.info("Gemini Drawer 插件 v1.9.9 已成功以原生 v1.0 架构加载！")
+        self.ctx.logger.info(f"Gemini Drawer 插件 v{self.config.plugin.version} 已成功以原生 v1.0 架构加载！")
 
     async def sync_banana_website_prompts(self) -> Tuple[bool, str]:
         """同步大香蕉提示词到独立 banana_prompts.json，不修改 data.json。"""

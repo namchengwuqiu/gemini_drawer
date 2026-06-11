@@ -40,7 +40,8 @@ import logging
 
 from .utils import (
     download_image, convert_if_gif, get_image_mime_type,
-    safe_json_dumps, extract_image_data, extract_all_image_data, extract_video_data
+    safe_json_dumps, extract_image_data, extract_all_image_data, extract_video_data,
+    extract_text_failure_reason
 )
 
 from .managers import key_manager, data_manager
@@ -341,7 +342,7 @@ class BaseDrawCommand(BaseCommand, ABC):
             if seg.type == 'text' and isinstance(seg.data, str) and '@' in seg.data:
                 # 提取所有 @ 的用户 ID
                 # 匹配标准 @123456
-                for match in re.finditer(r'@(\d+)', seg.data):
+                for match in re.finditer(r'@(\d{5,11})\b', seg.data):
                     mentioned_users.append(match.group(1))
                 # 匹配特殊格式 @<Name:123456>
                 for match in re.finditer(r'@<[^>]+:(\d+)>', seg.data):
@@ -576,7 +577,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                     # 火山豆包图片生成 API
                     headers["Authorization"] = f"Bearer {api_key}"
 
-                    model_name = endpoint.get("model", "doubao-seedream-4-5-251128")
+                    model_name = endpoint.get("model") or "doubao-seedream-4-5-251128"
 
                     doubao_payload = {
                         "model": model_name,
@@ -602,14 +603,16 @@ class BaseDrawCommand(BaseCommand, ABC):
                     headers["x-api-key"] = api_key
                     if image_bytes and mime_type:
                         request_url = f"{base_url}?endpoint=image_editing"
+                        workflow = endpoint.get("model") or "rr3"
                         current_payload = {
                             "prompt": user_text_prompt,
+                            "workflow": workflow,
                             "image": f"data:{mime_type};base64,{base64_img}",
                             "seed": -1
                         }
                     else:
                         request_url = f"{base_url}?endpoint=image_generation"
-                        workflow = endpoint.get("model", "rr3")
+                        workflow = endpoint.get("model") or "rr3"
                         current_payload = {
                             "prompt": user_text_prompt,
                             "workflow": workflow,
@@ -653,7 +656,10 @@ class BaseDrawCommand(BaseCommand, ABC):
                 logger.info(f"准备向 {endpoint_type} 端点发送请求。URL: {request_url}, Payload: {safe_json_dumps(current_payload)}")
 
                 img_data = None
+                failure_reason = ""
                 use_stream = endpoint.get("stream", False)
+                if is_doubao or is_tsai:
+                    use_stream = False
 
                 debug_mode = self.get_config("behavior.debug_mode", False)
 
@@ -675,7 +681,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                         continue
 
                                     if line.startswith('data:'):
-                                        data_str = line.replace('data:', '').strip()
+                                        data_str = line[5:].strip()
                                         if data_str == "DONE" or data_str == "[DONE]":
                                             break
 
@@ -684,24 +690,22 @@ class BaseDrawCommand(BaseCommand, ABC):
 
                                         try:
                                             response_data = json.loads(data_str)
-                                            extracted_data = await extract_all_image_data(response_data)
-                                            if extracted_data:
-                                                img_data = extracted_data
-                                                logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
-                                                break
-
-                                            # 累积 delta.content（用于流结束后提取 URL）
+                                            # 只累积流式正文，避免在半截 base64 chunk 上误提取并截断。
                                             if "choices" in response_data and response_data["choices"]:
-                                                delta = response_data["choices"][0].get("delta", {})
+                                                choice = response_data["choices"][0]
+                                                delta = choice.get("delta", {})
                                                 chunk_content = delta.get("content", "")
+                                                message = choice.get("message", {})
+                                                if not chunk_content and isinstance(message, dict):
+                                                    chunk_content = message.get("content", "")
                                                 if chunk_content:
                                                     accumulated_content += chunk_content
                                         except json.JSONDecodeError:
                                             pass
 
-                        # 流结束后：如果逐 chunk 没提取到，尝试从累积内容中提取
+                        # 流结束后：尝试从累积内容中提取
                         if not img_data and accumulated_content:
-                            logger.info(f"[图片] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
+                            logger.info(f"[图片] SSE流结束，尝试从累积内容中提取图片 (长度: {len(accumulated_content)})")
                             pseudo_response = {
                                 "choices": [{
                                     "message": {
@@ -712,16 +716,18 @@ class BaseDrawCommand(BaseCommand, ABC):
                             img_data = await extract_all_image_data(pseudo_response)
                             if img_data:
                                 logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
+                            else:
+                                failure_reason = extract_text_failure_reason(pseudo_response)
 
                         if not img_data and debug_mode and debug_sse_lines:
                             logger.warning(f"[调试模式] SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
                             for idx, dl in enumerate(debug_sse_lines):
                                 logger.warning(f"[调试模式] SSE[{idx}]: {dl[:500]}")
                     except httpx.RequestError as e:
-                        logger.error(f"SSE 请求错误: {e}")
+                        logger.error(f"SSE 请求错误: {type(e).__name__}: {e!r}")
                         raise
                     except Exception as e:
-                        logger.error(f"SSE 流处理失败: {e}")
+                        logger.error(f"SSE 流处理失败: {type(e).__name__}: {e!r}")
                         raise
 
                 else:
@@ -759,7 +765,10 @@ class BaseDrawCommand(BaseCommand, ABC):
                             async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
                                 response = await client.post(request_url, json=current_payload, headers=headers)
                     except httpx.RequestError as e:
-                        logger.error(f"httpx.RequestError for endpoint {endpoint_type} ({request_url}): {e}")
+                        logger.error(
+                            f"httpx.RequestError for endpoint {endpoint_type} ({request_url}): "
+                            f"{type(e).__name__}: {repr(e)}"
+                        )
                         raise
 
                     if not is_tsai:
@@ -772,7 +781,8 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
                                 else:
                                     logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
-                                raise Exception(f"API未返回图片, 原因: {data.get('candidates', [{}])[0].get('finishReason', '未知')}")
+                                reason = extract_text_failure_reason(data)
+                                raise Exception(f"API未返回图片, 原因: {reason or '未知'}")
                         else:
                             raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
 
@@ -859,10 +869,12 @@ class BaseDrawCommand(BaseCommand, ABC):
                     return True, "绘图成功", True
 
                 if not img_data:
+                    if failure_reason:
+                        raise Exception(f"API未返回图片, 原因: {failure_reason}")
                     raise Exception("审核不通过，未能从API响应中获取图片数据")
 
             except Exception as e:
-                logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
+                logger.warning(f"端点 {endpoint_type} 尝试失败: {type(e).__name__}: {e}")
                 if endpoint_type != 'lmarena':
                     is_quota_error = "429" in str(e)
                     key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
@@ -1150,7 +1162,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 if is_doubao:
                     headers["Authorization"] = f"Bearer {api_key}"
 
-                    model_name = endpoint.get("model", "doubao-seedream-4-5-251128")
+                    model_name = endpoint.get("model") or "doubao-seedream-4-5-251128"
 
                     doubao_payload = {
                         "model": model_name,
@@ -1181,14 +1193,16 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                         if len(images) > 1:
                             logger.info(f"TS-AI 多图暂仅使用第 1 张参考图，其余 {len(images) - 1} 张将被忽略。")
                         request_url = f"{base_url}?endpoint=image_editing"
+                        workflow = endpoint.get("model") or "rr3"
                         current_payload = {
                             "prompt": user_text_prompt,
+                            "workflow": workflow,
                             "image": f"data:{first_image_mime};base64,{first_image_b64}",
                             "seed": -1
                         }
                     else:
                         request_url = f"{base_url}?endpoint=image_generation"
-                        workflow = endpoint.get("model", "rr3")
+                        workflow = endpoint.get("model") or "rr3"
                         current_payload = {
                             "prompt": user_text_prompt,
                             "workflow": workflow,
@@ -1228,7 +1242,10 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 logger.info(f"准备向 {endpoint_type} 端点发送多图请求。")
 
                 img_data = None
+                failure_reason = ""
                 use_stream = endpoint.get("stream", False)
+                if is_doubao or is_tsai:
+                    use_stream = False
 
                 debug_mode = self.get_config("behavior.debug_mode", False)
 
@@ -1247,7 +1264,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                     if not line: continue
                                     if line.startswith(':'): continue
                                     if line.startswith('data:'):
-                                        data_str = line.replace('data:', '').strip()
+                                        data_str = line[5:].strip()
                                         if data_str == "DONE" or data_str == "[DONE]": break
 
                                         if debug_sse_lines is not None:
@@ -1255,23 +1272,21 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
 
                                         try:
                                             response_data = json.loads(data_str)
-                                            extracted_data = await extract_all_image_data(response_data)
-                                            if extracted_data:
-                                                img_data = extracted_data
-                                                logger.info(f"从SSE流中成功提取 {len(extracted_data)} 张图片数据。")
-                                                break
-
-                                            # 累积 delta.content
+                                            # 只累积流式正文，避免在半截 base64 chunk 上误提取并截断。
                                             if "choices" in response_data and response_data["choices"]:
-                                                delta = response_data["choices"][0].get("delta", {})
+                                                choice = response_data["choices"][0]
+                                                delta = choice.get("delta", {})
                                                 chunk_content = delta.get("content", "")
+                                                message = choice.get("message", {})
+                                                if not chunk_content and isinstance(message, dict):
+                                                    chunk_content = message.get("content", "")
                                                 if chunk_content:
                                                     accumulated_content += chunk_content
                                         except json.JSONDecodeError: pass
 
                         # 流结束后：尝试从累积内容中提取
                         if not img_data and accumulated_content:
-                            logger.info(f"[多图] SSE流逐chunk未提取到图片，尝试从累积内容中提取 (长度: {len(accumulated_content)})")
+                            logger.info(f"[多图] SSE流结束，尝试从累积内容中提取图片 (长度: {len(accumulated_content)})")
                             pseudo_response = {
                                 "choices": [{
                                     "message": {
@@ -1282,13 +1297,15 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                             img_data = await extract_all_image_data(pseudo_response)
                             if img_data:
                                 logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
+                            else:
+                                failure_reason = extract_text_failure_reason(pseudo_response)
 
                         if not img_data and debug_mode and debug_sse_lines:
                             logger.warning(f"[调试模式] 多图SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:")
                             for idx, dl in enumerate(debug_sse_lines):
                                 logger.warning(f"[调试模式] SSE[{idx}]: {dl[:500]}")
                     except Exception as e:
-                        logger.error(f"SSE 请求错误: {e}")
+                        logger.error(f"SSE 请求错误: {type(e).__name__}: {e!r}")
                         raise
 
                 else:
@@ -1326,7 +1343,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                             async with httpx.AsyncClient(proxy=client_proxy, timeout=120.0, follow_redirects=True) as client:
                                 response = await client.post(request_url, json=current_payload, headers=headers)
                     except httpx.RequestError as e:
-                        logger.error(f"httpx.RequestError: {e}")
+                        logger.error(f"httpx.RequestError: {type(e).__name__}: {e!r}")
                         raise
 
                     if not is_tsai:
@@ -1339,7 +1356,8 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                     logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
                                 else:
                                     logger.warning(f"API 响应成功但未提取到图片。")
-                                raise Exception(f"API未返回图片")
+                                reason = extract_text_failure_reason(data)
+                                raise Exception(f"API未返回图片, 原因: {reason or '未知'}")
                         else:
                             raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
 
@@ -1402,10 +1420,12 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                     return True, "绘图成功", True
 
                 if not img_data:
+                    if failure_reason:
+                        raise Exception(f"API未返回图片, 原因: {failure_reason}")
                     raise Exception("审核不通过，未能从API响应中获取图片数据")
 
             except Exception as e:
-                logger.warning(f"端点 {endpoint_type} 尝试失败: {e}")
+                logger.warning(f"端点 {endpoint_type} 尝试失败: {type(e).__name__}: {e}")
                 if endpoint_type != 'lmarena':
                     is_quota_error = "429" in str(e)
                     key_manager.record_key_usage(api_key, False, force_disable=is_quota_error)
