@@ -7,8 +7,8 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_order__ = 0
 
     name: str = Field(default="gemini_drawer", description="插件名称")
-    version: str = Field(default="1.9.13", description="插件版本")
-    config_version: str = Field(default="1.9.13", description="配置版本")
+    version: str = Field(default="1.9.14", description="插件版本")
+    config_version: str = Field(default="1.9.14", description="配置版本")
     enabled: bool = Field(default=True, description="是否启用插件")
 
 class GeneralConfig(PluginConfigBase):

@@ -22,7 +22,8 @@ except ImportError:
 async def extract_source_image(
     message,
     proxy: Optional[str] = None,
-    logger = None
+    logger = None,
+    ctx = None
 ) -> Optional[bytes]:
     """
     从消息对象中提取图片（优先回复 > 消息内图片 > @用户头像 > 发送者头像）
@@ -31,6 +32,7 @@ async def extract_source_image(
         message: MaiMessages 对象
         proxy: 代理地址
         logger: 日志对象（如果为None则不记录日志）
+        ctx: 插件上下文，优先通过官方 message capability 查询历史回复消息
         
     Returns:
         图片字节或 None
@@ -46,21 +48,109 @@ async def extract_source_image(
         if not isinstance(segments, list):
             segments = [segments]
         for seg in segments:
-            if seg.type == 'image' or seg.type == 'emoji':
-                if isinstance(seg.data, dict) and seg.data.get('url'):
-                    if logger: logger.info(f"在消息段中找到URL图片 (类型: {seg.type})。")
-                    image_bytes = await download_image(seg.data.get('url'), proxy)
+            if isinstance(seg, dict):
+                seg_type = seg.get('type')
+                seg_data = seg.get('data')
+                binary_data_base64 = seg.get('binary_data_base64')
+            else:
+                seg_type = getattr(seg, 'type', None)
+                seg_data = getattr(seg, 'data', None)
+                binary_data_base64 = getattr(seg, 'binary_data_base64', None)
+
+            if seg_type == 'image' or seg_type == 'emoji':
+                if isinstance(binary_data_base64, str) and len(binary_data_base64) > 200:
+                    try:
+                        if logger: logger.info(f"在消息段中找到Base64图片 (类型: {seg_type})。")
+                        return base64.b64decode(binary_data_base64)
+                    except Exception:
+                        if logger: logger.warning(f"无法将类型为 '{seg_type}' 的二进制段解码为图片，已跳过。")
+                        continue
+                if isinstance(seg_data, dict) and seg_data.get('url'):
+                    if logger: logger.info(f"在消息段中找到URL图片 (类型: {seg_type})。")
+                    image_bytes = await download_image(seg_data.get('url'), proxy)
                     if image_bytes:
                         return image_bytes
-                    if logger: logger.warning(f"消息段URL图片下载失败，继续尝试后续片段 (类型: {seg.type})。")
+                    if logger: logger.warning(f"消息段URL图片下载失败，继续尝试后续片段 (类型: {seg_type})。")
                     continue
-                elif isinstance(seg.data, str) and len(seg.data) > 200:
+                elif isinstance(seg_data, str) and len(seg_data) > 200:
                     try:
-                        if logger: logger.info(f"在消息段中找到Base64图片 (类型: {seg.type})。")
-                        return base64.b64decode(seg.data)
+                        if logger: logger.info(f"在消息段中找到Base64图片 (类型: {seg_type})。")
+                        return base64.b64decode(seg_data)
                     except Exception:
-                        if logger: logger.warning(f"无法将类型为 '{seg.type}' 的段解码为图片，已跳过。")
+                        if logger: logger.warning(f"无法将类型为 '{seg_type}' 的段解码为图片，已跳过。")
                         continue
+        return None
+
+    async def _fetch_message_via_capability(message_id: Any) -> Optional[dict]:
+        if not ctx or not getattr(ctx, 'message', None):
+            return None
+
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return None
+
+        stream_id = (
+            str(getattr(message, 'session_id', '') or '').strip()
+            or str(getattr(message, 'stream_id', '') or '').strip()
+        )
+        if not stream_id:
+            chat_stream = getattr(message, 'chat_stream', None)
+            stream_id = str(getattr(chat_stream, 'stream_id', '') or '').strip()
+
+        return await ctx.message.get_by_id(
+            normalized_message_id,
+            stream_id=stream_id,
+            include_binary_data=True,
+        )
+
+    async def _extract_image_from_message_dict(message_dict: dict, source_label: str) -> Optional[bytes]:
+        segments = (
+            message_dict.get('message_segments')
+            or message_dict.get('raw_message')
+            or message_dict.get('message_segment')
+            or []
+        )
+        img = await _extract_image_from_segments(segments)
+        if img:
+            if logger: logger.info(f"从{source_label}中提取到图片")
+            return img
+        return None
+
+    async def _fetch_mai_message_from_db(message_id: Any):
+        """Fetch and deserialize a DB message before the SQLAlchemy session closes."""
+        if not Messages:
+            return None
+
+        normalized_message_id = str(message_id or "").strip()
+        if not normalized_message_id:
+            return None
+
+        from src.common.database.database import get_db_session
+        from sqlmodel import select
+        from src.common.data_models.mai_message_data_model import MaiMessage
+
+        def _fetch():
+            with get_db_session(auto_commit=False) as session:
+                statement = select(Messages).where(Messages.message_id == normalized_message_id).limit(1)
+                db_msg = session.exec(statement).first()
+                return MaiMessage.from_db_instance(db_msg) if db_msg else None
+
+        return await asyncio.to_thread(_fetch)
+
+    async def _extract_image_from_mai_message(mai_msg, source_label: str) -> Optional[bytes]:
+        from src.common.data_models.message_component_data_model import ImageComponent, EmojiComponent
+
+        for comp in mai_msg.raw_message.components:
+            if isinstance(comp, ImageComponent):
+                await comp.load_image_binary()
+            elif isinstance(comp, EmojiComponent):
+                await comp.load_emoji_binary()
+            else:
+                continue
+
+            if comp.binary_data:
+                if logger: logger.info(f"从{source_label}中提取到图片")
+                return comp.binary_data
         return None
 
     # 2. 尝试从回复的消息中提取
@@ -68,36 +158,31 @@ async def extract_source_image(
         # 情况 A: 递归检查 reply (因为 message.reply 可能本身是 CompatMessage 但不含图)
         if hasattr(message, 'reply') and message.reply:
             if hasattr(message.reply, 'message_segment'):
-                img = await extract_source_image(message.reply, proxy, logger)
+                img = await extract_source_image(message.reply, proxy, logger, ctx)
                 if img: return img
         
-        # 情况 B: DatabaseMessages 对象 (Historical)
-        if Messages:
-            reply_to_id = getattr(message, 'reply_to', None)
-            if not reply_to_id and hasattr(message, 'reply') and message.reply:
-                reply_to_id = getattr(message.reply, 'message_id', None)
-            
-            if reply_to_id and isinstance(reply_to_id, str):
-                try:
-                    from src.common.database.database import get_db_session
-                    from sqlmodel import select
-                    from src.common.data_models.mai_message_data_model import MaiMessage
-                    from src.common.data_models.message_component_data_model import ImageComponent, EmojiComponent
-                    
-                    def _fetch_reply_msg():
-                        with get_db_session() as session:
-                            statement = select(Messages).where(Messages.message_id == reply_to_id).limit(1)
-                            return session.exec(statement).first()
+        # 情况 B: 官方 message capability 查询历史回复消息
+        reply_to_id = getattr(message, 'reply_to', None)
+        if not reply_to_id and hasattr(message, 'reply') and message.reply:
+            reply_to_id = getattr(message.reply, 'message_id', None)
 
-                    reply_msg = await asyncio.to_thread(_fetch_reply_msg)
-                    if reply_msg:
-                        mai_msg = MaiMessage.from_db_instance(reply_msg)
-                        for comp in mai_msg.raw_message.components:
-                            if isinstance(comp, (ImageComponent, EmojiComponent)):
-                                await comp.load_image_binary()
-                                if comp.binary_data:
-                                    if logger: logger.info("从数据库引用的消息中提取到图片")
-                                    return comp.binary_data
+        if reply_to_id:
+            try:
+                message_dict = await _fetch_message_via_capability(reply_to_id)
+                if isinstance(message_dict, dict):
+                    img = await _extract_image_from_message_dict(message_dict, "官方消息能力引用的消息")
+                    if img:
+                        return img
+            except Exception as e:
+                if logger: logger.warning(f"Failed to fetch reply message via capability: {e}")
+
+        # 情况 C: DatabaseMessages 对象 (Historical)
+        if Messages:
+            if reply_to_id:
+                try:
+                    mai_msg = await _fetch_mai_message_from_db(reply_to_id)
+                    if mai_msg:
+                        return await _extract_image_from_mai_message(mai_msg, "数据库引用的消息")
                 except Exception as e:
                     if logger: logger.warning(f"Failed to fetch reply message from DB: {e}")
         return None
@@ -114,25 +199,9 @@ async def extract_source_image(
             msg_id = getattr(message, 'message_id', None)
             if msg_id:
                 try:
-                    from src.common.database.database import get_db_session
-                    from sqlmodel import select
-                    from src.common.data_models.mai_message_data_model import MaiMessage
-                    from src.common.data_models.message_component_data_model import ImageComponent, EmojiComponent
-                    
-                    def _fetch_current_msg():
-                        with get_db_session() as session:
-                            statement = select(Messages).where(Messages.message_id == msg_id).limit(1)
-                            return session.exec(statement).first()
-
-                    db_msg = await asyncio.to_thread(_fetch_current_msg)
-                    if db_msg:
-                        mai_msg = MaiMessage.from_db_instance(db_msg)
-                        for comp in mai_msg.raw_message.components:
-                            if isinstance(comp, (ImageComponent, EmojiComponent)):
-                                await comp.load_image_binary()
-                                if comp.binary_data:
-                                    if logger: logger.info("从当前消息(数据库回查)中提取到图片")
-                                    return comp.binary_data
+                    mai_msg = await _fetch_mai_message_from_db(msg_id)
+                    if mai_msg:
+                        return await _extract_image_from_mai_message(mai_msg, "当前消息(数据库回查)")
                 except Exception as e:
                     if logger: logger.warning(f"Failed to fetch current message from DB: {e}")
         return None

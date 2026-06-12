@@ -118,7 +118,7 @@ class ImageGenerateAction(BaseAction):
 
         try:
             if self.action_message:
-                image_bytes = await extract_source_image(self.action_message, proxy, logger)
+                image_bytes = await extract_source_image(self.action_message, proxy, logger, getattr(self, 'ctx', None))
                 if image_bytes:
                     logger.info("Action 检测到图片输入，将执行图生图模式。")
                     image_bytes = convert_if_gif(image_bytes)

@@ -249,6 +249,21 @@ def to_compat_message(message: Any) -> Any:
 class GeminiDrawerPlugin(MaiBotPlugin):
     config_model = GeminiDrawerConfig
 
+    def get_components(self) -> list[dict[str, Any]]:
+        components = super().get_components()
+        for component in components:
+            metadata = component.get("metadata")
+            if not isinstance(metadata, dict):
+                continue
+
+            nested_metadata = metadata.get("metadata")
+            if not isinstance(nested_metadata, dict):
+                continue
+
+            for key, value in nested_metadata.items():
+                metadata.setdefault(key, value)
+        return components
+
     def _set_context(self, ctx: PluginContext) -> None:
         super()._set_context(ctx)
         # 将上下文注入到全局兼容层持有者中，确保 legacy api 能顺利获取上下文

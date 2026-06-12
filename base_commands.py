@@ -270,7 +270,7 @@ class BaseDrawCommand(BaseCommand, ABC):
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
         # 使用 draw_logic.py 中的共享逻辑
-        image_bytes = await extract_source_image(self.message, proxy, logger)
+        image_bytes = await extract_source_image(self.message, proxy, logger, getattr(self, 'ctx', None))
         if image_bytes:
             return image_bytes
 
@@ -1471,7 +1471,7 @@ class BaseVideoCommand(BaseCommand, ABC):
     async def get_source_image_bytes(self) -> Optional[bytes]:
         """获取源图片，复用 draw_logic 中的逻辑"""
         proxy = self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
-        image_bytes = await extract_source_image(self.message, proxy, logger)
+        image_bytes = await extract_source_image(self.message, proxy, logger, getattr(self, 'ctx', None))
         return image_bytes
 
     @abstractmethod
