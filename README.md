@@ -1,15 +1,15 @@
 # Gemini 绘图插件
 
-> **Version:** 1.9.14
+> **Version:** 1.9.15
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
 ## 主要特性
 
-- **动态指令**：无需修改代码，仅通过修改配置文件即可轻松添加新的绘图风格和对应指令。
+- **动态指令**：无需修改代码，即可通过管理指令添加绘图渠道、API Key 和绘图风格。
 - **多样化图片源**：支持多种方式获取原始图片，极大提升了使用的便利性。
 - **多 API Key 管理**：自动轮换并管理多个 API Key，保证服务稳定。
-- **多后端支持**：支持 Google 官方、openai格式、第三方兼容 API (如 Bailili)、LMArena 后端以及火山豆包 API。
+- **多后端支持**：支持 Google 官方、OpenAI 兼容格式、第三方兼容 API、LMArena 后端以及火山豆包 API，渠道统一通过指令管理。
 - **自定义指令**：支持使用 `/bnn` 指令进行完全自定义的 prompt 绘图。
 - **代理支持**：可为 API 请求配置 HTTP 代理。
 - **回复图片模式** 🆕：生成的图片以回复触发消息的方式发送，更直观的用户反馈。
@@ -79,10 +79,10 @@ pip install -r requirements.txt
 | `/添加提示词 {名称}:{prompt}`            | **[新]** 动态添加一个绘图指令，**即时生效**。                          |
 | `/修改提示词 {名称}:{新prompt}`          | **[新]** 修改已存在的绘图指令，**即时生效**。                          |
 | `/删除提示词 {名称}`                     | **[新]** 动态删除一个绘图指令，**即时生效**。                          |
-| `/添加渠道 {名称}:{API地址}[:{模型}]`    | **[改]** 动态添加一个自定义 API 渠道。支持 OpenAI、Gemini 和豆包格式。 |
+| `/添加渠道 {名称}:{API地址}[:{模型}]`    | **[改]** 动态添加一个 API 渠道。支持 OpenAI 兼容、Gemini 官方和豆包格式。 |
 | `/渠道修改模型 {名称} {新模型}`          | **[新]** 修改指定渠道的模型名称，加载需重启。                          |
 | `/删除渠道 {名称}`                       | **[新]** 动态删除一个自定义 API 渠道。                                 |
-| `/启用渠道 {名称}`                       | **[新]** 启用指定渠道 (支持 google/lmarena)。                          |
+| `/启用渠道 {名称}`                       | **[新]** 启用指定渠道。                                                |
 | `/禁用渠道 {名称}`                       | **[新]** 禁用指定渠道。                                                |
 | `/渠道设置流式 {名称} {true\|false}`     | **[新]** 设置渠道是否使用流式请求。                                    |
 | `/渠道列表`                              | **[新]** 查看所有渠道的启用/禁用状态及流式设置。                       |
@@ -124,18 +124,24 @@ pip install -r requirements.txt
 - `success_notify_poke` (布尔值, 默认 `true`): 生成成功后使用戳一戳通知用户。
 - `reply_with_image` (布尔值, 默认 `true`): 以回复触发消息的方式发送图片（开启后自动跳过成功通知）。
 
-### `[api]` - API 端点设置
+### `[api]` - 视频发送与渠道引导
 
-此部分用于配置插件可以使用的不同后端 API。
+此部分不再直接填写绘图 API 地址或 Key。绘图渠道统一通过管理员指令写入外部数据文件，避免密钥暴露在 WebUI 可编辑的 `config.toml` 中。
 
-- `enable_google` (布尔值, 默认 `true`): 是否启用 Google 官方 API。
-- `api_url` (字符串): Google 官方 API 的端点地址。
-- `enable_lmarena` (布尔值, 默认 `false`): 是否启用 LMArena API。插件会自动根据 Key 的格式（是否以 `sk-` 开头）选择合适的端点。
-- `lmarena_api_url` (字符串, 默认 `http://host.docker.internal:5102`): **[新增]** LMArena API 的基础 URL。如果你在 Docker 中运行，并且 LMArena 也在 Docker 网络中，这个地址通常是正确的。
-- `lmarena_api_key` (字符串, 默认 `""`): **[新增]** LMArena API 的密钥 (可选, 使用 Bearer Token)。
-- `lmarena_model_name` (字符串, 默认 `gemini-2.5-flash-image-preview (nano-banana)`): **[新增]** LMArena 使用的模型名称。
+- `channel_setup_guide` (字符串, 只读说明): 提示如何使用 `/添加渠道`、`/渠道添加key`、`/渠道列表`、`/启用渠道`、`/禁用渠道` 管理绘图 API 渠道。
 - `napcat_host` (字符串, 默认 `napcat`): NapCat HTTP 服务器地址。Docker 环境下通常为 `napcat`，本地运行可设为 `localhost`。
 - `napcat_port` (整数, 默认 `3033`): NapCat 正向 HTTP 端口。
+
+绘图渠道添加示例：
+
+```text
+/添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent
+/添加渠道 openai渠道:https://api.example.com/v1/chat/completions:gpt-4
+/渠道添加key google your-api-key
+/渠道列表
+```
+
+旧版本 `config.toml` 中的 `api_url`、`enable_google`、`lmarena_api_*` 会在插件加载时自动迁移到渠道数据，并从配置文件中移除。
 
 ### NapCat HTTP 服务器配置 🆕
 

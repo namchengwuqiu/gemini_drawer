@@ -48,12 +48,16 @@ class ChannelAddKeyCommand(BaseAdminCommand):
         channel_name = parts[0]
         new_keys = parts[1:]
 
-        valid_channels = ['google']
         custom_channels = data_manager.get_channels()
-        valid_channels.extend(custom_channels.keys())
-        
+        valid_channels = list(custom_channels.keys())
+
         if channel_name not in valid_channels:
-             await self.send_text(f"❌ 未知的渠道名称：`{channel_name}`\n可用渠道：{', '.join(valid_channels)}")
+             available = ", ".join(valid_channels) if valid_channels else "暂无"
+             await self.send_text(
+                 f"❌ 未知的渠道名称：`{channel_name}`\n"
+                 f"可用渠道：{available}\n"
+                 "请先使用 `/添加渠道 <名称>:<URL>[:模型名]` 添加渠道。"
+             )
              return True, "未知渠道", True
 
         added, duplicates = key_manager.add_keys(new_keys, channel_name)
@@ -299,13 +303,15 @@ class AddChannelCommand(BaseAdminCommand):
         rest = self.message.raw_message.replace("/添加渠道", "", 1).strip()
         help_msg = """❌ 格式错误！请使用正确格式：
 📌 OpenAI格式: /添加渠道 名称:URL:模型名
-📌 Gemini格式: /添加渠道 名称:URL
+📌 Gemini官方格式: /添加渠道 名称:URL
 📌 豆包格式: /添加渠道 名称:URL:模型名
 
 示例:
 /添加渠道 openai渠道:https://api.example.com/v1/chat/completions:gpt-4
-/添加渠道 gemini渠道:https://xxx/models/gemini-pro:generateContent
-/添加渠道 doubao:https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128"""
+/添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent
+/添加渠道 doubao:https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128
+
+添加渠道后再使用 `/渠道添加key <渠道名称> <key>` 添加密钥。"""
         
         if not rest or ":" not in rest:
             await self.send_text(help_msg)
@@ -467,17 +473,7 @@ class ToggleChannelCommand(BaseAdminCommand):
         channels = data_manager.get_channels()
         target_found = False
         
-        if name.lower() in ['google', 'lmarena']:
-             import toml
-             config_path = Path(__file__).parent / "config.toml"
-             with open(config_path, 'r', encoding='utf-8') as f:
-                 config_data = toml.load(f)
-             if "api" not in config_data: config_data["api"] = {}
-             if name.lower() == 'google': config_data["api"]["enable_google"] = is_enable
-             else: config_data["api"]["enable_lmarena"] = is_enable
-             save_config_file(config_path, config_data)
-             target_found = True
-        elif name in channels:
+        if name in channels:
             channel_info = channels[name]
             if isinstance(channel_info, str):
                 url, key = channel_info.rsplit(":", 1)
@@ -499,12 +495,6 @@ class ListChannelsCommand(BaseAdminCommand):
     command_pattern: str = "/渠道列表"
 
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
-        import toml
-        config_path = Path(__file__).parent / "config.toml"
-        with open(config_path, 'r', encoding='utf-8') as f:
-            config_data = toml.load(f)
-
-        api_config = config_data.get("api", {})
         channels_config = data_manager.get_channels()
         
         bot_name = "Gemini Drawer"
@@ -512,14 +502,6 @@ class ListChannelsCommand(BaseAdminCommand):
         header_content = [(ReplyContentType.TEXT, header_text)]
         nodes_to_send = [("1", bot_name, header_content)]
 
-        # 内置渠道
-        builtin_lines = []
-        builtin_lines.append(f"{'✅' if api_config.get('enable_google', True) else '❌'} **Google** (官方Key)")
-        builtin_lines.append(f"{'✅' if api_config.get('enable_lmarena', False) else '❌'} **LMArena** (免费接口)")
-        builtin_content = [(ReplyContentType.TEXT, "\n".join(builtin_lines))]
-        nodes_to_send.append(("1", bot_name, builtin_content))
-
-        # 自定义渠道
         if channels_config:
             custom_lines = []
             for name, info in channels_config.items():
@@ -532,6 +514,9 @@ class ListChannelsCommand(BaseAdminCommand):
                 custom_lines.append(f"{'✅' if enabled else '❌'} **{name}**{model_info}{stream_info}{video_info}")
             custom_content = [(ReplyContentType.TEXT, "\n".join(custom_lines))]
             nodes_to_send.append(("1", bot_name, custom_content))
+        else:
+            empty_text = "暂无渠道。请使用 `/添加渠道 <名称>:<URL>[:模型名]` 添加，然后用 `/渠道添加key <名称> <key>` 添加密钥。"
+            nodes_to_send.append(("1", bot_name, [(ReplyContentType.TEXT, empty_text)]))
         
         await self._send_forward_via_ctx(nodes_to_send)
         return True, "查询成功", True

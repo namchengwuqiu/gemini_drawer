@@ -283,29 +283,13 @@ async def extract_source_image(
     
     return None
 
-async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
-    """
-    根据配置获取所有可用的绘图API端点
-    Args:
-        config_getter: 用于获取配置的函数 (key, default) -> value
-    Returns:
-        端点列表
-    """
+def build_drawing_endpoints() -> List[Dict[str, Any]]:
+    """从渠道配置和渠道 Key 中构建绘图端点列表。"""
+
     endpoints_to_try = []
-
-    # 1. LM Arena
-    if config_getter("api.enable_lmarena", True):
-        lmarena_url = config_getter("api.lmarena_api_url", "https://chat.lmsys.org")
-        lmarena_key = config_getter("api.lmarena_api_key", "") 
-        endpoints_to_try.append({
-            "type": "lmarena",
-            "url": lmarena_url,
-            "key": lmarena_key,
-            "stream": True
-        })
-
-    # 2. 自定义渠道 (排除视频渠道)
     custom_channels = data_manager.get_channels()
+
+    # 1. 渠道内直接保存的 Key（兼容旧数据）
     for name, channel_info in custom_channels.items():
         c_url = ""
         c_key = ""
@@ -336,10 +320,7 @@ async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
                 "stream": c_stream
             })
 
-    # 3. 密钥管理器的 Key (Google / Channel)
-    enable_google = config_getter("api.enable_google", True)
-    google_api_url = config_getter("api.api_url")
-
+    # 2. Key 管理器中的渠道 Key
     for key_info in key_manager.get_all_keys():
         if key_info.get('status') != 'active':
             continue
@@ -348,15 +329,7 @@ async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
         if not key_type:
             key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
 
-        if key_type == 'google':
-            if enable_google:
-                endpoints_to_try.append({
-                    "type": "google",
-                    "url": google_api_url,
-                    "key": key_info['value']
-                })
-        
-        elif key_type in custom_channels:
+        if key_type in custom_channels:
             channel_info = custom_channels[key_type]
             c_enabled = True
             c_url = ""
@@ -384,6 +357,17 @@ async def get_drawing_endpoints(config_getter) -> List[Dict[str, Any]]:
                 })
     
     return endpoints_to_try
+
+
+async def get_drawing_endpoints(config_getter=None) -> List[Dict[str, Any]]:
+    """
+    获取所有可用的绘图 API 端点。
+
+    config_getter 参数保留给旧调用方；端点已统一改为通过“渠道 + 渠道 Key”配置。
+    """
+
+    return build_drawing_endpoints()
+
 
 async def process_drawing_api_request(
     payload: Dict[str, Any],
@@ -619,9 +603,7 @@ async def process_drawing_api_request(
 
                 model_name = endpoint.get("model")
                 if not model_name:
-                    # 回退逻辑
-                    default_model = "gemini-3-pro-image-preview" if endpoint_type == 'lmarena' else "gemini-pro-vision"
-                    model_name = config_getter("api.lmarena_model_name", default_model)
+                    model_name = "gemini-pro-vision"
 
                 openai_payload = {
                     "model": model_name,

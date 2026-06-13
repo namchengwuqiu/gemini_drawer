@@ -44,8 +44,8 @@ from .utils import (
     extract_text_failure_reason
 )
 
-from .managers import key_manager, data_manager
-from .draw_logic import extract_source_image
+from .managers import key_manager
+from .draw_logic import build_drawing_endpoints, extract_source_image
 
 logger = logging.getLogger("plugin.gemini_drawer")
 
@@ -429,93 +429,7 @@ class BaseDrawCommand(BaseCommand, ABC):
             ]
         }
 
-        endpoints_to_try = []
-
-        if self.get_config("api.enable_lmarena", True):
-            lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
-            lmarena_key = self.get_config("api.lmarena_api_key", "")
-            endpoints_to_try.append({
-                "type": "lmarena",
-                "url": lmarena_url,
-                "key": lmarena_key,
-                "stream": True
-            })
-
-        custom_channels = data_manager.get_channels()
-        for name, channel_info in custom_channels.items():
-            c_url = ""
-            c_key = ""
-            c_model = None
-            c_enabled = True
-            c_is_video = False
-
-            if isinstance(channel_info, dict):
-                c_url = channel_info.get("url")
-                c_key = channel_info.get("key")
-                c_model = channel_info.get("model")
-                c_enabled = channel_info.get("enabled", True)
-                c_is_video = channel_info.get("is_video", False)
-            elif isinstance(channel_info, str) and ":" in channel_info:
-                c_url, c_key = channel_info.rsplit(":", 1)
-
-            # 跳过视频渠道
-            if c_is_video:
-                continue
-
-            if c_url and c_key and c_enabled:
-                c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
-                endpoints_to_try.append({
-                    "type": f"custom_{name}",
-                    "url": c_url,
-                    "key": c_key,
-                    "model": c_model,
-                    "stream": c_stream
-                })
-
-        enable_google = self.get_config("api.enable_google", True)
-
-        for key_info in key_manager.get_all_keys():
-            if key_info.get('status') != 'active':
-                continue
-
-            key_type = key_info.get('type')
-            if not key_type:
-                key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
-
-            if key_type == 'google':
-                if enable_google:
-                    endpoints_to_try.append({
-                        "type": "google",
-                        "url": self.get_config("api.api_url"),
-                        "key": key_info['value']
-                    })
-
-            elif key_type in custom_channels:
-                channel_info = custom_channels[key_type]
-                c_enabled = True
-                c_url = ""
-                c_model = None
-                c_is_video = False
-
-                if isinstance(channel_info, dict):
-                    c_url = channel_info.get("url")
-                    c_model = channel_info.get("model")
-                    c_enabled = channel_info.get("enabled", True)
-                    c_is_video = channel_info.get("is_video", False)
-
-                # 跳过视频渠道
-                if c_is_video:
-                    continue
-
-                if c_enabled and c_url:
-                    c_stream = channel_info.get("stream", False)
-                    endpoints_to_try.append({
-                        "type": f"custom_{key_type}",
-                        "url": c_url,
-                        "key": key_info['value'],
-                        "model": c_model,
-                        "stream": c_stream
-                    })
+        endpoints_to_try = build_drawing_endpoints()
 
         if not endpoints_to_try:
             await self.send_text("❌ 未配置任何API密钥或端点。" )
@@ -643,8 +557,7 @@ class BaseDrawCommand(BaseCommand, ABC):
 
                     model_name = endpoint.get("model")
                     if not model_name:
-                        default_model = "gemini-3-pro-image-preview" if endpoint_type == 'lmarena' else "gemini-pro-vision"
-                        model_name = self.get_config("api.lmarena_model_name", default_model)
+                        model_name = "gemini-pro-vision"
 
                     openai_payload = {
                         "model": model_name,
@@ -1020,94 +933,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
             ]
         }
 
-        # 准备 Endpoint 列表 (逻辑同 BaseDrawCommand)
-        endpoints_to_try = []
-
-        if self.get_config("api.enable_lmarena", True):
-            lmarena_url = self.get_config("api.lmarena_api_url", "https://chat.lmsys.org")
-            lmarena_key = self.get_config("api.lmarena_api_key", "")
-            endpoints_to_try.append({
-                "type": "lmarena",
-                "url": lmarena_url,
-                "key": lmarena_key,
-                "stream": True # LMArena 强制流式
-            })
-
-        custom_channels = data_manager.get_channels()
-        for name, channel_info in custom_channels.items():
-            c_url = ""
-            c_key = ""
-            c_model = None
-            c_enabled = True
-            c_is_video = False
-
-            if isinstance(channel_info, dict):
-                c_url = channel_info.get("url")
-                c_key = channel_info.get("key")
-                c_model = channel_info.get("model")
-                c_enabled = channel_info.get("enabled", True)
-                c_is_video = channel_info.get("is_video", False)
-            elif isinstance(channel_info, str) and ":" in channel_info:
-                c_url, c_key = channel_info.rsplit(":", 1)
-
-            # 跳过视频渠道
-            if c_is_video:
-                continue
-
-            if c_url and c_key and c_enabled:
-                c_stream = channel_info.get("stream", False) if isinstance(channel_info, dict) else False
-                endpoints_to_try.append({
-                    "type": f"custom_{name}",
-                    "url": c_url,
-                    "key": c_key,
-                    "model": c_model,
-                    "stream": c_stream
-                })
-
-        enable_google = self.get_config("api.enable_google", True)
-
-        for key_info in key_manager.get_all_keys():
-            if key_info.get('status') != 'active':
-                continue
-
-            key_type = key_info.get('type')
-            if not key_type:
-                key_type = 'bailili' if key_info['value'].startswith('sk-') else 'google'
-
-            if key_type == 'google':
-                if enable_google:
-                    endpoints_to_try.append({
-                        "type": "google",
-                        "url": self.get_config("api.api_url"),
-                        "key": key_info['value']
-                    })
-
-            elif key_type in custom_channels:
-                channel_info = custom_channels[key_type]
-                c_enabled = True
-                c_url = ""
-                c_model = None
-                c_is_video = False
-
-                if isinstance(channel_info, dict):
-                    c_url = channel_info.get("url")
-                    c_model = channel_info.get("model")
-                    c_enabled = channel_info.get("enabled", True)
-                    c_is_video = channel_info.get("is_video", False)
-
-                # 跳过视频渠道
-                if c_is_video:
-                    continue
-
-                if c_enabled and c_url:
-                    c_stream = channel_info.get("stream", False)
-                    endpoints_to_try.append({
-                        "type": f"custom_{key_type}",
-                        "url": c_url,
-                        "key": key_info['value'],
-                        "model": c_model,
-                        "stream": c_stream
-                    })
+        endpoints_to_try = build_drawing_endpoints()
 
         if not endpoints_to_try:
             await self.send_text("❌ 未配置任何API密钥或端点。" )
@@ -1229,8 +1055,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
 
                     model_name = endpoint.get("model")
                     if not model_name:
-                        default_model = "gemini-3-pro-image-preview" if endpoint_type == 'lmarena' else "gemini-pro-vision"
-                        model_name = self.get_config("api.lmarena_model_name", default_model)
+                        model_name = "gemini-pro-vision"
 
                     openai_payload = {
                         "model": model_name,

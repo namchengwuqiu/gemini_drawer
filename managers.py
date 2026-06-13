@@ -483,28 +483,76 @@ class DataManager:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config_data = toml.load(f)
             
-            changed = False
+            data_changed = False
+            config_changed = False
             
             # Migrate Prompts
             if "prompts" in config_data:
                 for name, prompt in config_data["prompts"].items():
                     if name not in self.data["prompts"]:
                         self.data["prompts"][name] = prompt
-                        changed = True
+                        data_changed = True
                 del config_data["prompts"]
+                config_changed = True
 
             # Migrate Channels
             if "channels" in config_data:
                 for name, info in config_data["channels"].items():
                     if name not in self.data["channels"]:
                         self.data["channels"][name] = info
-                        changed = True
+                        data_changed = True
                 del config_data["channels"]
+                config_changed = True
 
-            if changed:
+            api_config = config_data.get("api")
+            if isinstance(api_config, dict):
+                channels = self.data.setdefault("channels", {})
+                legacy_fields = [
+                    "enable_google",
+                    "api_url",
+                    "enable_lmarena",
+                    "lmarena_api_url",
+                    "lmarena_api_key",
+                    "lmarena_model_name",
+                ]
+
+                google_url = str(api_config.get("api_url") or "").strip()
+                google_enabled = bool(api_config.get("enable_google", True))
+                if google_url and "google" not in channels:
+                    channels["google"] = {"url": google_url, "enabled": google_enabled, "stream": False}
+                    data_changed = True
+
+                lmarena_url = str(api_config.get("lmarena_api_url") or "").strip()
+                lmarena_key = str(api_config.get("lmarena_api_key") or "").strip()
+                lmarena_model = str(api_config.get("lmarena_model_name") or "").strip()
+                lmarena_enabled = bool(api_config.get("enable_lmarena", False))
+                is_placeholder_lmarena = lmarena_url in {"", "http://xxx:666/v1/chat/completions"}
+                if lmarena_url and not is_placeholder_lmarena:
+                    if "lmarena" not in channels:
+                        channel_info: Dict[str, Any] = {
+                            "url": lmarena_url,
+                            "enabled": lmarena_enabled,
+                            "stream": True,
+                        }
+                        if lmarena_model:
+                            channel_info["model"] = lmarena_model
+                        channels["lmarena"] = channel_info
+                        data_changed = True
+                    if lmarena_key:
+                        added_count, _ = key_manager.add_keys([lmarena_key], "lmarena")
+                        data_changed = data_changed or added_count > 0
+
+                for field_name in legacy_fields:
+                    if field_name in api_config:
+                        del api_config[field_name]
+                        config_changed = True
+
+            if data_changed:
                 self.save_data()
+            if config_changed:
                 save_config_file(config_path, config_data)
-                logger.info("Successfully migrated prompts and channels from config.toml to data/data.json")
+            if data_changed or config_changed:
+                logger.info("Successfully migrated legacy config.toml data")
 
         except Exception as e:
             logger.error(f"Migration from TOML failed: {e}")
