@@ -7,6 +7,7 @@
 - **绘图渠道配置入口调整**: `config.toml` 不再暴露 Google 官方 API 与第三方 API 的地址、开关和 Key 字段，绘图渠道统一通过 `/添加渠道`、`/渠道添加key`、`/启用渠道`、`/禁用渠道` 管理。
 - **配置文件引导说明**: 在 `[api]` 中新增只读说明 `channel_setup_guide`，为只查看 `config.toml` 的用户提供添加 Google 官方渠道、第三方 OpenAI 兼容渠道和渠道 Key 的指令示例。
 - **旧配置迁移兼容**: 旧版 `api_url`、`enable_google`、`lmarena_api_*` 配置会在加载时迁移到渠道数据，并从 `config.toml` 中清理，避免升级后配置丢失。
+- **绘图失败提示修复**: 未提取到图片时不再默认提示“审核不通过”，会优先透传 API 返回的 `promptFeedback`、`safetyRatings`、内容过滤、模型停止原因或错误详情。
 
 ---
 

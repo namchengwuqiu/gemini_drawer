@@ -695,7 +695,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                                 else:
                                     logger.warning(f"API 响应成功但未提取到图片。响应: {safe_json_dumps(data)}")
                                 reason = extract_text_failure_reason(data)
-                                raise Exception(f"API未返回图片, 原因: {reason or '未知'}")
+                                raise Exception(f"API未返回图片, 原因: {reason or '响应中没有可提取的图片数据'}")
                         else:
                             raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
 
@@ -784,7 +784,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                 if not img_data:
                     if failure_reason:
                         raise Exception(f"API未返回图片, 原因: {failure_reason}")
-                    raise Exception("审核不通过，未能从API响应中获取图片数据")
+                    raise Exception("API未返回图片，响应中没有可提取的图片数据")
 
             except Exception as e:
                 logger.warning(f"端点 {endpoint_type} 尝试失败: {type(e).__name__}: {e}")
@@ -1182,7 +1182,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                                 else:
                                     logger.warning(f"API 响应成功但未提取到图片。")
                                 reason = extract_text_failure_reason(data)
-                                raise Exception(f"API未返回图片, 原因: {reason or '未知'}")
+                                raise Exception(f"API未返回图片, 原因: {reason or '响应中没有可提取的图片数据'}")
                         else:
                             raise Exception(f"API请求失败, 状态码: {response.status_code} - {response.text}")
 
@@ -1247,7 +1247,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                 if not img_data:
                     if failure_reason:
                         raise Exception(f"API未返回图片, 原因: {failure_reason}")
-                    raise Exception("审核不通过，未能从API响应中获取图片数据")
+                    raise Exception("API未返回图片，响应中没有可提取的图片数据")
 
             except Exception as e:
                 logger.warning(f"端点 {endpoint_type} 尝试失败: {type(e).__name__}: {e}")

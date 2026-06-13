@@ -155,55 +155,258 @@ def safe_json_dumps(obj: Any) -> str:
     return json.dumps(truncated_obj, ensure_ascii=False)
 
 def extract_text_failure_reason(response_data: Dict[str, Any], max_length: int = 500) -> str:
-    """从成功响应里提取模型返回的拒绝/说明文本，供无图片时透传。"""
+    """从 API 响应中提取模型返回的拒绝、过滤或失败原因，供无图片时透传。"""
+
+    success_finish_reasons = {"STOP", "FINISH_REASON_STOP", "SUCCESS", "SUCCEEDED", "COMPLETED"}
+    finish_reason_labels = {
+        "SAFETY": "安全策略拦截",
+        "PROHIBITED_CONTENT": "内容策略拦截",
+        "CONTENT_FILTER": "内容过滤器拦截",
+        "RECITATION": "可能触发版权或复述限制",
+        "MAX_TOKENS": "达到最大输出长度",
+        "LENGTH": "达到最大输出长度",
+        "MALFORMED_FUNCTION_CALL": "模型返回了格式错误的工具调用",
+        "OTHER": "模型停止生成",
+    }
+    reason_keys = (
+        "message",
+        "msg",
+        "detail",
+        "details",
+        "error",
+        "reason",
+        "description",
+        "error_description",
+        "failure_reason",
+        "failureReason",
+        "error_message",
+        "errorMessage",
+    )
+
+    def clean(value: str) -> str:
+        return truncate_for_log(value.strip(), max_length)
+
+    def humanize_finish_reason(reason: Any) -> str:
+        if not isinstance(reason, str) or not reason.strip():
+            return ""
+        raw = reason.strip()
+        normalized = raw.upper()
+        label = finish_reason_labels.get(normalized)
+        if label:
+            return f"{label} ({raw})"
+        return raw
+
+    def stringify_reason(value: Any, depth: int = 0) -> str:
+        if depth > 4:
+            return ""
+        if isinstance(value, str):
+            return clean(value) if value.strip() else ""
+        if isinstance(value, (int, float, bool)):
+            return clean(str(value))
+        if isinstance(value, list):
+            parts = [stringify_reason(item, depth + 1) for item in value]
+            return clean("; ".join(part for part in parts if part))
+        if isinstance(value, dict):
+            for key in reason_keys:
+                if key in value:
+                    text = stringify_reason(value.get(key), depth + 1)
+                    if text:
+                        return text
+            return summarize_content_filter(value) or summarize_safety_ratings(value.get("safetyRatings"))
+        return ""
+
+    def extract_content_text(content: Any) -> str:
+        if isinstance(content, str) and content.strip():
+            return clean(content)
+        if isinstance(content, list):
+            text_parts = []
+            for item in content:
+                if not isinstance(item, dict):
+                    continue
+                for key in ("text", "content", "refusal"):
+                    text = item.get(key)
+                    if isinstance(text, str) and text.strip():
+                        text_parts.append(text.strip())
+                        break
+            if text_parts:
+                return clean("\n".join(text_parts))
+        return ""
+
+    def summarize_safety_ratings(ratings: Any) -> str:
+        if not isinstance(ratings, list):
+            return ""
+        unsafe_parts = []
+        for rating in ratings:
+            if not isinstance(rating, dict):
+                continue
+            category = rating.get("category") or rating.get("label") or rating.get("type")
+            probability = rating.get("probability") or rating.get("severity") or rating.get("level")
+            blocked = rating.get("blocked") or rating.get("filtered")
+            if blocked or str(probability).upper() in {"MEDIUM", "HIGH"}:
+                label = str(category or "unknown")
+                if probability:
+                    label += f"={probability}"
+                if blocked:
+                    label += "(blocked)"
+                unsafe_parts.append(label)
+        if unsafe_parts:
+            return clean("安全评级: " + ", ".join(unsafe_parts))
+        return ""
+
+    def summarize_content_filter(filter_data: Any) -> str:
+        if isinstance(filter_data, list):
+            parts = [summarize_content_filter(item) for item in filter_data]
+            return clean("; ".join(part for part in parts if part))
+        if not isinstance(filter_data, dict):
+            return ""
+
+        if "content_filter_results" in filter_data:
+            return summarize_content_filter(filter_data.get("content_filter_results"))
+
+        filtered_parts = []
+        for name, result in filter_data.items():
+            if isinstance(result, dict):
+                filtered = result.get("filtered") or result.get("blocked")
+                severity = result.get("severity") or result.get("probability") or result.get("level")
+                if filtered or str(severity).lower() in {"medium", "high"}:
+                    detail = str(name)
+                    if severity:
+                        detail += f"={severity}"
+                    if filtered:
+                        detail += "(filtered)"
+                    filtered_parts.append(detail)
+        if filtered_parts:
+            return clean("内容过滤: " + ", ".join(filtered_parts))
+        return ""
+
+    def extract_prompt_feedback(feedback: Any) -> str:
+        if not isinstance(feedback, dict):
+            return ""
+        parts = []
+        block_reason = (
+            feedback.get("blockReason")
+            or feedback.get("blockedReason")
+            or feedback.get("block_reason")
+            or feedback.get("blocked_reason")
+        )
+        if block_reason:
+            parts.append("请求被模型拦截: " + humanize_finish_reason(block_reason))
+
+        block_message = (
+            feedback.get("blockReasonMessage")
+            or feedback.get("block_message")
+            or feedback.get("message")
+        )
+        if isinstance(block_message, str) and block_message.strip():
+            parts.append(block_message.strip())
+
+        safety = summarize_safety_ratings(feedback.get("safetyRatings") or feedback.get("safety_ratings"))
+        if safety:
+            parts.append(safety)
+
+        return clean("; ".join(part for part in parts if part))
+
+    def extract_generic_reason(obj: Any, depth: int = 0) -> str:
+        if depth > 4:
+            return ""
+        if isinstance(obj, dict):
+            for key in reason_keys:
+                if key in obj:
+                    text = stringify_reason(obj.get(key), depth + 1)
+                    if text:
+                        return text
+            for value in obj.values():
+                text = extract_generic_reason(value, depth + 1)
+                if text:
+                    return text
+        elif isinstance(obj, list):
+            for item in obj:
+                text = extract_generic_reason(item, depth + 1)
+                if text:
+                    return text
+        return ""
+
     try:
-        error = response_data.get("error")
-        if isinstance(error, dict):
-            message = error.get("message") or error.get("error")
-            if isinstance(message, str) and message.strip():
-                return truncate_for_log(message.strip(), max_length)
-        elif isinstance(error, str) and error.strip():
-            return truncate_for_log(error.strip(), max_length)
+        error_text = stringify_reason(response_data.get("error"))
+        if error_text:
+            return error_text
+
+        for key in reason_keys:
+            text = stringify_reason(response_data.get(key))
+            if text:
+                return text
+
+        prompt_feedback = extract_prompt_feedback(
+            response_data.get("promptFeedback") or response_data.get("prompt_feedback")
+        )
+        if prompt_feedback:
+            return prompt_feedback
+
+        prompt_filter = summarize_content_filter(
+            response_data.get("prompt_filter_results") or response_data.get("promptFilterResults")
+        )
+        if prompt_filter:
+            return prompt_filter
 
         choices = response_data.get("choices")
         if isinstance(choices, list) and choices:
-            choice = choices[0]
-            if isinstance(choice, dict):
-                message = choice.get("message")
+            for choice in choices:
+                if not isinstance(choice, dict):
+                    continue
+                message = choice.get("message") or choice.get("delta")
                 if isinstance(message, dict):
-                    content = message.get("content")
-                    if isinstance(content, str) and content.strip():
-                        return truncate_for_log(content.strip(), max_length)
-                    if isinstance(content, list):
-                        text_parts = [
-                            item.get("text", "").strip()
-                            for item in content
-                            if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text", "").strip()
-                        ]
-                        if text_parts:
-                            return truncate_for_log("\n".join(text_parts), max_length)
+                    refusal = message.get("refusal")
+                    if isinstance(refusal, str) and refusal.strip():
+                        return clean(refusal)
+                    content_text = extract_content_text(message.get("content"))
+                    if content_text:
+                        return content_text
+
+                filter_reason = summarize_content_filter(
+                    choice.get("content_filter_results") or choice.get("contentFilterResults")
+                )
+                if filter_reason:
+                    return filter_reason
+
                 finish_reason = choice.get("finish_reason") or choice.get("finishReason")
                 if isinstance(finish_reason, str) and finish_reason.strip():
-                    return truncate_for_log(finish_reason.strip(), max_length)
+                    if finish_reason.upper() not in success_finish_reasons:
+                        return clean("模型停止生成: " + humanize_finish_reason(finish_reason))
 
         candidates = response_data.get("candidates")
         if isinstance(candidates, list) and candidates:
-            candidate = candidates[0]
-            if isinstance(candidate, dict):
+            for candidate in candidates:
+                if not isinstance(candidate, dict):
+                    continue
                 content = candidate.get("content")
                 if isinstance(content, dict):
+                    text_parts = []
                     parts = content.get("parts")
                     if isinstance(parts, list):
-                        text_parts = [
-                            part.get("text", "").strip()
-                            for part in parts
-                            if isinstance(part, dict) and isinstance(part.get("text"), str) and part.get("text", "").strip()
-                        ]
-                        if text_parts:
-                            return truncate_for_log("\n".join(text_parts), max_length)
+                        for part in parts:
+                            if isinstance(part, dict) and isinstance(part.get("text"), str) and part["text"].strip():
+                                text_parts.append(part["text"].strip())
+                    if text_parts:
+                        return clean("\n".join(text_parts))
+
+                finish_message = candidate.get("finishMessage") or candidate.get("finish_message")
+                if isinstance(finish_message, str) and finish_message.strip():
+                    return clean(finish_message)
+
+                safety = summarize_safety_ratings(candidate.get("safetyRatings") or candidate.get("safety_ratings"))
                 finish_reason = candidate.get("finishReason") or candidate.get("finish_reason")
+                if safety:
+                    prefix = ""
+                    if isinstance(finish_reason, str) and finish_reason.strip():
+                        prefix = "模型停止生成: " + humanize_finish_reason(finish_reason) + "; "
+                    return clean(prefix + safety)
                 if isinstance(finish_reason, str) and finish_reason.strip():
-                    return truncate_for_log(finish_reason.strip(), max_length)
+                    if finish_reason.upper() not in success_finish_reasons:
+                        return clean("模型停止生成: " + humanize_finish_reason(finish_reason))
+
+        generic_reason = extract_generic_reason(response_data)
+        if generic_reason:
+            return generic_reason
     except Exception:
         return ""
     return ""
