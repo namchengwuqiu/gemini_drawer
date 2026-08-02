@@ -736,14 +736,15 @@ class BaseDrawCommand(BaseCommand, ABC):
                                     caption = self.get_image_caption() if img_idx == 0 else ""
 
                                     if hasattr(self, 'ctx') and self.ctx:
-                                        # 始终使用 hybrid API 来确保我们可以带上 @ 提及
+                                        # 使用 hybrid API 发送；@ 提及仅群聊附带（QQ 私聊不支持 at 消息段，附带会导致整条消息被平台拒绝）
                                         hybrid_segments = []
-                                        if trigger_msg and getattr(trigger_msg, 'user_id', None):
+                                        with_at = bool(trigger_msg and getattr(trigger_msg, 'user_id', None) and self._get_current_group_id())
+                                        if with_at:
                                             hybrid_segments.append({"type": "at", "data": {"target_user_id": trigger_msg.user_id}})
                                         
                                         if caption:
                                             hybrid_segments.append({"type": "text", "content": f" {caption}\n"})
-                                        elif trigger_msg:
+                                        elif with_at:
                                             hybrid_segments.append({"type": "text", "content": "\n"}) # 换行分隔头像和图片
                                             
                                         hybrid_segments.append({"type": "image", "content": image_to_send_b64})
@@ -771,7 +772,7 @@ class BaseDrawCommand(BaseCommand, ABC):
                             if sent_count > 0:
                                 await self._notify_success(elapsed)
                             else:
-                                raise Exception("所有提取的图片下载或转换失败")
+                                raise Exception("所有图片均未能发送（下载/转换失败或发送被平台拒绝）")
                         else:
                             raise Exception("无法从当前消息中确定stream_id")
                     except Exception as e:
@@ -1234,7 +1235,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
                             if sent_count > 0:
                                 await self._notify_success(elapsed)
                             else:
-                                raise Exception("所有提取的图片下载或转换失败")
+                                raise Exception("所有图片均未能发送（下载/转换失败或发送被平台拒绝）")
                         else:
                             raise Exception("无法从当前消息中确定stream_id")
                     except Exception as e:
