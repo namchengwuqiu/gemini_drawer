@@ -1,22 +1,20 @@
 from typing import Any, Tuple, Optional, Type
 from pathlib import Path
-import re
-import base64
 import httpx
 from maibot_sdk import Action, Command, MaiBotPlugin
 from maibot_sdk.types import ActivationType
 from maibot_sdk.context import PluginContext
 
 from .config import GeminiDrawerConfig
-from .managers import data_manager
+from .core.managers import data_manager, key_manager
 
-from .help_command import HelpCommand
-from .draw_commands import (
+from .commands.help_command import HelpCommand
+from .commands.draw_commands import (
     CustomDrawCommand, TextToImageCommand, UniversalPromptCommand,
     MultiImageDrawCommand, RandomPromptDrawCommand, VideoGenerateCommand,
     TextToVideoCommand
 )
-from .admin_commands import (
+from .commands.admin_commands import (
     ChannelAddKeyCommand, ChannelListKeysCommand, ChannelResetKeyCommand,
     ChannelDeleteKeyCommand, ChannelSetKeyErrorLimitCommand, ChannelUpdateModelCommand,
     AddPromptCommand, DeletePromptCommand, ViewPromptCommand, ModifyPromptCommand,
@@ -24,7 +22,7 @@ from .admin_commands import (
     ListChannelsCommand, ChannelSetStreamCommand, ChannelSetVideoCommand,
     SyncBananaPromptsCommand, ToggleBananaRestrictedCommand, BananaPromptSearchCommand
 )
-from .actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoAction
+from .commands.actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoAction
 
 
 DRAW_COMMAND_TIMEOUT_MS = 300_000
@@ -271,14 +269,21 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         _context_holder.set_context(ctx)
 
     async def on_load(self) -> None:
+        # 历史数据迁移（旧版 keys.json / data.json / config.toml → 外部数据目录）
+        try:
+            key_manager.ensure_migrated()
+            data_manager.ensure_migrated()
+        except Exception as e:
+            self.ctx.logger.warning(f"[GeminiDrawer] 历史数据迁移失败: {e}")
+
         # 初始化自拍目录
         try:
             if self.config.selfie.enable:
                 plugin_dir = Path(__file__).parent
-                images_dir = plugin_dir / "images"
-                if not images_dir.exists():
-                    images_dir.mkdir(parents=True, exist_ok=True)
-                    self.ctx.logger.info(f"[GeminiDrawer] Auto-created images directory at: {images_dir}")
+                assets_dir = plugin_dir / "assets"
+                if not assets_dir.exists():
+                    assets_dir.mkdir(parents=True, exist_ok=True)
+                    self.ctx.logger.info(f"[GeminiDrawer] Auto-created assets directory at: {assets_dir}")
         except Exception as e:
             self.ctx.logger.warning(f"[GeminiDrawer] Failed to initialize selfie directory: {e}")
 

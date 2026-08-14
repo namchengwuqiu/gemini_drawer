@@ -30,11 +30,10 @@ DataManager (配置数据管理器):
 import json
 from pathlib import Path
 from typing import List, Tuple, Optional, Dict, Any
-from datetime import datetime
-from src.common.logger import get_logger
-from .utils import save_config_file
+from .host_bridge import get_plugin_logger
+from ..utils import save_config_file
 
-logger = get_logger("gemini_drawer")
+logger = get_plugin_logger("plugin.gemini_drawer.managers")
 
 
 def _get_external_data_dir() -> Path:
@@ -54,7 +53,7 @@ def _get_external_data_dir() -> Path:
         ├── plugins/gemini_drawer/  <- 插件代码
         └── gemini_drawer/          <- 外部数据目录
     """
-    plugin_dir = Path(__file__).parent  # .../plugins/gemini_drawer
+    plugin_dir = Path(__file__).parent.parent  # .../plugins/gemini_drawer
     plugins_parent = plugin_dir.parent.parent  # Docker: /MaiMBot/  Host: data/MaiMBot/
     
     # Docker 环境: plugins/ 和 data/ 是同级目录，都在 /MaiMBot/ 下
@@ -92,10 +91,19 @@ def _migrate_internal_file(internal_file: Path, external_file: Path) -> bool:
         return False
 
 
+def _file_stamp(path: Path) -> Optional[Tuple[float, int]]:
+    """返回 (mtime, size) 作为文件版本指纹；文件不存在返回 None。"""
+    try:
+        st = path.stat()
+        return (st.st_mtime, st.st_size)
+    except OSError:
+        return None
+
+
 class KeyManager:
     def __init__(self, keys_file_path: Path = None):
         if keys_file_path is None:
-            self.plugin_dir = Path(__file__).parent
+            self.plugin_dir = Path(__file__).parent.parent
             self.data_dir = _get_external_data_dir()
             self.keys_file = self.data_dir / "keys.json"
             # 从插件内部旧路径迁移数据
@@ -103,9 +111,20 @@ class KeyManager:
             _migrate_internal_file(internal_keys, self.keys_file)
         else:
             self.keys_file = keys_file_path
-            self.plugin_dir = self.keys_file.parent.parent 
-            
+            self.plugin_dir = self.keys_file.parent.parent
+
         self.config = self._load_config()
+        self._migrated = False
+
+    def ensure_migrated(self) -> None:
+        """执行一次性的历史数据迁移。
+
+        迁移会写文件，因此不放在 __init__ 里——否则仅仅 import 本模块就会
+        产生副作用，单元测试也无法安全导入。由 plugin.on_load() 调用。
+        """
+        if self._migrated:
+            return
+        self._migrated = True
         self._migrate_legacy_data()
 
     def _migrate_legacy_data(self):
@@ -183,9 +202,8 @@ class KeyManager:
     def _load_config(self) -> Dict[str, Any]:
         try:
             if not self.keys_file.exists():
-                default_config = {"keys": [], "current_index": 0}
-                self.save_config(default_config)
-                return default_config
+                # 不在这里落盘：首次写 Key 时 save_config 会创建文件
+                return {"keys": [], "current_index": 0}
             with open(self.keys_file, 'r', encoding='utf-8') as f:
                 return json.load(f)
         except (IOError, json.JSONDecodeError) as e:
@@ -193,9 +211,13 @@ class KeyManager:
             return {"keys": [], "current_index": 0}
 
     def save_config(self, config_data: Dict[str, Any]):
+        """原子写入：并发绘图时多个 record_key_usage 同时落盘不会写出半截文件。"""
         try:
-            with open(self.keys_file, 'w', encoding='utf-8') as f:
+            self.keys_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = self.keys_file.with_suffix(self.keys_file.suffix + ".tmp")
+            with open(tmp_file, 'w', encoding='utf-8') as f:
                 json.dump(config_data, f, indent=4, ensure_ascii=False)
+            tmp_file.replace(self.keys_file)
         except IOError as e:
             logger.error(f"保存密钥配置失败: {e}")
 
@@ -294,8 +316,15 @@ class KeyManager:
 
 class DataManager:
     def __init__(self, data_file_path: Path = None):
+        # 文件版本指纹缓存：避免每次取渠道/提示词都重新解析大 JSON
+        # （data.json 约 700KB，banana_prompts.json 约 2.6MB）
+        self._data_cache: Optional[Dict[str, Any]] = None
+        self._data_stamp: Optional[Tuple[float, int]] = None
+        self._banana_cache: Optional[Dict[str, Any]] = None
+        self._banana_stamp: Optional[Tuple[float, int]] = None
+
         if data_file_path is None:
-            self.plugin_dir = Path(__file__).parent
+            self.plugin_dir = Path(__file__).parent.parent
             self.data_dir = _get_external_data_dir()
             self.data_file = self.data_dir / "data.json"
             self.banana_file = self.data_dir / "banana_prompts.json"
@@ -308,6 +337,13 @@ class DataManager:
             self.plugin_dir = self.data_file.parent.parent
             
         self.data = self._load_data()
+        self._migrated = False
+
+    def ensure_migrated(self) -> None:
+        """执行一次性的历史数据迁移（写文件，故不放在 __init__）。"""
+        if self._migrated:
+            return
+        self._migrated = True
         self._migrate_from_root()
         self._migrate_from_toml()
 
@@ -370,24 +406,48 @@ class DataManager:
     def _load_data(self) -> Dict[str, Any]:
         if not self.data_file.exists():
             return {"prompts": {}, "channels": {}}
+
+        # 文件未变更则直接复用上次解析结果（返回同一对象，与 self.data 保持同一引用）
+        stamp = _file_stamp(self.data_file)
+        if stamp is not None and stamp == self._data_stamp and self._data_cache is not None:
+            return self._data_cache
+
         try:
             with open(self.data_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
+                data = json.load(f)
+            self._data_cache = data
+            self._data_stamp = stamp
+            return data
         except Exception as e:
             logger.error(f"Failed to load data.json: {e}")
             return {"prompts": {}, "channels": {}}
 
     def save_data(self):
+        """原子写入，避免并发或中断时留下半截 data.json。"""
         try:
-            with open(self.data_file, 'w', encoding='utf-8') as f:
+            self.data_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp_file = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
+            with open(tmp_file, 'w', encoding='utf-8') as f:
                 json.dump(self.data, f, indent=4, ensure_ascii=False)
+            tmp_file.replace(self.data_file)
+            # 写入后刷新指纹，避免下次读取误判为外部改动而重复解析
+            self._data_cache = self.data
+            self._data_stamp = _file_stamp(self.data_file)
         except Exception as e:
             logger.error(f"Failed to save data.json: {e}")
 
     def load_banana_data(self) -> Dict[str, Any]:
-        """读取大香蕉独立词库；失败时不影响本地 data.json。"""
+        """读取大香蕉独立词库；失败时不影响本地 data.json。
+
+        返回的字典按只读约定使用（命中缓存时会复用同一对象）。
+        """
         if not self.banana_file.exists():
             return {"schema_version": 1, "prompts": {}}
+
+        stamp = _file_stamp(self.banana_file)
+        if stamp is not None and stamp == self._banana_stamp and self._banana_cache is not None:
+            return self._banana_cache
+
         try:
             with open(self.banana_file, 'r', encoding='utf-8') as f:
                 data = json.load(f)
@@ -398,6 +458,8 @@ class DataManager:
             if not isinstance(prompts, dict):
                 logger.warning("banana_prompts.json prompts 字段不是对象，已忽略")
                 data["prompts"] = {}
+            self._banana_cache = data
+            self._banana_stamp = stamp
             return data
         except Exception as e:
             logger.warning(f"读取 banana_prompts.json 失败，已忽略大香蕉扩展词库: {e}")
@@ -411,6 +473,8 @@ class DataManager:
             with open(tmp_file, 'w', encoding='utf-8') as f:
                 json.dump(banana_data, f, indent=2, ensure_ascii=False)
             tmp_file.replace(self.banana_file)
+            self._banana_cache = banana_data
+            self._banana_stamp = _file_stamp(self.banana_file)
         except Exception as e:
             logger.error(f"保存 banana_prompts.json 失败: {e}")
             raise
@@ -558,6 +622,8 @@ class DataManager:
             logger.error(f"Migration from TOML failed: {e}")
 
     def get_prompts(self) -> Dict[str, str]:
+        # 与 get_channels 一致：从文件刷新（命中指纹缓存时无额外解析开销）
+        self.data = self._load_data()
         return self.data.get("prompts", {})
 
     def add_prompt(self, name: str, prompt: str):
@@ -582,7 +648,7 @@ class DataManager:
         return False
 
     def get_channels(self) -> Dict[str, Any]:
-        # 每次调用时从文件重新加载，支持实时更新
+        # 每次调用时从文件重新加载，支持实时更新（命中指纹缓存时无额外解析开销）
         self.data = self._load_data()
         return self.data.get("channels", {})
 

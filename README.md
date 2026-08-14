@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.9.16
+> **Version:** 1.10.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -108,9 +108,11 @@ pip install -r requirements.txt
 
 ### `[general]` - 通用设置
 
-- `enable_gemini_drawer` (布尔值, 默认 `true`): 是否启用本插件。
+- `enable_gemini_drawer` (布尔值, 默认 `true`): 是否启用本插件。关闭后插件仍会加载，但**绘图指令与绘图 Action 都不再响应**。
 - `admins` (数组, 默认 `[]`): 管理员 QQ 号列表，只有在此列表中的用户才能使用管理员指令。
   - 示例: `admins = [123456, 789012]`
+- `blacklist_groups` (数组, 默认 `[]`): 群黑名单。名单内的群无法使用绘图、自拍与视频生成功能。
+  - 示例: `blacklist_groups = [16095807]`
 
 ### `[proxy]` - 代理设置
 
@@ -119,10 +121,14 @@ pip install -r requirements.txt
 
 ### `[behavior]` - 行为设置 🆕
 
-- `admin_only_mode` (布尔值, 默认 `false`): 管理员专用模式，开启后仅管理员可使用绘图功能。
+- `admin_only_mode` (布尔值, 默认 `false`): 管理员专用模式，开启后仅管理员可使用绘图功能（**指令与 Action 同时受限**）。
 - `auto_recall_status` (布尔值, 默认 `true`): 是否自动撤回绘图过程中的状态提示消息。
 - `success_notify_poke` (布尔值, 默认 `true`): 生成成功后使用戳一戳通知用户。
 - `reply_with_image` (布尔值, 默认 `true`): 以回复触发消息的方式发送图片（开启后自动跳过成功通知）。
+- `debug_mode` (布尔值, 默认 `false`): 调试模式。图片/视频提取失败时在日志中输出原始 API 响应，便于排查渠道问题。
+- `enable_banana_prompts` (布尔值, 默认 `true`): 是否启用「大香蕉」只读扩展词库，供 `/+`、`/随机绘图` 使用。
+- `show_restricted` (布尔值, 默认 `false`): 是否显示大香蕉词库中标记为猎奇/限制级的提示词。
+- `banana_sync_on_load` (布尔值, 默认 `false`): 插件加载时是否自动同步大香蕉词库。关闭后仅在 `/渠道同步大香蕉` 时手动同步。
 
 ### `[api]` - 视频发送与渠道引导
 
@@ -246,6 +252,63 @@ pip install -r requirements.txt
 - **使用**: `/+水彩画`
 
 如果需要手动批量添加，可以编辑 `data/data.json` 。
+
+---
+
+## 代码结构（开发者向）
+
+自 v1.10.0 起，绘图请求的处理拆成了三层：
+
+| 模块 | 职责 |
+|---|---|
+| `endpoints.py` | 把「渠道配置 + 渠道 Key」组合成一批待尝试的端点，顺序即失败转移顺序 |
+| `providers/` | 各家 API 的协议差异：判定该端点归谁处理、构造请求体、解析响应 |
+| `pipeline.py` | 唯一的编排循环：遍历端点 → 发请求 → 取图 → Key 记账 → 失败转移 |
+
+其余支撑模块：`image_source.py`（从消息中取图，回复 > 当前消息 > @用户头像）、
+`guards.py`（总开关 / 群黑名单 / 管理员模式三重校验）、`video.py`（视频生成与 NapCat 发送）、
+`host_bridge.py`（唯一允许 `import src.*` 的地方，所有宿主依赖均带降级）。
+
+### 如何新增一种渠道类型？
+
+只需加一个文件并登记一行，不需要改动命令或 Action：
+
+1. 在 `providers/` 下新建模块，继承 `Provider` 并实现两个方法：
+
+   ```python
+   class MyProvider(Provider):
+       name = "my_api"
+       supports_stream = False          # 该协议是否走本插件的 SSE 解析路径
+
+       @classmethod
+       def matches(cls, endpoint) -> bool:
+           return "/my/endpoint" in endpoint.url
+
+       def build(self, endpoint, request) -> HttpCall:
+           return HttpCall(
+               url=endpoint.url,
+               headers={"Authorization": f"Bearer {endpoint.key}"},
+               json={"prompt": request.prompt, "images": request.data_urls()},
+           )
+   ```
+
+   若该 API 是「建任务 + 轮询」式的异步接口，再覆写 `async def fetch(...)`（参考 `providers/tsai.py`）。
+
+2. 在 `providers/__init__.py` 的 `REGISTRY` 中登记。**顺序有语义**：`resolve_provider()`
+   返回首个 `matches()` 命中的 provider，判定条件越具体的越要靠前。例如 gpt-image 必须排在
+   OpenAI 兼容之前——它的渠道 URL 通常就是 `/v1/chat/completions`，顺序写反会被抢走。
+
+3. 在 `tests/test_providers.py` 中补上 `matches()` 与 `build()` 的断言。
+
+### 测试
+
+```bash
+python -m pytest
+```
+
+`tests/` 覆盖响应解析、provider 请求构造、端点顺序、准入校验、取图优先级、
+管线失败转移与绘图命令完整链路。测试不参与插件运行时加载，宿主只会导入
+`_manifest.json` 指向的入口模块及其依赖。
 
 ---
 

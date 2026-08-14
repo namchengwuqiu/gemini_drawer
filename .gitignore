@@ -10,7 +10,8 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Ignore selfie images directory
+# Ignore selfie images directory (原 images/，v1.10 起改名 assets/)
+assets/
 images/
 
 # Ignore macOS system files

@@ -27,8 +27,8 @@ import re
 import random
 from typing import Tuple, Optional
 from .base_commands import BaseDrawCommand, BaseMultiImageDrawCommand, BaseVideoCommand
-from .managers import data_manager
-from .utils import logger
+from ..core.managers import data_manager
+from ..utils import logger
 
 class CustomDrawCommand(BaseDrawCommand):
     command_name: str = "gemini_custom_draw"

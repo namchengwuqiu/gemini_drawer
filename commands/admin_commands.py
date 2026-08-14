@@ -27,8 +27,8 @@ from typing import Tuple, Optional
 from pathlib import Path
 from maibot_sdk.compat.base import ReplyContentType
 from .base_commands import BaseAdminCommand
-from .managers import key_manager, data_manager
-from .utils import logger, save_config_file
+from ..core.managers import key_manager, data_manager
+from ..utils import logger, save_config_file
 
 class ChannelAddKeyCommand(BaseAdminCommand):
     command_name: str = "gemini_channel_add_key"
@@ -615,7 +615,7 @@ class ToggleBananaRestrictedCommand(BaseAdminCommand):
                 action = match.group("action")
 
         enabled = action == "开启"
-        config_path = Path(__file__).parent / "config.toml"
+        config_path = Path(__file__).parent.parent / "config.toml"
 
         try:
             import toml

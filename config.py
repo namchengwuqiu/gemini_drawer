@@ -16,8 +16,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.9.16", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.9.16", description="配置版本",
+    version: str = Field(default="1.10.0", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.10.0", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 

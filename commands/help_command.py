@@ -15,7 +15,7 @@ HelpCommand (/基咪绘图帮助):
 """
 from typing import Tuple, Optional
 from maibot_sdk.compat.base import BaseCommand
-from .managers import data_manager
+from ..core.managers import data_manager
 
 class HelpCommand(BaseCommand):
     command_name: str = "gemini_help"
