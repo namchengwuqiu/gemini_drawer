@@ -60,5 +60,13 @@
     "default_locale": "zh-CN",
     "supported_locales": ["zh-CN"]
   },
+  "display": {
+    "icon": {
+      "type": "local",
+      "value": "icon.png",
+      "fallback": "image",
+      "background": "#071b3d"
+    }
+  },
   "plugin_type": "extension"
 }
