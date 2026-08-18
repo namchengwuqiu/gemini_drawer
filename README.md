@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.10.0
+> **Version:** 1.10.1
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -108,6 +108,17 @@ pip install -r requirements.txt
 
 ### `[general]` - 通用设置
 
+- `channel_setup_guide` (字符串, 只读说明): 提示如何使用 `/添加渠道`、`/渠道添加key`、`/渠道列表`、`/启用渠道`、`/禁用渠道` 管理绘图 API 渠道。绘图渠道统一通过管理员指令写入外部数据文件，不在 `config.toml` 中填写 API 地址或 Key，避免密钥暴露在 WebUI 可编辑的配置里。
+
+  绘图渠道添加示例：
+
+  ```text
+  /添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent
+  /添加渠道 openai渠道:https://api.example.com/v1/chat/completions:gpt-4
+  /渠道添加key google your-api-key
+  /渠道列表
+  ```
+
 - `enable_gemini_drawer` (布尔值, 默认 `true`): 是否启用本插件。关闭后插件仍会加载，但**绘图指令与绘图 Action 都不再响应**。
 - `admins` (数组, 默认 `[]`): 管理员 QQ 号列表，只有在此列表中的用户才能使用管理员指令。
   - 示例: `admins = [123456, 789012]`
@@ -130,22 +141,12 @@ pip install -r requirements.txt
 - `show_restricted` (布尔值, 默认 `false`): 是否显示大香蕉词库中标记为猎奇/限制级的提示词。
 - `banana_sync_on_load` (布尔值, 默认 `false`): 插件加载时是否自动同步大香蕉词库。关闭后仅在 `/渠道同步大香蕉` 时手动同步。
 
-### `[api]` - 视频发送与渠道引导
+### `[api]` - 视频发送
 
-此部分不再直接填写绘图 API 地址或 Key。绘图渠道统一通过管理员指令写入外部数据文件，避免密钥暴露在 WebUI 可编辑的 `config.toml` 中。
+此部分只配置发送视频所需的 NapCat 连接信息，绘图渠道说明见 `[general]` 的 `channel_setup_guide`。
 
-- `channel_setup_guide` (字符串, 只读说明): 提示如何使用 `/添加渠道`、`/渠道添加key`、`/渠道列表`、`/启用渠道`、`/禁用渠道` 管理绘图 API 渠道。
 - `napcat_host` (字符串, 默认 `napcat`): NapCat HTTP 服务器地址。Docker 环境下通常为 `napcat`，本地运行可设为 `localhost`。
 - `napcat_port` (整数, 默认 `3033`): NapCat 正向 HTTP 端口。
-
-绘图渠道添加示例：
-
-```text
-/添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent
-/添加渠道 openai渠道:https://api.example.com/v1/chat/completions:gpt-4
-/渠道添加key google your-api-key
-/渠道列表
-```
 
 旧版本 `config.toml` 中的 `api_url`、`enable_google`、`lmarena_api_*` 会在插件加载时自动迁移到渠道数据，并从配置文件中移除。
 

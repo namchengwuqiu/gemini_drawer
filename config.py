@@ -16,8 +16,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.10.0", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.10.0", description="配置版本",
+    version: str = Field(default="1.10.1", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.10.1", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -27,6 +27,22 @@ class GeneralConfig(PluginConfigBase):
     __ui_icon__ = "settings"
     __ui_order__ = 1
 
+    channel_setup_guide: str = Field(
+        default=(
+            "绘图 API 渠道不在 config.toml 里填写，请在聊天中使用指令管理：\n"
+            "1. 添加 Google 官方渠道：/添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent\n"
+            "2. 添加第三方 OpenAI 兼容渠道：/添加渠道 渠道名:https://api.example.com/v1/chat/completions:模型名\n"
+            "3. 添加渠道 Key：/渠道添加key 渠道名 your-api-key\n"
+            "4. 查看或启停渠道：/渠道列表、/启用渠道 渠道名、/禁用渠道 渠道名"
+        ),
+        description="绘图API渠道配置说明",
+        json_schema_extra=ui(
+            "绘图渠道配置说明",
+            "只读说明。绘图 API 地址和 Key 请通过聊天指令写入渠道数据，不再放在 config.toml。",
+            disabled=True,
+            **{"x-widget": "textarea", "rows": 6},
+        ),
+    )
     enable_gemini_drawer: bool = Field(
         default=True,
         description="是否启用Gemini绘图插件",
@@ -145,28 +161,12 @@ class ApiConfig(PluginConfigBase):
     __ui_icon__ = "key"
     __ui_order__ = 4
 
-    channel_setup_guide: str = Field(
-        default=(
-            "绘图 API 渠道不在 config.toml 里填写，请在聊天中使用指令管理：\n"
-            "1. 添加 Google 官方渠道：/添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent\n"
-            "2. 添加第三方 OpenAI 兼容渠道：/添加渠道 渠道名:https://api.example.com/v1/chat/completions:模型名\n"
-            "3. 添加渠道 Key：/渠道添加key 渠道名 your-api-key\n"
-            "4. 查看或启停渠道：/渠道列表、/启用渠道 渠道名、/禁用渠道 渠道名"
-        ),
-        description="绘图API渠道配置说明",
-        json_schema_extra=ui(
-            "绘图渠道配置说明",
-            "只读说明。绘图 API 地址和 Key 请通过聊天指令写入渠道数据，不再放在 config.toml。",
-            disabled=True,
-            **{"x-widget": "textarea", "rows": 6},
-        ),
-    )
     napcat_host: str = Field(
         default="napcat",
         description="NapCat HTTP服务器地址（Docker环境下设为'napcat'或容器名）",
         json_schema_extra=ui(
             "NapCat 主机",
-            "本页只配置视频发送所需 NapCat。绘图 API 渠道请在聊天中使用 `/添加渠道` 与 `/渠道添加key` 管理；Docker 环境通常填 napcat 或容器名。",
+            "发送视频文件所用的 NapCat 地址，Docker 环境通常填 napcat 或容器名。",
         ),
     )
     napcat_port: int = Field(
@@ -174,7 +174,7 @@ class ApiConfig(PluginConfigBase):
         description="NapCat 正向HTTP端口，用于发送视频文件",
         json_schema_extra=ui(
             "NapCat HTTP 端口",
-            "NapCat 正向 HTTP 服务端口，用于发送视频文件。绘图 API 渠道请使用 `/添加渠道 <名称>:<URL>[:模型名]` 添加。",
+            "NapCat 正向 HTTP 服务端口，用于发送视频文件。",
         ),
     )
 
