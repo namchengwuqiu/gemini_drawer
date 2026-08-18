@@ -56,6 +56,20 @@ def is_command_message(message: Any) -> bool:
         return False
 
 
+def pending_ack(task_desc: str) -> str:
+    """构造后台任务回执，作为 Action 的返回值交回宿主。
+
+    该字符串只会进入 LLM 的工具结果上下文，不会作为聊天消息发出，因此写成中性的
+    状态说明而不是角色口吻——角色口吻的回执会被模型当成自己已经说过的台词顺着往下
+    演，导致图还没生成就先宣称"已经发给你了"。措辞的拟人化由宿主的回复生成负责。
+    """
+    return (
+        f"[任务状态] {task_desc}已提交后台队列，尚未生成、尚未发送。"
+        "生成完成后插件会自行把结果发送到聊天中。"
+        "回复时不要声称已经发送或让对方查收，只需表达正在准备、稍等片刻。"
+    )
+
+
 class _DrawActionMixin:
     """Action 侧共享的准入校验、绘图与发图逻辑。"""
 
@@ -155,7 +169,7 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
         asyncio.create_task(self._draw_and_send(prompt))
 
         # 立即返回，防止 LLM Tool Call 超时
-        return True, f"已在后台开始为你绘制关于'{prompt}'的图片，请耐心等待..."
+        return True, pending_ack(f"绘图任务（提示词：{prompt}）")
 
     async def _draw_and_send(self, prompt: str) -> None:
         logger.info(f"执行绘图 Action，Prompt: {prompt}")
@@ -312,7 +326,7 @@ class SelfieGenerateAction(_SelfieActionBase):
     async def execute(self) -> Tuple[bool, str]:
         return await self._start_background(
             self._do_selfie_background,
-            "我已经收到啦，这就去后台拍一张发给你，请耐心等待哦！",
+            pending_ack("自拍图片生成任务"),
         )
 
     async def _do_selfie_background(self, ref_image_path: Path, user_action: str) -> None:
@@ -380,7 +394,7 @@ class SelfieVideoAction(_SelfieActionBase):
     async def execute(self) -> Tuple[bool, str]:
         return await self._start_background(
             self._do_video_background,
-            "我已经收到啦，这就去后台录一段视频发给你，请耐心等待哦！",
+            pending_ack("自拍视频生成任务"),
         )
 
     async def _do_video_background(self, ref_image_path: Path, user_action: str) -> None:
