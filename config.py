@@ -2,6 +2,21 @@ from typing import Any, List
 from maibot_sdk import Field, PluginConfigBase
 
 
+DEFAULT_SELFIE_BASE_PROMPT = (
+    "以输入的人设底图作为唯一角色身份与画风参考。必须保持同一人物：严格保留脸型、五官比例、眼睛颜色、"
+    "发色、发型、刘海、肤色、年龄感、体型特征和原始画风；只改变用户要求的动作、姿势、服装、表情、"
+    "镜头和场景。不得重新设计人物，不得替换成相似角色，不得擅自把动漫转为写实或把写实转为动漫。"
+)
+
+DEFAULT_SELFIE_POLISH_TEMPLATE = (
+    "你是图生图提示词编辑器。请润色下面的自拍要求，但必须完整保留其中的人物身份与画风约束，并将保持"
+    "底图人物一致性放在最高优先级。只能细化动作、姿势、服装、表情、镜头、光线和场景；不得新增或改变"
+    "脸型、五官比例、眼睛颜色、发色、发型、刘海、肤色、年龄感、体型特征及原始画风；不得把动漫改成"
+    "写实，也不得把写实改成动漫；不得用泛化人物描述替代底图角色。输出一条可直接用于图生图的完整提示词，"
+    "不要解释，不要输出标题或其他内容。原始要求：'{original_prompt}'"
+)
+
+
 def ui(label: str, hint: str | None = None, **extra: Any) -> dict[str, Any]:
     data = {"label": label, **extra}
     if hint:
@@ -16,8 +31,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.10.2", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.10.2", description="配置版本",
+    version: str = Field(default="1.10.3", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.10.3", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -90,14 +105,14 @@ class SelfieConfig(PluginConfigBase):
     reference_image_path: str = Field(
         default="selfie_base.jpg",
         description="人设底图",
-        json_schema_extra=ui("人设底图文件", "相对于插件 images 目录的图片文件名，例如 selfie_base.jpg。"),
+        json_schema_extra=ui("人设底图文件", "相对于插件 assets 目录的图片文件名，例如 selfie_base.jpg。"),
     )
     base_prompt: str = Field(
-        default="",
-        description="人设基础Prompt (可选，可以不输入因为有人设图)",
+        default=DEFAULT_SELFIE_BASE_PROMPT,
+        description="用于锁定人设底图中的角色身份和画风",
         json_schema_extra=ui(
             "人设基础提示词",
-            "用于补充底图无法表达的人设信息，可留空。",
+            "建议保留身份与画风约束；可在其后补充底图无法表达的已确认人设信息。",
             **{"x-widget": "textarea", "rows": 3},
         ),
     )
@@ -126,7 +141,7 @@ class SelfieConfig(PluginConfigBase):
         json_schema_extra=ui("润色模型", "使用 MaiBot 中已配置的文本模型名称，默认 replyer 通常无需修改。"),
     )
     polish_template: str = Field(
-        default="请将以下自拍主题润色为更适合AI图生图的提示词，保持原意但使描述更加细腻、生动、富有画面感。只输出润色后的提示词，不要输出其他内容。原始主题：'{original_prompt}'",
+        default=DEFAULT_SELFIE_POLISH_TEMPLATE,
         description="润色提示词模板",
         json_schema_extra=ui(
             "自拍润色模板",

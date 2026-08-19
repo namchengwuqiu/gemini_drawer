@@ -6,6 +6,7 @@ from typing import Tuple, List, Dict, Optional, Any
 
 from maibot_sdk.compat.base import BaseAction, ActionActivationType
 
+from ..config import DEFAULT_SELFIE_BASE_PROMPT, DEFAULT_SELFIE_POLISH_TEMPLATE
 from ..core.host_bridge import get_plugin_logger
 
 from ..core.endpoints import build_drawing_endpoints
@@ -215,6 +216,11 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
     #: 功能名（日志与提示用）
     feature_name: str = "自拍"
 
+    def _identity_prompt(self) -> str:
+        """Return the configured identity constraint, falling back for legacy blank configs."""
+        configured = self.get_config("selfie.base_prompt", "")
+        return str(configured or DEFAULT_SELFIE_BASE_PROMPT).strip()
+
     async def _polish_prompt(self, original_prompt: str) -> str:
         """使用 LLM 模型润色提示词，失败时原样返回。"""
         if not self.get_config("selfie.polish_enable", False):
@@ -231,7 +237,7 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
                 logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
                 return original_prompt
 
-            template = self.get_config(self.polish_template_key, self.polish_template_default)
+            template = self.get_config(self.polish_template_key, "") or self.polish_template_default
             logger.info(f"正在润色{self.feature_name}提示词: {original_prompt}")
             result = await self.ctx.llm.generate(
                 prompt=template.format(original_prompt=original_prompt),
@@ -243,6 +249,9 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
 
             if result.get("success") and result.get("response"):
                 final_prompt = f"{self.polish_prefix}：{result['response'].strip()}"
+                identity_prompt = self._identity_prompt()
+                if identity_prompt and identity_prompt not in final_prompt:
+                    final_prompt = f"{final_prompt}\n\n身份与画风约束：{identity_prompt}"
                 logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
                 return final_prompt
 
@@ -267,7 +276,7 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
             action = random.choice(random_pool) if random_pool else fallback
             logger.info(f"随机选择动作: {action}")
 
-        base_prompt = self.get_config("selfie.base_prompt", "")
+        base_prompt = self._identity_prompt()
         return f"{base_prompt}, {action}" if base_prompt else action
 
     async def _start_background(self, coro_factory, ack: str) -> Tuple[bool, str]:
@@ -316,10 +325,7 @@ class SelfieGenerateAction(_SelfieActionBase):
 
     feature_name = "自拍"
     polish_template_key = "selfie.polish_template"
-    polish_template_default = (
-        "请将以下自拍主题润色为更适合AI绘图的提示词，保持原意但使描述更加细腻、生动、富有画面感。"
-        "只输出润色后的一份提示词，不要输出其他内容。原始主题：'{original_prompt}'"
-    )
+    polish_template_default = DEFAULT_SELFIE_POLISH_TEMPLATE
     polish_prefix = "根据图中人物按以下要求生成图片"
     polish_request_type = "gemini_drawer.selfie_polish"
 
@@ -448,4 +454,3 @@ class SelfieVideoAction(_SelfieActionBase):
         except Exception as e:
             logger.error(f"Selfie Video Action Background Error: {e}")
             await self.send_text(f"录制视频时发生了错误: {e}")
-

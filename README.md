@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.10.2
+> **Version:** 1.10.3
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -165,19 +165,21 @@ pip install -r requirements.txt
 > ⚠️ **安全提示**: 如果在公网服务器部署，不建议将 Host 设为 `0.0.0.0`，请使用 Docker 网络内部通信或设置防火墙规则。
 
 *   `selfie.enable` (布尔值, 默认 `false`): 是否启用自拍功能 (需手动开启)。
-*   `selfie.reference_image_path` (字符串, 默认 `"selfie_base.jpg"`): 人设底图文件名 (放入插件自动生成的 images 目录)。
-*   `selfie.base_prompt` (字符串, 默认 `""`): 人设基础描述词 (可选)。
+*   `selfie.reference_image_path` (字符串, 默认 `"selfie_base.jpg"`): 人设底图文件名，实际读取位置为插件的 `assets/` 目录。
+*   `selfie.base_prompt` (字符串): 人设身份与画风约束。默认要求严格保持底图人物的脸、五官、发色、发型、瞳色、体型特征和原始画风，只改变用户指定的动作、服装、表情、镜头与场景。
 *   `selfie.random_actions` (数组): 随机场景/动作列表。
 *   `selfie.polish_enable` (布尔值, 默认 `true`): 是否启用提示词润色 🆕。
 *   `selfie.polish_model` (字符串, 默认 `"replyer"`): 润色使用的文本模型名称 🆕。
-*   `selfie.polish_template` (字符串): 润色提示词模板 🆕。
+*   `selfie.polish_template` (字符串): 润色提示词模板。必须保留 `{original_prompt}`；默认模板禁止润色模型改变人物身份或在动漫与写实风格之间转换。
 
 ## 📸 自拍与照片生成
 插件支持通过自然语言请求 Bot 发送“自拍”。
 1. **启用功能**: 在配置中设置 `selfie.enable = true` 并重启插件。
-2. **准备底图**: 将人设图放入插件目录下的 `images/` 文件夹（插件启动后会自动创建此文件夹）。
-3. **配置文件名**: 确保 `reference_image_path` 与您的图片文件名一致。
+2. **准备底图**: 将人设图放入插件目录下的 `assets/` 文件夹（插件启动后会自动创建此文件夹）。
+3. **配置文件名**: 确保 `reference_image_path` 与图片文件名完全一致。目录中有多张底图时，只有这里指定的文件会被使用。
 4. **触发**: 直接对 Bot 说“发张自拍”、“看看你的照片”。
+
+生成时，底图会作为图生图参考发送给绘图端点。为减少角色漂移，建议保留默认的 `base_prompt` 和 `polish_template` 身份约束；如需补充人物设定，请追加确定的外观信息，不要删除“保持同一人物”和“保持原始画风”等约束。底图清晰、正脸、遮挡少时，人物一致性通常更稳定，但最终效果仍取决于所用图像模型的参考图遵循能力。
 
 ### 自定义渠道配置
 自定义渠道的配置数据存储于 `gemini_drawer/data.json` 中，建议使用管理员指令进行管理。
