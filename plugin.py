@@ -1,6 +1,7 @@
 from typing import Any, Tuple, Optional, Type
 from pathlib import Path
 import random
+import time
 import httpx
 from maibot_sdk import Command, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
@@ -259,6 +260,9 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         # 按 stream_id 计数而不是布尔值。当前媒体 Tool 同步执行，同会话不会真的并发，
         # 但计数保证了任何一条路径提前结束都不会误清掉其他任务的保护状态。
         self._media_pending: dict[str, int] = {}
+        # 上一次成功发出媒体的时间戳。图片发完后对话循环不会停，下一轮 Planner
+        # 常常还在处理同一条用户消息，于是又拍一张——pending 那时已经清零，拦不住。
+        self._media_last_sent_at: dict[str, float] = {}
 
     def _begin_media_task(self, stream_id: str) -> None:
         key = str(stream_id or "").strip()
@@ -277,6 +281,27 @@ class GeminiDrawerPlugin(MaiBotPlugin):
 
     def _media_is_pending(self, stream_id: str) -> bool:
         return self._media_pending.get(str(stream_id or "").strip(), 0) > 0
+
+    def _media_cooldown_seconds(self) -> float:
+        try:
+            return max(0.0, float(self.config.behavior.media_cooldown_seconds))
+        except Exception:
+            return 0.0
+
+    def _media_cooldown_remaining(self, stream_id: str) -> float:
+        """返回该会话距离可以再次发送媒体还差几秒；0 表示不受限。"""
+        cooldown = self._media_cooldown_seconds()
+        if cooldown <= 0:
+            return 0.0
+        last_sent = self._media_last_sent_at.get(str(stream_id or "").strip())
+        if last_sent is None:
+            return 0.0
+        return max(0.0, cooldown - (time.monotonic() - last_sent))
+
+    def _mark_media_sent(self, stream_id: str) -> None:
+        key = str(stream_id or "").strip()
+        if key:
+            self._media_last_sent_at[key] = time.monotonic()
 
     def get_components(self) -> list[dict[str, Any]]:
         components = super().get_components()
@@ -455,6 +480,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
 
     async def on_unload(self) -> None:
         self._media_pending.clear()
+        self._media_last_sent_at.clear()
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
@@ -678,6 +704,25 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 "error": reason,
             }
 
+        remaining = self._media_cooldown_remaining(stream_id)
+        if remaining > 0:
+            # 跨轮防连发。媒体发完后对话循环不会暂停，下一轮 Planner 往往还在处理
+            # 同一条用户消息，会再拍一张——Tool 描述里的软约束挡不住，这里硬拦。
+            reason = (
+                f"刚刚已经发过一张，冷却中（还需 {remaining:.0f} 秒），本次未提交，"
+                "也没有任何内容被发送。不要重复发送，请用文字回应；"
+                "只有用户在冷却结束后再次明确要求，才重新调用本工具。"
+            )
+            self._get_logger().info(
+                f"[GeminiDrawer] {tool_name} 命中防连发冷却，剩余 {remaining:.1f} 秒，已拒绝本次调用"
+            )
+            return {
+                "name": tool_name,
+                "success": False,
+                "content": reason,
+                "error": reason,
+            }
+
         self._begin_media_task(stream_id)
         try:
             success, message = await self._run_action(
@@ -687,6 +732,9 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 wait_message=self._pick_wait_message(wait_kind),
                 **kwargs,
             )
+            if success:
+                # 只在真正发出去之后才起算冷却，生成失败时用户应该能立刻重试。
+                self._mark_media_sent(stream_id)
             result = {
                 "name": tool_name,
                 "success": bool(success),
@@ -815,10 +863,14 @@ class GeminiDrawerPlugin(MaiBotPlugin):
     @Tool(
         "gemini_generate_image",
         description=(
-            "根据用户的明确要求生成并自行发送图片。适用于‘画一张’‘生成图片’‘帮我画’等视觉请求，"
-            "不适用于文字人设、故事或仅讨论图片。遇到 /绘图、/bnn、/多图、/+ 等命令时不要调用。"
+            "根据用户的明确要求生成并自行发送图片。适用于'画一张''生成图片''帮我画'等视觉请求，"
+            "不适用于文字人设、故事或仅讨论图片。用户说'生成人设''写个人设'通常指文字角色设定而非图片，"
+            "除非明确提到'画'或'图'；用户让别人或其他 AI 去做某事属于讨论，不是对你的绘图指令。"
+            "遇到 /绘图、/bnn、/多图、/+ 等命令时不要调用。"
             "工具会先发送等待提示，然后一直等待到图片真正发送成功或明确失败才返回；调用本工具时不要在同一轮"
             "同时调用 reply，也不要在工具成功返回前声称图片已经发送或让用户查收。"
+            "不要连续触发：如果刚刚已经发送过图片或正在生成中，即使话题还在继续也不要再次调用，"
+            "除非用户在收到图片之后又一次明确提出新的绘图要求。"
         ),
         parameters={
             "prompt": {
@@ -847,7 +899,9 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             "基于已配置的人设底图生成并自行发送角色自拍。当用户明确要求看你的照片、自拍或长什么样时使用。"
             "工具会先发送正在准备的提示，并等待自拍图片真正发送成功或明确失败才返回。requested_action 要完整保留"
             "用户要求的服装、动作、姿势和场景；未指定时可留空。调用本工具时不要同轮调用 reply，也不要提前说"
-            "‘已经发了’‘拍好了’或让用户查收。"
+            "'已经发了''拍好了'或让用户查收。"
+            "不要连续发：如果刚刚已经发送过自拍或正在生成中，即使用户还在夸奖或聊这张照片也不要再拍一张，"
+            "只用文字回应即可；除非用户在收到照片之后又一次明确要求再来一张。"
         ),
         parameters={
             "requested_action": {
@@ -880,6 +934,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             "工具会先发送正在准备的提示，并等待视频真正发送成功或明确失败才返回。requested_action 要完整保留"
             "服装、动作和场景；未指定时可留空。调用本工具时不要同轮调用 reply，也不要在成功返回前声称视频"
             "已经发送或让用户查收。"
+            "不要连续发：如果刚刚已经发送过视频或正在生成中，即使话题还在继续也不要再录一段，"
+            "只用文字回应即可；除非用户在收到视频之后又一次明确要求。"
         ),
         parameters={
             "requested_action": {

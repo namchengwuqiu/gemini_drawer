@@ -226,6 +226,114 @@ def test_wait_message_is_empty_when_config_unavailable():
     assert GeminiDrawerPlugin()._pick_wait_message("selfie") == ""
 
 
+def _plugin_with_cooldown(monkeypatch, seconds: int) -> GeminiDrawerPlugin:
+    plugin = GeminiDrawerPlugin()
+    monkeypatch.setattr(
+        type(plugin),
+        "config",
+        property(
+            lambda _self: type(
+                "Cfg", (), {"behavior": type("B", (), {"media_cooldown_seconds": seconds})()}
+            )()
+        ),
+    )
+    return plugin
+
+
+@pytest.mark.asyncio
+async def test_second_media_call_is_blocked_during_cooldown(monkeypatch):
+    """图片发完后循环不停，下一轮 Planner 常常还在处理同一条消息而再拍一张。"""
+    plugin = _plugin_with_cooldown(monkeypatch, 90)
+
+    async def ok(*args, **kwargs):
+        return True, "自拍已经生成并发送"
+
+    monkeypatch.setattr(plugin, "_run_action", ok)
+    monkeypatch.setattr(plugin, "_pick_wait_message", lambda kind: "")
+
+    first = await plugin._run_media_tool(
+        "gemini_selfie", ImageGenerateAction, "stream-1", "selfie", {}
+    )
+    assert first["success"] is True
+
+    second = await plugin._run_media_tool(
+        "gemini_selfie", ImageGenerateAction, "stream-1", "selfie", {}
+    )
+    assert second["success"] is False
+    assert "冷却中" in second["content"]
+    assert "没有任何内容被发送" in second["content"]
+
+    # 冷却按会话隔离，不能波及其他聊天
+    other = await plugin._run_media_tool(
+        "gemini_selfie", ImageGenerateAction, "stream-2", "selfie", {}
+    )
+    assert other["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_failed_generation_does_not_start_cooldown(monkeypatch):
+    """生成失败时用户应该能立刻重试，不该被冷却挡住。"""
+    plugin = _plugin_with_cooldown(monkeypatch, 90)
+    calls = []
+
+    async def fail(*args, **kwargs):
+        calls.append(1)
+        return False, "自拍生成失败: 渠道超时"
+
+    monkeypatch.setattr(plugin, "_run_action", fail)
+    monkeypatch.setattr(plugin, "_pick_wait_message", lambda kind: "")
+
+    for _ in range(2):
+        result = await plugin._run_media_tool(
+            "gemini_selfie", ImageGenerateAction, "stream-1", "selfie", {}
+        )
+        assert result["success"] is False
+        assert "冷却中" not in result["content"]
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_cooldown_can_be_disabled(monkeypatch):
+    plugin = _plugin_with_cooldown(monkeypatch, 0)
+
+    async def ok(*args, **kwargs):
+        return True, "自拍已经生成并发送"
+
+    monkeypatch.setattr(plugin, "_run_action", ok)
+    monkeypatch.setattr(plugin, "_pick_wait_message", lambda kind: "")
+
+    for _ in range(3):
+        result = await plugin._run_media_tool(
+            "gemini_selfie", ImageGenerateAction, "stream-1", "selfie", {}
+        )
+        assert result["success"] is True
+
+
+def test_cooldown_remaining_decays_with_time(monkeypatch):
+    plugin = _plugin_with_cooldown(monkeypatch, 90)
+    clock = {"now": 1000.0}
+    monkeypatch.setattr("gemini_drawer.plugin.time.monotonic", lambda: clock["now"])
+
+    plugin._mark_media_sent("stream-1")
+    assert plugin._media_cooldown_remaining("stream-1") == pytest.approx(90.0)
+
+    clock["now"] += 76.0  # 复现日志里两次自拍的实际间隔
+    assert plugin._media_cooldown_remaining("stream-1") == pytest.approx(14.0)
+
+    clock["now"] += 20.0
+    assert plugin._media_cooldown_remaining("stream-1") == 0.0
+
+
+def test_media_tool_descriptions_keep_anti_repeat_guidance():
+    """迁移到 @Tool 时丢过一次这段约束，导致一条用户消息连发两张自拍。"""
+    from maibot_sdk.components import _COMPONENT_INFO_ATTR
+
+    for handler_name in ("handle_generate_image", "handle_selfie", "handle_selfie_video"):
+        info = getattr(getattr(GeminiDrawerPlugin, handler_name), _COMPONENT_INFO_ATTR)
+        text = f"{info.description}{info.detailed_description}"
+        assert "不要连续" in text, handler_name
+
+
 @pytest.mark.asyncio
 async def test_action_execute_waits_for_generation_to_finish(monkeypatch):
     action = ImageGenerateAction()

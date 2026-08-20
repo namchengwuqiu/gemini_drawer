@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.10.4
+> **Version:** 1.10.5
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -142,6 +142,7 @@ pip install -r requirements.txt
 - `enable_banana_prompts` (布尔值, 默认 `true`): 是否启用「大香蕉」只读扩展词库，供 `/+`、`/随机绘图` 使用。
 - `show_restricted` (布尔值, 默认 `false`): 是否显示大香蕉词库中标记为猎奇/限制级的提示词。
 - `banana_sync_on_load` (布尔值, 默认 `false`): 插件加载时是否自动同步大香蕉词库。关闭后仅在 `/渠道同步大香蕉` 时手动同步。
+- `media_cooldown_seconds` (整数, 默认 `90`): 自然语言媒体生成的防连发冷却秒数。媒体发出后对话循环不会暂停，下一轮 Planner 常常还在处理同一条用户消息而再发一张，因此需要硬性间隔。冷却只在媒体**真正发送成功**后起算（生成失败可立刻重试），按会话隔离，设为 `0` 关闭。只作用于 Tool 调用，`/绘图`、`/+` 等指令不受影响。
 
 ### `[wait_notice]` - 等待提示 🆕
 

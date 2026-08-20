@@ -31,8 +31,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.10.4", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.10.4", description="配置版本",
+    version: str = Field(default="1.10.5", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.10.5", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -238,6 +238,16 @@ class BehaviorConfig(PluginConfigBase):
         default=False,
         description="插件加载时是否自动同步大香蕉提示词，关闭后仅手动同步",
         json_schema_extra=ui("加载时同步提示词", "开启后插件每次加载都会同步大香蕉提示词；关闭后只在手动命令触发时同步。"),
+    )
+    media_cooldown_seconds: int = Field(
+        default=90,
+        description="同一会话两次自然语言媒体生成之间的最小间隔秒数，0 表示不限制",
+        json_schema_extra=ui(
+            "媒体防连发冷却（秒）",
+            "媒体发出后对话循环不会暂停，下一轮 Planner 常常还在处理同一条用户消息而再发一张。"
+            "冷却期内的自然语言调用会被拒绝并提示改用文字回应。设为 0 关闭该保护。"
+            "只影响 Tool 调用，不影响 /绘图 等指令。",
+        ),
     )
 
 
