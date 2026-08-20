@@ -31,8 +31,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.10.3", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.10.3", description="配置版本",
+    version: str = Field(default="1.10.4", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.10.4", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -241,6 +241,52 @@ class BehaviorConfig(PluginConfigBase):
     )
 
 
+class WaitNoticeConfig(PluginConfigBase):
+    __ui_label__ = "等待提示"
+    __ui_icon__ = "clock"
+    __ui_order__ = 6
+
+    #: 媒体工具同步执行期间会先发一条等待提示。这条提示绕过 replyer，
+    #: 因此固定文案会明显出戏——每类各配多条，运行时随机取一条。
+    #: 清空某一项即表示该类型不发送等待提示。
+    image_messages: List[str] = Field(
+        default_factory=lambda: [
+            "让我想想画面……稍等一下下。",
+            "已经在动笔了，马上就好。",
+            "正在画，给我一点点时间～",
+        ],
+        description="绘图等待提示候选文案",
+        json_schema_extra=ui(
+            "绘图等待提示",
+            "生成图片期间随机发送其中一条。留空则不发送等待提示。",
+        ),
+    )
+    selfie_messages: List[str] = Field(
+        default_factory=lambda: [
+            "等我摆个好看的姿势，马上就来～",
+            "正在找角度呢，稍微等我一下下。",
+            "让我整理一下，这就去拍。",
+        ],
+        description="自拍等待提示候选文案",
+        json_schema_extra=ui(
+            "自拍等待提示",
+            "生成自拍期间随机发送其中一条。留空则不发送等待提示。",
+        ),
+    )
+    video_messages: List[str] = Field(
+        default_factory=lambda: [
+            "拍视频要久一点，别急着走开哦～",
+            "正在录了，这个比拍照慢一些，等我一下。",
+            "开拍啦，录完马上发给你。",
+        ],
+        description="视频等待提示候选文案",
+        json_schema_extra=ui(
+            "视频等待提示",
+            "生成视频期间随机发送其中一条。留空则不发送等待提示。",
+        ),
+    )
+
+
 class GeminiDrawerConfig(PluginConfigBase):
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     general: GeneralConfig = Field(default_factory=GeneralConfig)
@@ -248,3 +294,4 @@ class GeminiDrawerConfig(PluginConfigBase):
     selfie: SelfieConfig = Field(default_factory=SelfieConfig)
     api: ApiConfig = Field(default_factory=ApiConfig)
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
+    wait_notice: WaitNoticeConfig = Field(default_factory=WaitNoticeConfig)

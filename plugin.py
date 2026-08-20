@@ -1,8 +1,9 @@
 from typing import Any, Tuple, Optional, Type
 from pathlib import Path
+import random
 import httpx
-from maibot_sdk import Action, Command, MaiBotPlugin
-from maibot_sdk.types import ActivationType
+from maibot_sdk import Command, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from maibot_sdk.context import PluginContext
 
 from .config import GeminiDrawerConfig
@@ -247,6 +248,36 @@ def to_compat_message(message: Any) -> Any:
 class GeminiDrawerPlugin(MaiBotPlugin):
     config_model = GeminiDrawerConfig
 
+    _MEDIA_TOOLS = frozenset({"gemini_generate_image", "gemini_selfie", "gemini_selfie_video"})
+    _REPLY_GUARD_TEXT = (
+        "媒体仍在生成或发送中。禁止声称图片/视频已经发送、已经拍好或让用户查收；"
+        "只能说明正在准备并请对方稍等。只有在工具明确返回发送成功后，才可以使用完成时态。"
+    )
+
+    def __init__(self) -> None:
+        super().__init__()
+        # 按 stream_id 计数而不是布尔值。当前媒体 Tool 同步执行，同会话不会真的并发，
+        # 但计数保证了任何一条路径提前结束都不会误清掉其他任务的保护状态。
+        self._media_pending: dict[str, int] = {}
+
+    def _begin_media_task(self, stream_id: str) -> None:
+        key = str(stream_id or "").strip()
+        if key:
+            self._media_pending[key] = self._media_pending.get(key, 0) + 1
+
+    def _end_media_task(self, stream_id: str) -> None:
+        key = str(stream_id or "").strip()
+        if not key:
+            return
+        remaining = self._media_pending.get(key, 0) - 1
+        if remaining > 0:
+            self._media_pending[key] = remaining
+        else:
+            self._media_pending.pop(key, None)
+
+    def _media_is_pending(self, stream_id: str) -> bool:
+        return self._media_pending.get(str(stream_id or "").strip(), 0) > 0
+
     def get_components(self) -> list[dict[str, Any]]:
         components = super().get_components()
         for component in components:
@@ -423,6 +454,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             return False, f"同步发生未知异常: {e}"
 
     async def on_unload(self) -> None:
+        self._media_pending.clear()
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
@@ -435,6 +467,105 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             )
         except Exception:
             pass
+
+    @staticmethod
+    def _item_tool_name(item: Any) -> str:
+        """读取序列化 Item 中的工具名，非工具调用返回空串。"""
+        if not isinstance(item, dict) or item.get("item_type") != "FunctionCallItem":
+            return ""
+        tool_call = item.get("tool_call")
+        if not isinstance(tool_call, dict):
+            return ""
+        return str(tool_call.get("func_name") or "").strip()
+
+    @HookHandler(
+        "maisaka.planner.after_response",
+        name="gemini_drawer_suppress_parallel_reply",
+        description="媒体工具与 reply 同轮出现时移除 reply 及重复媒体调用，避免媒体发送前提前宣称完成",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def suppress_parallel_media_reply(self, **kwargs: Any) -> dict[str, Any]:
+        # 宿主对 Hook 失败只记进 dispatch_result.errors，调用方不会打日志。
+        # 一旦 output_items 的结构发生变化，这里必须自己喊出来，否则会静默退回旧行为。
+        try:
+            output_items = kwargs.get("output_items")
+            if not isinstance(output_items, list):
+                return {"action": "continue"}
+
+            tool_name = self._item_tool_name
+            if not any(tool_name(item) in self._MEDIA_TOOLS for item in output_items):
+                return {"action": "continue"}
+
+            filtered_items: list[Any] = []
+            removed_reply = 0
+            removed_duplicate = 0
+            seen_media = False
+            for item in output_items:
+                name = tool_name(item)
+                if name == "reply":
+                    # 媒体工具会同步执行到发送完成，这一轮的 reply 必然早于图片落地。
+                    removed_reply += 1
+                    continue
+                if name in self._MEDIA_TOOLS:
+                    # 串行执行会在第一次结束时清掉 pending，同轮的第二次调用
+                    # 靠 _run_media_tool 的去重拦不住，只能在这里掐掉。
+                    if seen_media:
+                        removed_duplicate += 1
+                        continue
+                    seen_media = True
+                filtered_items.append(item)
+
+            if not removed_reply and not removed_duplicate:
+                return {"action": "continue"}
+
+            kwargs["output_items"] = filtered_items
+            self._get_logger().warning(
+                f"[GeminiDrawer] 已过滤与媒体工具同轮的调用：reply {removed_reply} 个、"
+                f"重复媒体调用 {removed_duplicate} 个，等待媒体发送完成"
+            )
+            return {"action": "continue", "modified_kwargs": kwargs}
+        except Exception as exc:
+            self._get_logger().error(
+                f"[GeminiDrawer] 同轮 reply 过滤失败，本轮回退为宿主默认行为: {exc}",
+                exc_info=True,
+            )
+            return {"action": "continue"}
+
+    @HookHandler(
+        "maisaka.replyer.before_request",
+        name="gemini_drawer_pending_media_guard",
+        description="媒体生成期间约束 Replyer 使用进行时，禁止提前声称已经发送",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def guard_pending_media_reply(self, **kwargs: Any) -> dict[str, Any]:
+        # 兜底防线：正常路径下 suppress_parallel_media_reply 已经摘掉同轮 reply，
+        # 且媒体工具同步阻塞期间该会话不会再跑 replyer，所以这里通常不触发。
+        # 保留它是为了在上面那个 Hook 失效时仍有约束，不要因为"没见它生效"就删掉。
+        try:
+            stream_id = str(kwargs.get("session_id") or kwargs.get("stream_id") or "").strip()
+            if not self._media_is_pending(stream_id):
+                return {"action": "continue"}
+
+            existing = str(kwargs.get("extra_prompt") or "").strip()
+            kwargs["extra_prompt"] = (
+                f"{existing}\n\n{self._REPLY_GUARD_TEXT}".strip()
+                if existing
+                else self._REPLY_GUARD_TEXT
+            )
+            self._get_logger().warning(
+                "[GeminiDrawer] 媒体生成期间仍触发了 Replyer，已注入禁止提前宣称发送的约束"
+            )
+            return {"action": "continue", "modified_kwargs": kwargs}
+        except Exception as exc:
+            self._get_logger().error(
+                f"[GeminiDrawer] 注入媒体等待约束失败: {exc}",
+                exc_info=True,
+            )
+            return {"action": "continue"}
 
     # ── 命令/动作运行桥接函数 ──
 
@@ -466,7 +597,15 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         token = _context_holder.activate_plugin(self.ctx.plugin_id)
         try:
             instance = action_cls()
-            instance.action_data = kwargs.get("action_data", {})
+            action_data = kwargs.get("action_data")
+            if not isinstance(action_data, dict):
+                action_data = {
+                    key: value
+                    for key, value in kwargs.items()
+                    if key in {"prompt", "requested_action"}
+                }
+            instance.action_data = action_data
+            instance.wait_message = kwargs.get("wait_message", "")
             instance.action_reasoning = kwargs.get("action_reasoning", "")
             instance.cycle_timers = kwargs.get("cycle_timers", {})
             instance.thinking_id = kwargs.get("thinking_id", "")
@@ -499,6 +638,65 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             return await instance.execute()
         finally:
             _context_holder.deactivate_plugin(token)
+
+    def _pick_wait_message(self, kind: str) -> str:
+        """从配置里随机取一条等待提示；该提示绕过 replyer，固定文案会出戏。"""
+        try:
+            candidates = getattr(self.config.wait_notice, f"{kind}_messages", None) or []
+        except Exception as exc:
+            self._get_logger().warning(f"[GeminiDrawer] 读取{kind}等待提示配置失败: {exc}")
+            return ""
+        normalized = [str(item).strip() for item in candidates if str(item).strip()]
+        return random.choice(normalized) if normalized else ""
+
+    async def _run_media_tool(
+        self,
+        tool_name: str,
+        action_cls: Type[Any],
+        stream_id: str,
+        wait_kind: str,
+        action_data: dict[str, Any],
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        stream_id = str(stream_id or kwargs.get("chat_id") or "").strip()
+        if not stream_id:
+            return {
+                "name": tool_name,
+                "success": False,
+                "content": "无法确定目标会话，媒体任务未执行",
+                "error": "缺少 stream_id",
+            }
+
+        if self._media_is_pending(stream_id):
+            # 必须返回失败：宿主只看 success 字段，返回成功会让模型顺着说"已经发了"，
+            # 正好复现这次要修的问题。
+            reason = "当前会话已有媒体任务正在生成，本次未提交，也没有任何内容被发送。"
+            return {
+                "name": tool_name,
+                "success": False,
+                "content": reason,
+                "error": reason,
+            }
+
+        self._begin_media_task(stream_id)
+        try:
+            success, message = await self._run_action(
+                action_cls,
+                stream_id,
+                action_data=action_data,
+                wait_message=self._pick_wait_message(wait_kind),
+                **kwargs,
+            )
+            result = {
+                "name": tool_name,
+                "success": bool(success),
+                "content": str(message or ""),
+            }
+            if not success:
+                result["error"] = str(message or "媒体任务执行失败")
+            return result
+        finally:
+            self._end_media_task(stream_id)
 
     # ── 用户与绘图指令 ──
 
@@ -612,63 +810,100 @@ class GeminiDrawerPlugin(MaiBotPlugin):
     async def handle_search_banana_prompts(self, stream_id: str = "", message: Any = None, **kwargs: Any):
         return await self._run_command(BananaPromptSearchCommand, stream_id, message, kwargs.get("matched_groups"))
 
-    # ── Actions ──
+    # ── AI Tools ──
 
-    @Action(
+    @Tool(
         "gemini_generate_image",
-        description="根据用户的描述生成一张图片。当用户想要绘画、画图、生成图片时使用。",
-        activation_type=ActivationType.ALWAYS,
-        action_parameters={"prompt": "详细的图片描述，包括风格、内容、氛围等"},
-        associated_types=["image"],
-        action_require=[
-            "当用户明确表示想要绘画、画图、生成图片、修改图片时使用",
-            "适用于'画一张xx'、'生成xx图片'、'帮我画xx'等请求",
-            "不适用于用户只是在讨论某个事物，但没有明确表示想要图片的情况",
-            "不适用于用户要求生成文字内容（如人设描述、角色设定、故事、文案等），只适用于生成视觉图像",
-            "当用户说'生成人设'、'写个人设'、'来个人设'时，通常是指文字角色设定，不是图片，除非明确提到'画'或'图'",
-            "用户让别人或AI去做某事（如'叫ai给你生成xx'）属于建议或讨论，不是对本bot的绘图指令，不应触发",
-            "如果用户只是说'发张图'但没说发什么，可以尝试生成一张通用的美图",
-            "注意：如果遇到/绘图、/bnn、/多图、/+，这种带斜杠的指令消息，不要再调用此Action",
-            "注意：不要连续触发，如果刚刚已经发送过图片或正在生成中，就不要再次触发此动作，除非用户再次主动要求"
-        ],
+        description=(
+            "根据用户的明确要求生成并自行发送图片。适用于‘画一张’‘生成图片’‘帮我画’等视觉请求，"
+            "不适用于文字人设、故事或仅讨论图片。遇到 /绘图、/bnn、/多图、/+ 等命令时不要调用。"
+            "工具会先发送等待提示，然后一直等待到图片真正发送成功或明确失败才返回；调用本工具时不要在同一轮"
+            "同时调用 reply，也不要在工具成功返回前声称图片已经发送或让用户查收。"
+        ),
+        parameters={
+            "prompt": {
+                "type": "string",
+                "description": "详细的图片描述，包括主体、风格、内容、构图和氛围",
+                "required": True,
+            }
+        },
         timeout_ms=DRAW_COMMAND_TIMEOUT_MS
     )
-    async def handle_generate_image(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str]:
-        return await self._run_action(ImageGenerateAction, stream_id, **kwargs)
+    async def handle_generate_image(
+        self, prompt: str = "", stream_id: str = "", **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self._run_media_tool(
+            "gemini_generate_image",
+            ImageGenerateAction,
+            stream_id,
+            "image",
+            {"prompt": prompt},
+            **kwargs,
+        )
 
-    @Action(
+    @Tool(
         "gemini_selfie",
-        description="发送一张自己的自拍照片",
-        activation_type=ActivationType.ALWAYS,
-        action_parameters={
-            "requested_action": "用户请求的完整场景描述（包括服装、动作、姿势、场景等），如'穿女仆装比心'、'戴眼镜做鬼脸'、'在海边挥手'等。需要完整提取用户的要求，不要只提取单个动作词。如果用户没有指定具体场景，返回空字符串。"
+        description=(
+            "基于已配置的人设底图生成并自行发送角色自拍。当用户明确要求看你的照片、自拍或长什么样时使用。"
+            "工具会先发送正在准备的提示，并等待自拍图片真正发送成功或明确失败才返回。requested_action 要完整保留"
+            "用户要求的服装、动作、姿势和场景；未指定时可留空。调用本工具时不要同轮调用 reply，也不要提前说"
+            "‘已经发了’‘拍好了’或让用户查收。"
+        ),
+        parameters={
+            "requested_action": {
+                "type": "string",
+                "description": (
+                    "完整自拍场景描述，包括服装、动作、姿势、表情和场景；"
+                    "如‘穿女仆装比心’‘戴眼镜做鬼脸’。没有具体要求时传空字符串"
+                ),
+                "required": False,
+            }
         },
-        action_require=[
-            "当用户明确要求看我的照片、自拍、长什么样时使用",
-            "看看你的照片", "发张自拍",
-            "注意：不要连续发，如果刚刚已经发送过自拍或正在生成中，就不要再次触发此动作"
-        ],
         timeout_ms=DRAW_COMMAND_TIMEOUT_MS
     )
-    async def handle_selfie(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str]:
-        return await self._run_action(SelfieGenerateAction, stream_id, **kwargs)
+    async def handle_selfie(
+        self, requested_action: str = "", stream_id: str = "", **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self._run_media_tool(
+            "gemini_selfie",
+            SelfieGenerateAction,
+            stream_id,
+            "selfie",
+            {"requested_action": requested_action},
+            **kwargs,
+        )
 
-    @Action(
+    @Tool(
         "gemini_selfie_video",
-        description="发送一段自己的视频",
-        activation_type=ActivationType.ALWAYS,
-        action_parameters={
-            "requested_action": "用户请求的完整视频场景描述（包括服装、动作、场景等），如'穿女仆装跳舞'、'在海边挥手'、'穿JK转圈'、'做鬼脸眨眼'等。需要完整提取用户的要求，不要只提取单个动作词。如果用户没有明确指定场景，返回空字符串。"
+        description=(
+            "基于已配置的人设底图生成并自行发送角色视频。当用户明确要求看你的视频、动态或动作时使用。"
+            "工具会先发送正在准备的提示，并等待视频真正发送成功或明确失败才返回。requested_action 要完整保留"
+            "服装、动作和场景；未指定时可留空。调用本工具时不要同轮调用 reply，也不要在成功返回前声称视频"
+            "已经发送或让用户查收。"
+        ),
+        parameters={
+            "requested_action": {
+                "type": "string",
+                "description": (
+                    "完整视频场景描述，包括服装、动作、表情和场景；"
+                    "如‘穿女仆装跳舞’‘在海边挥手’。没有具体要求时传空字符串"
+                ),
+                "required": False,
+            }
         },
-        action_require=[
-            "当用户明确要求看我的视频、动态、动作时使用",
-            "发个视频看看", "想看你跳舞", "来段视频",
-            "注意：不要连续发，如果刚刚已经发送过视频或正在生成中，就不要再次触发此动作"
-        ],
         timeout_ms=VIDEO_COMMAND_TIMEOUT_MS
     )
-    async def handle_selfie_video(self, stream_id: str = "", **kwargs: Any) -> Tuple[bool, str]:
-        return await self._run_action(SelfieVideoAction, stream_id, **kwargs)
+    async def handle_selfie_video(
+        self, requested_action: str = "", stream_id: str = "", **kwargs: Any
+    ) -> dict[str, Any]:
+        return await self._run_media_tool(
+            "gemini_selfie_video",
+            SelfieVideoAction,
+            stream_id,
+            "video",
+            {"requested_action": requested_action},
+            **kwargs,
+        )
 
 
 def create_plugin() -> GeminiDrawerPlugin:

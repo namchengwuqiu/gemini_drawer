@@ -1,5 +1,20 @@
 # Gemini 绘图插件 更新日志
 
+## v1.10.4 (2026-08-20)
+
+### 修复
+
+- **彻底修复媒体发送前提前回复完成**: `gemini_generate_image`、`gemini_selfie`、`gemini_selfie_video` 从 Legacy `@Action` 迁移为原生 `@Tool`，移除 `asyncio.create_task()` 后台立即返回。工具现在按“发送等待提示 → 等待生成 → 确认媒体发送结果 → 返回 Tool 结果”的顺序执行，并继续使用 300 秒图片 / 600 秒视频组件超时。
+- **过滤同轮错误回复**: 新增 `maisaka.planner.after_response` Hook。当 Planner 在同一轮同时调用媒体 Tool 与 `reply` 时，仅移除 `reply`，避免 Replyer 在尚未拿到工具执行结果时根据 `reply_reference` 擅自使用“已经发了”等完成时态。
+- **生成期间 Replyer 时态保护**: 新增按 `stream_id` 计数的 pending 状态和 `maisaka.replyer.before_request` Hook。媒体生成或发送期间，任何 Replyer 请求（包括其他插件触发的续话）都会收到约束：只能表达正在准备，禁止声称已经发送、已经拍好或让用户查收；成功、失败和异常路径都会在 `finally` 中释放状态，不影响其他会话。正常路径下同轮 `reply` 已被上一条移除、且同步执行期间该会话不会再跑 Replyer，因此这道防线通常不触发——它是前一个 Hook 失效时的兜底，不要因为“没见它生效”就删掉。
+- **真实校验图片发送结果**: 图片改用原生 `ctx.send.image(..., return_details=True)`，读取宿主的 `success/sent` 字段。修复旧兼容层把 `{"success": false}` 非空字典误判为 `True`，导致平台拒绝图片时工具仍报告“已经发送”的问题。
+- **防止重复提交**: 同一会话已有媒体任务 pending 时，新的媒体 Tool 调用不会重复生成，并明确返回失败与“本次未提交，也没有任何内容被发送”。这里必须返回失败——宿主的 `_parse_tool_invoke_result` 只读 `success` 字段，返回成功会让模型顺着说“已经发了”，正是本次要修的问题。
+- **拦截同轮重复媒体调用**: 串行执行会在第一次结束时清掉 pending，同一轮里的第二次媒体调用绕得过 pending 去重，因此在 `maisaka.planner.after_response` 里一并只保留首个媒体调用。
+- **等待提示改为可配置随机文案**: 新增 `[wait_notice]` 配置段（绘图 / 自拍 / 视频各一组候选）。等待提示绕过 Replyer 和人格化插件，固定文案会明显出戏，现改为每次从候选中随机取一条；把某一组清空即表示该类型不发送等待提示。
+- **Hook 失败不再静默**: 宿主对 Hook 异常只记进 `dispatch_result.errors`，调用方不打日志。两个 Hook 现在自行捕获异常并按 error 级别输出，`output_items` 结构若发生变化会立刻暴露，而不是无声退回旧行为。
+- **统一发送接口**: `commands/actions.py` 中剩余的 `BaseAction.send_text()` 调用全部迁移到 `ctx.send.text`，不再混用已弃用的兼容层接口。
+- **回归测试补充**: 新增 Tool 注册、同步等待、同轮 `reply` 过滤、同轮重复媒体调用过滤、pending 会话隔离与计数、去重返回失败、等待提示随机取值与降级、异常清理、真实发送失败识别等测试；插件完整测试现为 196 项。
+
 ## v1.10.3 (2026-08-19)
 
 ### 修复与优化

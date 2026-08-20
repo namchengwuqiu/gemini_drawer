@@ -1,4 +1,3 @@
-import asyncio
 import base64
 import random
 from pathlib import Path
@@ -57,25 +56,49 @@ def is_command_message(message: Any) -> bool:
         return False
 
 
-def pending_ack(task_desc: str) -> str:
-    """构造后台任务回执，作为 Action 的返回值交回宿主。
-
-    该字符串只会进入 LLM 的工具结果上下文，不会作为聊天消息发出，因此写成中性的
-    状态说明而不是角色口吻——角色口吻的回执会被模型当成自己已经说过的台词顺着往下
-    演，导致图还没生成就先宣称"已经发给你了"。措辞的拟人化由宿主的回复生成负责。
-    """
-    return (
-        f"[任务状态] {task_desc}已提交后台队列，尚未生成、尚未发送。"
-        "生成完成后插件会自行把结果发送到聊天中。"
-        "回复时不要声称已经发送或让对方查收，只需表达正在准备、稍等片刻。"
-    )
-
-
 class _DrawActionMixin:
     """Action 侧共享的准入校验、绘图与发图逻辑。"""
 
     def _proxy(self) -> Optional[str]:
         return self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
+
+    def _target_stream_id(self) -> str:
+        return str(getattr(self, "_stream_id", "") or self.chat_id or "").strip()
+
+    async def _send_text(self, text: str) -> bool:
+        """统一走 ctx.send.text，避免混用已弃用的 BaseAction.send_text()。"""
+        message = str(text or "").strip()
+        stream_id = self._target_stream_id()
+        if not message or not stream_id or not getattr(self, "ctx", None):
+            return False
+        try:
+            await self.ctx.send.text(message, stream_id)
+            return True
+        except Exception as exc:
+            logger.warning(f"发送{self.action_name}文本消息失败: {exc}")
+            return False
+
+    async def _send_wait_message(self) -> None:
+        await self._send_text(getattr(self, "wait_message", ""))
+
+    async def _send_image_data(self, image_b64: str) -> bool:
+        """通过原生发送能力发图，并读取宿主返回的真实发送状态。"""
+        stream_id = self._target_stream_id()
+        if not stream_id or not getattr(self, "ctx", None):
+            return False
+        try:
+            result = await self.ctx.send.image(
+                image_b64,
+                stream_id,
+                return_details=True,
+            )
+        except Exception as exc:
+            logger.error(f"图片发送失败: {exc}")
+            return False
+
+        if isinstance(result, dict):
+            return bool(result.get("success") and result.get("sent", True))
+        return bool(result)
 
     def _precheck(self, feature: str) -> Optional[Tuple[bool, str]]:
         """统一的 Action 准入校验；返回 None 表示放行。"""
@@ -121,8 +144,13 @@ class _DrawActionMixin:
 
             if not image_b64:
                 continue
-            await self.send_image(image_b64.replace('\n', '').replace('\r', '').replace(' ', ''))
-            sent_count += 1
+            sent = await self._send_image_data(
+                image_b64.replace('\n', '').replace('\r', '').replace(' ', '')
+            )
+            if sent:
+                sent_count += 1
+            else:
+                logger.warning("图片发送接口返回失败，未计入已发送数量")
         return sent_count
 
 
@@ -167,12 +195,10 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
         if not prompt:
             return False, "没有提供绘图提示词"
 
-        asyncio.create_task(self._draw_and_send(prompt))
+        await self._send_wait_message()
+        return await self._draw_and_send(prompt)
 
-        # 立即返回，防止 LLM Tool Call 超时
-        return True, pending_ack(f"绘图任务（提示词：{prompt}）")
-
-    async def _draw_and_send(self, prompt: str) -> None:
+    async def _draw_and_send(self, prompt: str) -> Tuple[bool, str]:
         logger.info(f"执行绘图 Action，Prompt: {prompt}")
 
         try:
@@ -192,19 +218,23 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
             img_data, error = await self._draw(prompt, images)
 
             if not img_data:
-                await self.send_text(f"绘图失败了...\n错误: {error}")
-                return
+                await self._send_text(f"绘图失败了...\n错误: {error}")
+                return False, f"绘图失败: {error}"
 
             if await self._send_images(img_data) == 0:
-                await self.send_text("图片生成成功，但处理失败。")
+                await self._send_text("图片生成成功，但处理失败。")
+                return False, "图片生成成功，但发送失败"
+
+            return True, "图片已经生成并发送"
 
         except Exception as e:
             logger.error(f"Action 绘图异常: {e}")
-            await self.send_text(f"绘图过程中发生了错误: {e}")
+            await self._send_text(f"绘图过程中发生了错误: {e}")
+            return False, f"绘图过程中发生错误: {e}"
 
 
 class _SelfieActionBase(_DrawActionMixin, BaseAction):
-    """自拍类 Action 的共享逻辑：底图定位、提示词润色、后台任务启动。"""
+    """自拍类工具的共享逻辑：底图定位、提示词润色与同步执行。"""
 
     #: 润色模板的配置键
     polish_template_key: str = "selfie.polish_template"
@@ -279,19 +309,19 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
         base_prompt = self._identity_prompt()
         return f"{base_prompt}, {action}" if base_prompt else action
 
-    async def _start_background(self, coro_factory, ack: str) -> Tuple[bool, str]:
-        """统一的前置校验 + 后台任务启动。"""
+    async def _run_generation(self, coro_factory) -> Tuple[bool, str]:
+        """统一执行前置校验，并等待媒体生成和发送完成。"""
         blocked = self._precheck(self.feature_name)
         if blocked:
             return blocked
 
         if not self.get_config("selfie.enable"):
-            await self.send_text("虽然很想发，但是管理员没有开启自拍功能哦。")
+            await self._send_text("虽然很想发，但是管理员没有开启自拍功能哦。")
             return True, "自拍功能未启用"
 
         ref_image_path = self._reference_image_path()
         if ref_image_path is None:
-            await self.send_text("糟糕，我找不到我的底图了，可能被管理员删掉了。")
+            await self._send_text("糟糕，我找不到我的底图了，可能被管理员删掉了。")
             logger.warning(
                 f"Selfie reference image not found: {self.get_config('selfie.reference_image_path')}"
             )
@@ -299,10 +329,11 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
 
         try:
             user_action = (self.action_data.get("requested_action") or "").strip()
-            asyncio.create_task(coro_factory(ref_image_path, user_action))
-            return True, ack
+            await self._send_wait_message()
+            return await coro_factory(ref_image_path, user_action)
         except Exception as e:
-            logger.error(f"{self.feature_name} Action Start Error: {e}")
+            logger.error(f"{self.feature_name} Tool Error: {e}")
+            await self._send_text(f"处理{self.feature_name}时发生了错误: {e}")
             return False, str(e)
 
 
@@ -330,12 +361,9 @@ class SelfieGenerateAction(_SelfieActionBase):
     polish_request_type = "gemini_drawer.selfie_polish"
 
     async def execute(self) -> Tuple[bool, str]:
-        return await self._start_background(
-            self._do_selfie_background,
-            pending_ack("自拍图片生成任务"),
-        )
+        return await self._run_generation(self._do_selfie)
 
-    async def _do_selfie_background(self, ref_image_path: Path, user_action: str) -> None:
+    async def _do_selfie(self, ref_image_path: Path, user_action: str) -> Tuple[bool, str]:
         try:
             image_bytes = ref_image_path.read_bytes()
 
@@ -350,15 +378,19 @@ class SelfieGenerateAction(_SelfieActionBase):
             img_data, error = await self._draw(full_prompt, [image_bytes])
 
             if not img_data:
-                await self.send_text(f"自拍生成失败了: {error}")
-                return
+                await self._send_text(f"自拍生成失败了: {error}")
+                return False, f"自拍生成失败: {error}"
 
             if await self._send_images(img_data) == 0:
-                await self.send_text("自拍生成了，但是处理出错了。")
+                await self._send_text("自拍生成了，但是处理出错了。")
+                return False, "自拍生成成功，但发送失败"
+
+            return True, "自拍已经生成并发送"
 
         except Exception as e:
-            logger.error(f"Selfie Action Background Error: {e}")
-            await self.send_text(f"处理自拍时发生了错误: {e}")
+            logger.error(f"Selfie Tool Error: {e}")
+            await self._send_text(f"处理自拍时发生了错误: {e}")
+            return False, f"处理自拍时发生错误: {e}"
 
 
 class SelfieVideoAction(_SelfieActionBase):
@@ -398,12 +430,9 @@ class SelfieVideoAction(_SelfieActionBase):
     ]
 
     async def execute(self) -> Tuple[bool, str]:
-        return await self._start_background(
-            self._do_video_background,
-            pending_ack("自拍视频生成任务"),
-        )
+        return await self._run_generation(self._do_video)
 
-    async def _do_video_background(self, ref_image_path: Path, user_action: str) -> None:
+    async def _do_video(self, ref_image_path: Path, user_action: str) -> Tuple[bool, str]:
         try:
             from ..core.endpoints import build_video_endpoints
             from ..core.video import process_video_generation, send_video_via_napcat
@@ -420,8 +449,8 @@ class SelfieVideoAction(_SelfieActionBase):
 
             endpoints = build_video_endpoints(logger=logger)
             if not endpoints:
-                await self.send_text("❌ 没有配置视频生成渠道，无法录制视频。")
-                return
+                await self._send_text("❌ 没有配置视频生成渠道，无法录制视频。")
+                return False, "没有配置视频生成渠道"
 
             video_data, error = await process_video_generation(
                 prompt=full_prompt,
@@ -434,8 +463,8 @@ class SelfieVideoAction(_SelfieActionBase):
             )
 
             if not video_data:
-                await self.send_text(f"视频生成失败了: {error}")
-                return
+                await self._send_text(f"视频生成失败了: {error}")
+                return False, f"视频生成失败: {error}"
 
             success, send_error = await send_video_via_napcat(
                 video_base64=video_data,
@@ -447,10 +476,13 @@ class SelfieVideoAction(_SelfieActionBase):
             )
 
             if success:
-                await self.send_text("当当当！专门为你拍的视频来啦，快夸夸我！(≧▽≦)✨")
+                await self._send_text("当当当！专门为你拍的视频来啦，快夸夸我！(≧▽≦)✨")
+                return True, "自拍视频已经生成并发送"
             else:
-                await self.send_text(f"❌ 视频发送失败: {send_error}")
+                await self._send_text(f"❌ 视频发送失败: {send_error}")
+                return False, f"视频发送失败: {send_error}"
 
         except Exception as e:
-            logger.error(f"Selfie Video Action Background Error: {e}")
-            await self.send_text(f"录制视频时发生了错误: {e}")
+            logger.error(f"Selfie Video Tool Error: {e}")
+            await self._send_text(f"录制视频时发生了错误: {e}")
+            return False, f"录制视频时发生错误: {e}"
