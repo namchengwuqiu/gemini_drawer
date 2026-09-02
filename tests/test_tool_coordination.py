@@ -373,6 +373,43 @@ async def test_failed_send_is_not_counted_as_sent(monkeypatch):
     assert await action._send_images(["ZmFrZQ=="]) == 0
 
 
+@pytest.mark.asyncio
+async def test_sdk_normalized_send_result_is_counted_as_sent(monkeypatch):
+    """SDK >= 2.8 的 return_details 只返回 {"sent", "message_id"}，没有 success 字段。"""
+    action = ImageGenerateAction()
+    action._stream_id = "stream-1"
+    monkeypatch.setattr(action, "_proxy", lambda: None)
+
+    class Send:
+        async def image(self, image_base64, stream_id, **kwargs):
+            assert kwargs["return_details"] is True
+            return {"sent": True, "message_id": None}
+
+    action.ctx = type("Ctx", (), {"send": Send()})()
+    assert await action._send_images(["ZmFrZQ=="]) == 1
+
+
+@pytest.mark.parametrize(
+    ("result", "expected"),
+    [
+        ({"sent": True, "message_id": "m-1"}, True),
+        ({"sent": True, "message_id": None}, True),
+        ({"sent": False, "message_id": None}, False),
+        ({"success": True, "sent": True, "message_id": "m-1"}, True),
+        ({"success": True}, True),
+        ({"success": False, "sent": False, "error": "platform rejected"}, False),
+        ({"success": True, "sent": False}, False),
+        ({"message_id": "m-1"}, False),
+        ({}, False),
+        (True, True),
+        (False, False),
+        (None, False),
+    ],
+)
+def test_interpret_send_result_covers_all_sdk_shapes(result, expected):
+    assert ImageGenerateAction._interpret_send_result(result) is expected
+
+
 def test_media_components_are_native_tools_with_long_timeouts():
     plugin = GeminiDrawerPlugin()
     components = {

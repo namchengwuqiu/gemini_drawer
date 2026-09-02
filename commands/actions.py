@@ -96,8 +96,23 @@ class _DrawActionMixin:
             logger.error(f"图片发送失败: {exc}")
             return False
 
+        return self._interpret_send_result(result)
+
+    @staticmethod
+    def _interpret_send_result(result: Any) -> bool:
+        """判定 send 能力的返回值是否代表真的发出去了。
+
+        返回结构随 SDK 版本不同：
+        - SDK >= 2.8 且 return_details=True：``{"sent": bool, "message_id": str | None}``，
+          **没有** ``success`` 字段，只按 ``success`` 判断会恒为失败。
+        - 更早的 SDK 或宿主原始返回：``{"success": bool, "sent": bool, ...}``。
+        - 未开 return_details 时统一收敛成 bool。
+        所以只校验实际存在的标志位，全部为真才算成功；一个都没有则视为失败，
+        避免非空字典被当成 True。
+        """
         if isinstance(result, dict):
-            return bool(result.get("success") and result.get("sent", True))
+            flags = [result[key] for key in ("success", "sent") if key in result]
+            return bool(flags) and all(bool(flag) for flag in flags)
         return bool(result)
 
     def _precheck(self, feature: str) -> Optional[Tuple[bool, str]]:

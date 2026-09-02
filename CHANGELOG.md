@@ -1,5 +1,13 @@
 # Gemini 绘图插件 更新日志
 
+## v1.10.6 (2026-09-02)
+
+### 修复
+
+- **修复图片实际发出但被判定为发送失败**: SDK 2.8.0 在 `_normalize_capability_result()` 里给 send 类能力加了一层归一化，`send.image(..., return_details=True)` 的返回值从宿主原始的 `{"success", "sent", "message_id"}` 被缩减为 `{"sent", "message_id"}`——**不再带 `success` 字段**。而 v1.10.4 引入的判断写的是 `result.get("success") and result.get("sent", True)`，`success` 取到 `None` 后恒为假，于是只要 SDK ≥ 2.8，每张图都会被记成发送失败：图片其实已经发到平台，工具却报「图片发送接口返回失败」并补一句「自拍生成了，但是处理出错了。」，同时因为 `_send_images()` 返回 0，冷却也不会起算。发送判定抽成 `_DrawActionMixin._interpret_send_result()`，只校验结果里**实际存在**的 `success` / `sent` 标志位，全部为真才算成功；同时兼容 SDK ≥ 2.8 的 `{"sent"}`、早期 SDK 与宿主原始的 `{"success", "sent"}`、以及未开 `return_details` 时的裸 bool 三种形态，空字典和不含任何标志位的字典仍按失败处理，不会重现「非空字典误判为 True」的老问题。
+- **其余发图路径已核对无同类问题**: `/绘图` 等指令走 `commands/base_commands.py` 的 `ctx.send.hybrid()`，未开 `return_details`，SDK 归一化后返回的就是 bool，判定正确；无 `ctx` 时的兜底 `BaseCommand.send_image()` 经兼容层 `send_api.image_to_stream()` 也返回 bool；视频不走 SDK send 能力，由 `core/video.py` 直连 NapCat HTTP 接口，均无需改动。
+- **回归测试**: 新增 `test_sdk_normalized_send_result_is_counted_as_sent`（SDK 2.8 归一化结构必须计入已发送）与 `test_interpret_send_result_covers_all_sdk_shapes`（12 个参数化用例覆盖三种返回形态及空字典、`None` 等边界）。插件完整测试现为 203 项，在部署所用的 SDK 2.8.0 环境下 202 通过、1 跳过。
+
 ## v1.10.5 (2026-08-20)
 
 ### 修复
