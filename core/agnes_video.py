@@ -6,6 +6,9 @@ core.video 负责；这里不上传图片，也不在轮询失败时重新创建
 from __future__ import annotations
 
 import asyncio
+import math
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Dict, Optional
 from urllib.parse import urlsplit, urlunsplit
 
@@ -16,7 +19,7 @@ from ..utils import extract_text_failure_reason
 DEFAULT_MODEL = "agnes-video-2.5-flash"
 # 宿主视频组件上限为 600 秒；生成阶段最多 420 秒，为下载和发送留出时间。
 GENERATION_TIMEOUT = 420.0
-POLL_INTERVAL = 2.0
+POLL_INTERVAL = 5.0
 MAX_RETRY_DELAY = 30.0
 
 
@@ -103,14 +106,25 @@ def _task_result(data: Dict[str, Any]) -> Optional[str]:
     status = data.get("status")
     if status == "completed":
         metadata = data.get("metadata")
-        url = metadata.get("url") if isinstance(metadata, dict) else None
-        if not isinstance(url, str) or not url.strip():
-            raise RuntimeError("Agnes 视频任务已完成，但未返回 metadata.url")
-        url = url.strip()
-        parsed = urlsplit(url)
-        if parsed.scheme not in ("https", "http") or not parsed.netloc:
-            raise RuntimeError("Agnes metadata.url 不是有效的 HTTP(S) 视频地址")
-        return url
+        # 文档使用 metadata.url；线上 Videos API 实际还会返回顶层 url。
+        candidates = [metadata.get("url") if isinstance(metadata, dict) else None, data.get("url")]
+        invalid_url = False
+        for value in candidates:
+            if not isinstance(value, str) or not value.strip():
+                continue
+            url = value.strip()
+            try:
+                parsed = urlsplit(url)
+                if parsed.scheme in ("https", "http") and parsed.netloc:
+                    return url
+            except ValueError:
+                pass
+            invalid_url = True
+        if invalid_url:
+            # 服务端已报告完成，不能再切渠道生成一份来掩盖结果地址错误。
+            raise AgnesVideoPendingError("Agnes 视频地址不是有效的 HTTP(S) 地址（metadata.url/url）")
+        # completed 与结果地址发布可能不同步；让调用方继续查询同一任务。
+        return None
     if status == "failed":
         reason = extract_text_failure_reason(data) or "未知错误"
         raise RuntimeError(f"Agnes 视频生成失败: {reason}")
@@ -120,13 +134,23 @@ def _task_result(data: Dict[str, Any]) -> Optional[str]:
 
 
 def _retry_delay(response: httpx.Response, previous: float) -> float:
+    delay = min(previous * 2, MAX_RETRY_DELAY)
+    value = response.headers.get("Retry-After", "")
     try:
-        retry_after = float(response.headers.get("Retry-After", ""))
-        if retry_after > 0:
-            return max(POLL_INTERVAL, min(retry_after, MAX_RETRY_DELAY))
+        retry_after = float(value)
     except ValueError:
-        pass
-    return min(previous * 2, MAX_RETRY_DELAY)
+        try:
+            retry_at = parsedate_to_datetime(value)
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            retry_after = (retry_at - datetime.now(timezone.utc)).total_seconds()
+        except (TypeError, ValueError, OverflowError):
+            return delay
+    if math.isfinite(retry_after) and retry_after > 0:
+        # Retry-After 是下限，不能因较小值缩短退避，也不能被 30 秒上限截短。
+        # 服务器要求等待太久时，外层的生成总超时仍会终止本地等待。
+        return max(delay, retry_after)
+    return delay
 
 
 async def generate_agnes_video(
@@ -145,6 +169,21 @@ async def generate_agnes_video(
         "Authorization": f"Bearer {endpoint.get('key') or ''}",
     }
     video_id: Optional[str] = None
+    waiting_for_url = False
+
+    def note_missing_result_url(data: Dict[str, Any]) -> None:
+        nonlocal waiting_for_url
+        if data.get("status") != "completed" or waiting_for_url:
+            return
+        waiting_for_url = True
+        # 只打印字段名用于定位协议变化，不打印提示词、参考图、URL 或密钥。
+        fields = ", ".join(sorted(data))
+        metadata = data.get("metadata")
+        metadata_fields = ", ".join(sorted(metadata)) if isinstance(metadata, dict) else "无"
+        logger.warning(
+            f"[Agnes 视频] 任务已完成但视频地址尚不可用，继续查询同一任务；"
+            f"响应字段: {fields}；metadata 字段: {metadata_fields}"
+        )
 
     async with httpx.AsyncClient(
         proxy=proxy, timeout=60.0, follow_redirects=True,
@@ -171,6 +210,7 @@ async def generate_agnes_video(
                 raise RuntimeError("Agnes 创建任务未返回 video_id，不能使用 id/task_id 代替查询")
             video_id = video_id.strip()
             logger.info(f"[Agnes 视频] 任务已创建: {video_id}")
+            note_missing_result_url(data)
             params = {"video_id": video_id, "model_name": payload["model"]}
             delay = POLL_INTERVAL
 
@@ -181,23 +221,31 @@ async def generate_agnes_video(
                         poll_url, params=params, headers=headers, timeout=30.0,
                     )
                 except httpx.RequestError as exc:
-                    logger.warning(f"[Agnes 视频] 查询暂时失败: {type(exc).__name__}，稍后重试")
                     delay = min(delay * 2, MAX_RETRY_DELAY)
+                    logger.warning(
+                        f"[Agnes 视频] 查询暂时失败: {type(exc).__name__}，{delay:g} 秒后重试同一任务"
+                    )
                     continue
                 if response.status_code in (408, 429) or 500 <= response.status_code < 600:
-                    logger.warning(f"[Agnes 视频] 查询返回 HTTP {response.status_code}，稍后重试")
                     delay = _retry_delay(response, delay)
+                    logger.warning(f"[Agnes 视频] 查询返回 HTTP {response.status_code}，{delay:g} 秒后重试同一任务")
                     continue
                 _raise_for_api_error(response, "查询视频任务")
-                result = _task_result(_json_object(response))
+                data = _json_object(response)
+                result = _task_result(data)
                 if result:
                     return result
-                delay = POLL_INTERVAL
+                note_missing_result_url(data)
+                # 成功查询后保留已经退避的间隔，避免恢复高频轮询后再次触发 429。
 
         try:
             return await asyncio.wait_for(submit_and_poll(), timeout=GENERATION_TIMEOUT)
         except asyncio.TimeoutError as exc:
             detail = f" (video_id={video_id})" if video_id else ""
+            if waiting_for_url:
+                raise AgnesVideoPendingError(
+                    f"Agnes 服务端已报告完成，但一直未返回可用视频地址（metadata.url/url）{detail}"
+                ) from exc
             raise AgnesVideoPendingError(
                 f"Agnes 视频生成/轮询超时{detail}；已提交的任务可能仍在服务端运行"
             ) from exc

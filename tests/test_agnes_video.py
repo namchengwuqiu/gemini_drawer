@@ -3,6 +3,7 @@ import asyncio
 import base64
 import json
 import logging
+from datetime import datetime, timezone
 from unittest.mock import Mock
 
 import httpx
@@ -27,6 +28,16 @@ def queued(**extra):
 
 def completed(url=VIDEO_URL):
     return {"video_id": "video-1", "status": "completed", "metadata": {"url": url}}
+
+
+def completed_top_level(url=VIDEO_URL):
+    """2026-09-12 实际查询响应的脱敏结构：无 metadata，地址在顶层 url。"""
+    return {
+        "id": "task-example", "object": "video", "status": "completed",
+        "progress": 100, "internal_progress": 0, "internal_status": "pending",
+        "seconds": "5", "size": "720P", "quality": "standard", "error": None,
+        "url": url,
+    }
 
 
 @pytest.fixture
@@ -118,7 +129,7 @@ async def test_create_poll_with_video_id_and_model(mock_api, create_status, api_
         assert request.url.path == query_path
         assert dict(request.url.params) == {"video_id": "video-1", "model_name": MODEL}
         assert request.headers["Authorization"] == "Bearer test-key"
-    assert mock_api["sleeps"] == [2.0, 2.0]
+    assert mock_api["sleeps"] == [5.0, 5.0]
     assert mock_api["client_kwargs"][0]["proxy"] == "http://proxy.local:8080"
     assert mock_api["client_kwargs"][0]["follow_redirects"] is True
 
@@ -136,8 +147,9 @@ async def test_keyframe_base64_is_sent_in_actual_post(mock_api):
 
 
 @pytest.mark.asyncio
-async def test_immediately_completed_create_needs_no_poll(mock_api):
-    mock_api["handler"] = lambda request: httpx.Response(200, json=completed())
+@pytest.mark.parametrize("result_factory", [completed, completed_top_level])
+async def test_immediately_completed_create_needs_no_poll(mock_api, result_factory):
+    mock_api["handler"] = lambda request: httpx.Response(200, json=result_factory())
     assert await agnes_video.generate_agnes_video(endpoint(), "p", None, None, None, LOGGER) == VIDEO_URL
     assert len(mock_api["requests"]) == 1
     assert not mock_api["sleeps"]
@@ -166,9 +178,6 @@ async def test_failed_task_surfaces_error(mock_api, phase):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("data,error", [
-    ({"status": "completed", "metadata": None}, "metadata.url"),
-    (completed(""), "metadata.url"),
-    (completed(42), "metadata.url"),
     (completed("file:///tmp/movie.mp4"), "HTTP"),
     ({"status": "unknown"}, "未知视频任务状态"),
 ])
@@ -200,21 +209,21 @@ async def test_transient_poll_errors_retry_same_task(mock_api, status):
     ]
     mock_api["handler"] = lambda request: responses.pop(0)
     assert await agnes_video.generate_agnes_video(endpoint(), "p", None, None, None, LOGGER) == VIDEO_URL
-    assert mock_api["sleeps"] == [2.0, 4.0, 2.0]
+    assert mock_api["sleeps"] == [5.0, 10.0, 10.0]
     assert sum(r.method == "POST" for r in mock_api["requests"]) == 1
     assert all(r.url.params["video_id"] == "video-1" for r in mock_api["requests"][1:])
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("retry_after,delay", [("10", 10.0), ("999", 30.0), ("invalid", 4.0), ("-1", 4.0)])
-async def test_poll_retry_after_and_cap(mock_api, retry_after, delay):
+@pytest.mark.parametrize("retry_after,delay", [("1", 10.0), ("10", 10.0), ("999", 999.0), ("invalid", 10.0), ("-1", 10.0), ("nan", 10.0), ("inf", 10.0)])
+async def test_poll_retry_after_is_a_minimum(mock_api, retry_after, delay):
     responses = [
         httpx.Response(200, json=queued()), httpx.Response(429, headers={"Retry-After": retry_after}),
         httpx.Response(200, json=completed()),
     ]
     mock_api["handler"] = lambda request: responses.pop(0)
     await agnes_video.generate_agnes_video(endpoint(), "p", None, None, None, LOGGER)
-    assert mock_api["sleeps"] == [2.0, delay]
+    assert mock_api["sleeps"] == [5.0, delay]
 
 
 @pytest.mark.asyncio
@@ -301,7 +310,8 @@ async def test_malformed_responses(mock_api, response, error):
 @pytest.mark.parametrize("download_url,needs_auth", [
     (VIDEO_URL, False), ("https://apihub.agnes-ai.com/files/result.mp4", True),
 ])
-async def test_existing_video_pipeline_downloads_result(mock_api, monkeypatch, download_url, needs_auth):
+@pytest.mark.parametrize("result_factory", [completed, completed_top_level])
+async def test_existing_video_pipeline_downloads_result(mock_api, monkeypatch, download_url, needs_auth, result_factory):
     movie = b"fake-mp4-video"
     keys = Mock()
     monkeypatch.setattr(video, "key_manager", keys)
@@ -310,7 +320,7 @@ async def test_existing_video_pipeline_downloads_result(mock_api, monkeypatch, d
         if request.method == "POST":
             return httpx.Response(200, json=queued())
         if request.url.path == "/agnesapi":
-            return httpx.Response(200, json=completed(download_url))
+            return httpx.Response(200, json=result_factory(download_url))
         assert str(request.url) == download_url
         assert ("Authorization" in request.headers) is needs_auth
         return httpx.Response(200, content=movie)
@@ -368,3 +378,112 @@ async def test_pending_task_does_not_switch_keys_or_channels(mock_api, monkeypat
     assert sum(r.method == "POST" for r in mock_api["requests"]) == 1
     # video_id 含 429 也不能被旧的字符串判断误认为密钥额度不足。
     keys.record_key_usage.assert_not_called()
+
+
+def test_actual_completed_response_uses_url_not_internal_status():
+    response = completed_top_level()
+    assert "metadata" not in response
+    assert response["internal_status"] == "pending"
+    assert agnes_video._task_result(response) == VIDEO_URL
+
+
+@pytest.mark.parametrize("fields,expected", [
+    ({"url": VIDEO_URL}, VIDEO_URL),
+    ({"metadata": None, "url": VIDEO_URL}, VIDEO_URL),
+    ({"metadata": {"url": ""}, "url": VIDEO_URL}, VIDEO_URL),
+    ({"metadata": {"url": "file:///invalid.mp4"}, "url": VIDEO_URL}, VIDEO_URL),
+    ({"metadata": {"url": VIDEO_URL}, "url": "https://cdn.example/other.mp4"}, VIDEO_URL),
+])
+def test_documented_and_live_result_fields(fields, expected):
+    assert agnes_video._task_result({"status": "completed", **fields}) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pending", [
+    {"status": "completed", "metadata": None},
+    completed(""), completed(42), completed_top_level(""),
+])
+async def test_completed_without_url_waits_for_same_task(mock_api, pending):
+    responses = [
+        httpx.Response(200, json=queued()), httpx.Response(200, json=pending),
+        httpx.Response(200, json=completed_top_level()),
+    ]
+    mock_api["handler"] = lambda request: responses.pop(0)
+    logger = Mock()
+    result = await agnes_video.generate_agnes_video(endpoint(), "p", None, None, None, logger)
+    assert result == VIDEO_URL
+    assert [r.method for r in mock_api["requests"]] == ["POST", "GET", "GET"]
+    assert all(r.url.params["video_id"] == "video-1" for r in mock_api["requests"][1:])
+    logger.warning.assert_called_once()
+    assert "响应字段" in logger.warning.call_args.args[0]
+
+
+@pytest.mark.asyncio
+async def test_missing_result_diagnostics_do_not_log_sensitive_values(mock_api):
+    pending = {
+        "status": "completed", "prompt": "PRIVATE-PROMPT", "first_frame": f"data:image/png;base64,{B64}",
+        "metadata": {"url": None, "secret": "PRIVATE-TOKEN"},
+    }
+    responses = [
+        httpx.Response(200, json=queued()), httpx.Response(200, json=pending),
+        httpx.Response(200, json=pending), httpx.Response(200, json=completed_top_level()),
+    ]
+    mock_api["handler"] = lambda request: responses.pop(0)
+    logger = Mock()
+    await agnes_video.generate_agnes_video(endpoint(), "p", None, None, None, logger)
+    logger.warning.assert_called_once()  # 不反复打印诊断
+    message = logger.warning.call_args.args[0]
+    assert "PRIVATE-PROMPT" not in message
+    assert "PRIVATE-TOKEN" not in message
+    assert B64 not in message
+    assert "prompt" in message and "first_frame" in message  # 只记录字段名
+
+
+@pytest.mark.asyncio
+async def test_missing_completed_url_times_out_without_regenerating(mock_api, monkeypatch):
+    monkeypatch.setattr(agnes_video, "GENERATION_TIMEOUT", 0.01)
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    blocker = asyncio.Event()
+    polls = 0
+
+    async def handler(request):
+        nonlocal polls
+        if request.method == "POST":
+            return httpx.Response(200, json=queued())
+        polls += 1
+        if polls == 1:
+            return httpx.Response(200, json={"status": "completed", "metadata": None})
+        await blocker.wait()
+        raise AssertionError("Polling should be cancelled")
+
+    mock_api["handler"] = handler
+    result, error = await video.process_video_generation("p", None, None, [endpoint(), endpoint()], None, LOGGER)
+    assert result is None
+    assert "已报告完成" in error and "一直未返回可用视频地址" in error
+    assert "未自动切换其他渠道" in error
+    assert sum(r.method == "POST" for r in mock_api["requests"]) == 1
+    keys.record_key_usage.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_invalid_completed_url_does_not_trigger_new_generation(mock_api, monkeypatch):
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    responses = [httpx.Response(200, json=queued()), httpx.Response(200, json=completed_top_level("file:///bad.mp4"))]
+    mock_api["handler"] = lambda request: responses.pop(0)
+    result, error = await video.process_video_generation("p", None, None, [endpoint(), endpoint()], None, LOGGER)
+    assert result is None and "HTTP(S)" in error
+    assert sum(r.method == "POST" for r in mock_api["requests"]) == 1
+    keys.record_key_usage.assert_not_called()
+
+
+def test_retry_after_http_date_is_respected(monkeypatch):
+    now = datetime(2026, 9, 12, 0, 0, 0, tzinfo=timezone.utc)
+    monkeypatch.setattr(agnes_video, "datetime", Mock(now=Mock(return_value=now)))
+    response = httpx.Response(429, headers={"Retry-After": "Sat, 12 Sep 2026 00:01:00 GMT"})
+    assert agnes_video._retry_delay(response, 5.0) == 60.0
+
+
+def test_exponential_backoff_is_capped_without_retry_after():
+    assert agnes_video._retry_delay(httpx.Response(429), 30.0) == 30.0
