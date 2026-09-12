@@ -31,8 +31,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.10.6", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.10.6", description="配置版本",
+    version: str = Field(default="1.11.0", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.11.0", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -47,15 +47,17 @@ class GeneralConfig(PluginConfigBase):
             "绘图 API 渠道不在 config.toml 里填写，请在聊天中使用指令管理：\n"
             "1. 添加 Google 官方渠道：/添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent\n"
             "2. 添加第三方 OpenAI 兼容渠道：/添加渠道 渠道名:https://api.example.com/v1/chat/completions:模型名\n"
-            "3. 添加渠道 Key：/渠道添加key 渠道名 your-api-key\n"
-            "4. 查看或启停渠道：/渠道列表、/启用渠道 渠道名、/禁用渠道 渠道名"
+            "3. 添加 Agnes 图片：/添加渠道 agnes图片:https://apihub.agnes-ai.com/v1/images/generations:agnes-image-2.5-flash\n"
+            "4. 添加 Agnes 视频：/添加渠道 agnes视频:https://apihub.agnes-ai.com/v1/videos:agnes-video-2.5-flash（自动标记视频渠道）\n"
+            "5. 添加渠道 Key：/渠道添加key 渠道名 your-api-key\n"
+            "6. 查看或启停渠道：/渠道列表、/启用渠道 渠道名、/禁用渠道 渠道名"
         ),
         description="绘图API渠道配置说明",
         json_schema_extra=ui(
             "绘图渠道配置说明",
             "只读说明。绘图 API 地址和 Key 请通过聊天指令写入渠道数据，不再放在 config.toml。",
             disabled=True,
-            **{"x-widget": "textarea", "rows": 6},
+            **{"x-widget": "textarea", "rows": 8},
         ),
     )
     enable_gemini_drawer: bool = Field(

@@ -27,7 +27,9 @@ from typing import Tuple, Optional
 from pathlib import Path
 from maibot_sdk.compat.base import ReplyContentType
 from .base_commands import BaseAdminCommand
+from ..core.agnes_video import matches_agnes_video_endpoint
 from ..core.managers import key_manager, data_manager
+from ..providers import AgnesImageProvider, Endpoint
 from ..utils import logger, save_config_file
 
 class ChannelAddKeyCommand(BaseAdminCommand):
@@ -305,11 +307,14 @@ class AddChannelCommand(BaseAdminCommand):
 📌 OpenAI格式: /添加渠道 名称:URL:模型名
 📌 Gemini官方格式: /添加渠道 名称:URL
 📌 豆包格式: /添加渠道 名称:URL:模型名
+📌 Agnes 图片/视频: /添加渠道 名称:URL:模型名
 
 示例:
 /添加渠道 openai渠道:https://api.example.com/v1/chat/completions:gpt-4
 /添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent
 /添加渠道 doubao:https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128
+/添加渠道 agnes图片:https://apihub.agnes-ai.com/v1/images/generations:agnes-image-2.5-flash
+/添加渠道 agnes视频:https://apihub.agnes-ai.com/v1/videos:agnes-video-2.5-flash
 
 添加渠道后再使用 `/渠道添加key <渠道名称> <key>` 添加密钥。"""
         
@@ -328,11 +333,12 @@ class AddChannelCommand(BaseAdminCommand):
             is_doubao_image = "/images/generations" in rest_part
             is_doubao_video = "/contents/generations/tasks" in rest_part
             is_doubao = is_doubao_image or is_doubao_video
+            is_agnes_video = "/v1/videos" in rest_part
             is_tsai_video = "endpoint=video" in rest_part
             is_tsai = "tsart.lat" in rest_part or "tavr.top" in rest_part or "endpoint=" in rest_part or "linux.tsart.lat" in rest_part
             
-            if not is_openai and not is_gemini and not is_doubao and not is_tsai:
-                await self.send_text("❌ URL 格式不正确！\n支持的格式：\n- OpenAI: 包含 /chat/completions\n- Gemini: 包含 generateContent\n- 豆包图片: 包含 /images/generations\n- 豆包视频: 包含 /contents/generations/tasks\n- TS-AI: 包含 tsart.lat 或 tavr.top 或 endpoint=")
+            if not is_openai and not is_gemini and not is_doubao and not is_tsai and not is_agnes_video:
+                await self.send_text("❌ URL 格式不正确！\n支持的格式：\n- OpenAI: 包含 /chat/completions\n- Gemini: 包含 generateContent\n- 图片 API（豆包/Agnes）: 包含 /images/generations\n- 豆包视频: 包含 /contents/generations/tasks\n- Agnes 视频: /v1/videos，使用 agnes-video- 系列模型\n- TS-AI: 包含 tsart.lat 或 tavr.top 或 endpoint=")
                 return True, "URL格式错误", True
 
             if is_openai:
@@ -352,12 +358,26 @@ class AddChannelCommand(BaseAdminCommand):
                      await self.send_text("❌ OpenAI 格式必须指定模型名称！")
                      return True, "缺少模型", True
 
+            elif is_agnes_video:
+                if rest_part.strip().rstrip("/").endswith("/v1/videos"):
+                    await self.send_text("❌ Agnes 视频格式必须指定模型名称，例如 agnes-video-2.5-flash！")
+                    return True, "缺少模型", True
+                possible_url = rest_part[:last_colon_index].strip()
+                possible_model = rest_part[last_colon_index + 1:].strip()
+                if not possible_model:
+                    await self.send_text("❌ Agnes 视频格式必须指定模型名称！")
+                    return True, "缺少模型", True
+                if not matches_agnes_video_endpoint({"url": possible_url, "model": possible_model}):
+                    await self.send_text("❌ Agnes 视频 URL 应以 /v1/videos 结尾，模型应为 agnes-video- 系列。")
+                    return True, "URL或模型格式错误", True
+                url, model = possible_url, possible_model
+
             elif is_doubao:
-                # 豆包格式: URL:模型名 (图片或视频)
+                # 图片 API（豆包/Agnes）或豆包视频：URL:模型名
                 url_pattern = "/contents/generations/tasks" if is_doubao_video else "/images/generations"
                 if rest_part.strip().endswith(url_pattern):
                      example = "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks:doubao-seedance-1-5-pro-251215" if is_doubao_video else "https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128"
-                     await self.send_text(f"❌ 豆包格式必须指定模型名称！\n例如: {example}")
+                     await self.send_text(f"❌ 图片/豆包视频格式必须指定模型名称！\n例如: {example}")
                      return True, "缺少模型", True
                 if last_colon_index != -1:
                     possible_model = rest_part[last_colon_index+1:].strip()
@@ -366,7 +386,7 @@ class AddChannelCommand(BaseAdminCommand):
                         url = possible_url
                         model = possible_model
                     else:
-                        await self.send_text("❌ 无法解析豆包模型名称")
+                        await self.send_text("❌ 无法解析图片/豆包视频模型名称")
                         return True, "解析失败", True
                 else:
                      await self.send_text("❌ 豆包格式必须指定模型名称！")
@@ -389,13 +409,21 @@ class AddChannelCommand(BaseAdminCommand):
             channel_info = {"url": url, "enabled": True, "stream": False}
             if model: channel_info["model"] = model
             # 自动标记视频渠道
-            if is_doubao_video or is_tsai_video:
+            if is_doubao_video or is_tsai_video or is_agnes_video:
                 channel_info["is_video"] = True
             data_manager.add_channel(name, channel_info)
 
-            api_type = "豆包视频" if is_doubao_video else ("豆包图片" if is_doubao_image else ("OpenAI" if is_openai else ("Gemini" if is_gemini else "TS-AI")))
+            if is_agnes_video:
+                api_type = "Agnes 视频"
+            elif is_doubao_video:
+                api_type = "豆包视频"
+            elif is_doubao_image:
+                is_agnes_image = AgnesImageProvider.matches(Endpoint(type="", url=url, model=model))
+                api_type = "Agnes 图片" if is_agnes_image else "豆包图片"
+            else:
+                api_type = "OpenAI" if is_openai else ("Gemini" if is_gemini else "TS-AI")
             msg = f"✅ 自定义渠道 `{name}` 添加成功！\n类型: {api_type}\n请使用 `/渠道添加key {name} <your-api-key>` 添加密钥。"
-            if is_doubao_video or is_tsai_video:
+            if is_doubao_video or is_tsai_video or is_agnes_video:
                 msg += "\n已自动标记为视频渠道。"
             await self.send_text(msg)
             return True, "添加成功", True

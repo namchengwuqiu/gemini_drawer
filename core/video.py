@@ -1,9 +1,8 @@
 """
 Gemini Drawer 视频生成
 
-视频侧各家 API 差异比图片更大（豆包与 TS-AI 都是"建任务 + 轮询"，
-OpenAI 兼容接口是一次性/流式返回），且只有 4 家，因此没有像绘图那样
-抽 provider 层，保持单函数内的分支结构。
+视频侧按 API 协议分流。Agnes 的创建/轮询逻辑放在 agnes_video 中；
+既有豆包、TS-AI、OpenAI 兼容与 Gemini 渠道保持原有分支。
 
 send_video_via_napcat() 直连 NapCat 的正向 HTTP 接口发视频——
 SDK 的 send 能力目前不支持视频段。
@@ -18,6 +17,9 @@ from urllib.parse import urlparse
 
 import httpx
 
+from .agnes_video import (
+    AgnesVideoPendingError, generate_agnes_video, matches_agnes_video_endpoint,
+)
 from .managers import key_manager
 from ..utils import extract_video_data
 
@@ -58,8 +60,15 @@ async def process_video_generation(
         }
         
         try:
+            # Agnes Videos API：独立任务协议，成片复用下方下载/发送链路。
+            if matches_agnes_video_endpoint(endpoint):
+                video_url = await generate_agnes_video(
+                    endpoint, prompt, base64_img, mime_type, proxy, logger,
+                )
+                video_data = f"url:{video_url}"
+
             # 豆包 API (异步任务模式)
-            if "volces.com" in api_url or "/contents/generations/tasks" in api_url:
+            elif "volces.com" in api_url or "/contents/generations/tasks" in api_url:
                 doubao_content = [{"type": "text", "text": prompt}]
                 if base64_img:
                     doubao_content.append({
@@ -314,6 +323,11 @@ async def process_video_generation(
                 logger.warning(f"[视频] {error_msg}")
                 last_error = error_msg
                 
+        except AgnesVideoPendingError as e:
+            # 任务状态不确定时不换 Key/渠道再次生成，也不把在途任务记成 Key 失效。
+            error = f"{e}；本次未自动切换其他渠道"
+            logger.warning(f"[视频] {error}")
+            return None, error
         except Exception as e:
             logger.warning(f"[视频] 端点 {endpoint_type} 失败: {type(e).__name__}: {e}")
             is_quota_error = "429" in str(e)

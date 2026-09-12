@@ -6,12 +6,14 @@ resolve_provider() 按 REGISTRY 顺序返回首个 matches() 命中的 provider�
 
 - GptImage 必须早于 OpenAICompat —— gpt-image 渠道的 URL 通常就是
   /v1/chat/completions，若先匹配 OpenAI 就会发到错误的端点。
+- AgnesImage 必须早于 Doubao —— 两者都使用 /images/generations，但请求字段不同。
 - TsAi 放在最后 —— 其 URL 特征最宽松（endpoint=image 等），避免误吞其他渠道。
 """
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Type, Union
 
+from .agnes_image import AgnesImageProvider
 from .base import DrawRequest, Endpoint, HttpCall, Provider
 from .doubao import DoubaoProvider
 from .gemini import GeminiProvider
@@ -22,6 +24,7 @@ from .tsai import TsAiProvider
 REGISTRY: List[Type[Provider]] = [
     GptImageProvider,
     OpenAICompatProvider,
+    AgnesImageProvider,
     DoubaoProvider,
     GeminiProvider,
     TsAiProvider,
@@ -45,6 +48,7 @@ __all__ = [
     "Provider",
     "REGISTRY",
     "resolve_provider",
+    "AgnesImageProvider",
     "DoubaoProvider",
     "GeminiProvider",
     "GptImageProvider",
