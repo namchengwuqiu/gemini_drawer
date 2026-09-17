@@ -62,9 +62,10 @@ async def run_drawing(
 
         try:
             call = provider.build(endpoint, request)
+            payload = call.json if call.json is not None else call.data
             logger.info(
                 f"准备向 {endpoint.type} 端点发送请求。URL: {call.safe_url}, "
-                f"Payload: {safe_json_dumps(call.json) if call.json else call.data}"
+                f"Payload: {safe_json_dumps(payload)}"
             )
 
             async with httpx.AsyncClient(

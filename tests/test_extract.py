@@ -12,6 +12,7 @@ from gemini_drawer.utils import (
     extract_video_data,
     get_image_mime_type,
     redact_url,
+    safe_json_dumps,
     truncate_for_log,
 )
 
@@ -249,3 +250,35 @@ def test_truncate_for_log_keeps_short_strings():
 def test_truncate_for_log_elides_long_strings():
     out = truncate_for_log("x" * 500, max_length=100)
     assert "truncated" in out and len(out) < 200
+
+
+# ── 日志安全化 ───────────────────────────────────────────────
+
+
+def test_safe_json_dumps_truncates_base64_in_dict():
+    out = safe_json_dumps({"image": "data:image/png;base64," + "A" * 4000})
+    assert "truncated" in out and len(out) < 500
+
+
+def test_safe_json_dumps_truncates_base64_inside_list():
+    """Agnes 把参考图放在 extra_body.image = [data_url]，列表里的字符串也必须截断。"""
+    data_url = "data:image/jpeg;base64," + "A" * 4000
+    payload = {"model": "m", "extra_body": {"response_format": "url", "image": [data_url]}}
+    out = safe_json_dumps(payload)
+    assert "truncated" in out
+    assert len(out) < 500, f"列表内 base64 未被截断，长度 {len(out)}"
+
+
+def test_safe_json_dumps_truncates_nested_lists():
+    out = safe_json_dumps([{"parts": [{"inline_data": {"data": "B" * 4000}}]}])
+    assert "truncated" in out and len(out) < 500
+
+
+def test_safe_json_dumps_keeps_short_strings_and_scalars():
+    out = safe_json_dumps({"prompt": "短提示词", "n": 2, "ok": True, "none": None})
+    assert out == '{"prompt": "短提示词", "n": 2, "ok": true, "none": null}'
+
+
+def test_safe_json_dumps_truncates_top_level_string():
+    out = safe_json_dumps("C" * 4000)
+    assert "truncated" in out and len(out) < 500
