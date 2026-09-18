@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.11.2
+> **Version:** 1.12.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -215,6 +215,30 @@ pip install -r requirements.txt
     *   指令示例: `/添加渠道 doubao:https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128`
     *   获取 API Key: [火山引擎控制台](https://console.volcengine.com/)
 
+4.  **gpt-image 系列** (按 URL 自动选择形态，详见下节):
+    *   Model: **必须指定**且需包含 `gpt-image`（支持带命名空间前缀，如 `l0veyou/gpt-image-2-16-9`）
+
+### gpt-image 系列（两种形态）🆕
+
+模型名含 `gpt-image` 的渠道由同一个协议接管，具体发往哪里**由你填的 URL 决定**，无需额外开关：
+
+| 渠道 URL | 形态 | 请求 |
+| --- | --- | --- |
+| 含 `/chat/completions` | chat | 按 OpenAI chat 协议原样发到该地址，参考图以 Data URI 放在 `messages` 里 |
+| 其他（图片端点或 API base） | images | 文生图发 `/v1/images/generations`；图生图走 multipart 上传 `/v1/images/edits` |
+
+```text
+# 只暴露 chat 端点的中转站 / 本地 web2api 桥
+/添加渠道 gpt_image2:http://host.docker.internal:4399/v1/chat/completions:gpt-image-2
+
+# OpenAI 官方或支持图片端点的中转：直接填图片端点
+/添加渠道 gpt官方:https://api.openai.com/v1/images/generations:gpt-image-2
+/渠道添加key gpt官方 sk-xxxx
+```
+
+- **chat 形态**：适用于只暴露 `/chat/completions` 的中转站与本地 web2api 桥（这类服务通常没有 `/v1/images/generations`，旧版本会把地址改写成图片端点因而必然失败）。请求体与 OpenAI 兼容协议完全一致，图片从响应的文本、Markdown 图片或 `b64_json` 中提取。默认非流式；需要 SSE 时用 `/渠道设置流式 <渠道名> true` 单独开启。
+- **images 形态**：文生图用 JSON，图生图用 `multipart/form-data` 上传原图。URL 会先归一成 base 再拼接，所以直接填 `/v1/images/generations`、填 `/v1/images/edits`、填 API base（`https://api.example.com` 或 `https://api.example.com/v1`）都能得到正确端点，不会出现 `/v1/images/generations/v1/images/generations`。
+
 ### Agnes Image / Video 2.5 Flash
 
 通过管理员指令添加两个独立渠道，然后分别添加 Agnes API Key：
@@ -333,7 +357,8 @@ pip install -r requirements.txt
 
 2. 在 `providers/__init__.py` 的 `REGISTRY` 中登记。**顺序有语义**：`resolve_provider()`
    返回首个 `matches()` 命中的 provider，判定条件越具体的越要靠前。例如 gpt-image 必须排在
-   OpenAI 兼容之前——它的渠道 URL 通常就是 `/v1/chat/completions`，顺序写反会被抢走。
+   OpenAI 兼容之前——它要按渠道 URL 自行决定走 images 端点还是 chat 端点，顺序写反会被
+   一律当成 chat 处理，images 形态的渠道就拿不到 multipart 图生图。
 
 3. 在 `tests/test_providers.py` 中补上 `matches()` 与 `build()` 的断言。
 
@@ -348,6 +373,14 @@ python -m pytest
 （`test_tool_coordination.py`：同轮 `reply` 过滤、同轮重复媒体调用过滤、
 pending 会话隔离、等待提示随机取值）。测试不参与插件运行时加载，宿主只会导入
 `_manifest.json` 指向的入口模块及其依赖。
+
+### 发版
+
+版本号只需改 `_manifest.json` 的 `version`；`config.py` 的 `version` /
+`config_version` 是配置 schema 的默认值与兜底（WebUI 与配置版本升级用），
+启动日志的版本号由 `utils/version.py` 直接读清单文件得到，不会因为运行时
+`config.toml` 里的旧副本而报错版本。`tests/test_version.py` 会校验三处
+（清单 / schema 默认值 / README 顶部）一致，改漏了会直接失败。
 
 ---
 

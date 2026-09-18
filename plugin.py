@@ -9,6 +9,7 @@ from maibot_sdk.context import PluginContext
 
 from .config import GeminiDrawerConfig
 from .core.managers import data_manager, key_manager
+from .utils.version import get_plugin_version
 
 from .commands.help_command import HelpCommand
 from .commands.draw_commands import (
@@ -363,7 +364,10 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         except Exception:
             pass
 
-        self.ctx.logger.info(f"Gemini Drawer 插件 v{self.config.plugin.version} 已成功以原生 v1.0 架构加载！")
+        # 版本号以 _manifest.json 为准；config 里的 plugin.version 只是宿主
+        # 持久化副本，发版时容易落后（读不到清单时再退回它）
+        plugin_version = get_plugin_version(self.config.plugin.version)
+        self.ctx.logger.info(f"Gemini Drawer 插件 v{plugin_version} 已成功以原生 v1.0 架构加载！")
 
     async def sync_banana_website_prompts(self) -> Tuple[bool, str]:
         """同步大香蕉提示词到独立 banana_prompts.json，不修改 data.json。"""

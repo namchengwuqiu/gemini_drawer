@@ -1,5 +1,27 @@
 # Gemini 绘图插件 更新日志
 
+## v1.12.0 (2026-09-18)
+
+### 新增
+
+- **gpt-image 协议支持 `/v1/chat/completions` 形态**：模型名含 `gpt-image` 的渠道现在按渠道 URL 自动分流，不再一律改写成图片端点。URL 里带 `/chat/completions` 时按 OpenAI chat 协议原样发到该地址（参考图以 Data URI 放进 `messages`），响应沿用既有图片提取；其余 URL 保持 images 形态（文生图 `/v1/images/generations`、图生图 multipart `/v1/images/edits`）。
+
+### 修复
+
+- **修复只暴露 chat 端点的中转站必然失败**：旧实现把 gpt-image 渠道的 URL 无条件改写成 `/v1/images/generations`，而本地 web2api 桥与不少中转站只提供 `/v1/chat/completions`，这类渠道过去必定 404 并直接落到下一个渠道。现在这类渠道按 chat 协议正确发往配置的地址。
+- **修复直接填图片端点时 URL 重复拼接**：旧实现只会剥掉 `/chat/completions`，因此 `https://a.b/v1/images/generations` 会被拼成 `https://a.b/v1/images/generations/v1/images/generations`，等于逼着用户只能填 base 或 chat 地址。现在 URL 先归一成 base 再拼接，`/v1/images/generations`、`/v1/images/edits`、`https://a.b`、`https://a.b/v1` 四种写法都能得到正确端点。
+- **注册表顺序说明更新**：GptImage 仍需早于 OpenAICompat，但理由从「改写到图片端点」变为「由它按 URL 决定形态」，避免含 `gpt-image` 的 images 渠道被 OpenAICompat 一律当成 chat 处理而拿不到 multipart 图生图。
+
+### 变更
+
+- **chat 形态的流式开关**：chat 形态的 gpt-image 渠道默认非流式，可用 `/渠道设置流式 <渠道名> true` 单独开启 SSE；images 形态依旧忽略该开关（images API 不支持 SSE）。
+- **请求体复用**：chat 形态与 OpenAI 兼容协议共用同一个构造函数，两者的请求体逐字一致（有测试固定），避免各写一份后发散。
+- **启动日志的版本号改读清单文件**：`plugin.version` 是宿主持久化的配置副本，发版时容易忘记同步（历史上长期落后，v1.11.2 时期日志还在报 v1.10.3）。新增 `utils/version.py` 的 `get_plugin_version()` 直接读同目录 `_manifest.json`，读不到时再退回配置值。版本号自此只需改清单一处，`tests/test_version.py` 会校验清单、schema 默认值与 README 顶部三处一致。
+
+### 测试
+
+- 净新增 12 项测试（338 → 350，含改写 4 项旧的 gpt-image 用例）：chat 地址原样发送、chat 形态带参考图内联 Data URI、多图标签与 OpenAICompat 请求体逐字一致、反向代理保留前置路径、流式开关、URL 归一化 5 种写法、images 形态 multipart 不受影响，以及一条走完整 pipeline 的端到端用例（chat 渠道 + 参考图 → 从 chat 响应提取图片）。插件完整测试 350 项全部通过。
+
 ## v1.11.2 (2026-09-17)
 
 ### 修复

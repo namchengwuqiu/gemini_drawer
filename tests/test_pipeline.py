@@ -106,6 +106,38 @@ async def test_falls_over_to_second_endpoint(mock_http, fake_keys):
 
 
 @pytest.mark.asyncio
+async def test_gpt_image_chat_url_goes_to_chat_endpoint(mock_http, fake_keys):
+    """本地 web2api 桥只暴露 /chat/completions：gpt-image 渠道必须按 chat 协议
+    原样发到该地址，并从 chat 响应里提取图片，而不是改写到 /v1/images/generations。"""
+    seen = {}
+
+    def handler(request):
+        seen["url"] = str(request.url)
+        seen["content_type"] = request.headers.get("content-type", "")
+        seen["body"] = json.loads(request.content.decode())
+        return httpx.Response(200, json=openai_image_response())
+
+    mock_http["handler"] = handler
+    chat_url = "http://host.docker.internal:4399/v1/chat/completions"
+
+    img, err = await pipeline.run_drawing(
+        DrawRequest(prompt="一只猫", images=[PNG], mime_types=["image/png"]),
+        [endpoint(type_="custom_gpt_image", url=chat_url, key="k1", model="gpt-image-2")],
+        None,
+        _logger(),
+    )
+
+    assert img == [IMG_B64]
+    assert err == ""
+    assert seen["url"] == chat_url
+    assert seen["body"]["model"] == "gpt-image-2"
+    assert seen["body"]["messages"][0]["content"][0] == {"type": "text", "text": "一只猫"}
+    assert seen["body"]["messages"][0]["content"][1]["type"] == "image_url"
+    # 参考图以 Data URI 内联在 JSON 里，不能是 multipart 上传
+    assert seen["content_type"].startswith("application/json")
+
+
+@pytest.mark.asyncio
 async def test_429_force_disables_key(mock_http, fake_keys):
     mock_http["handler"] = lambda r: httpx.Response(429, text="quota exceeded")
 

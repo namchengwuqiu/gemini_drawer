@@ -218,10 +218,16 @@ def test_doubao_ignores_stream_flag():
 
 
 # ── gpt-image ────────────────────────────────────────────────
+#
+# 同一协议两种形态，按渠道 URL 分流：带 /chat/completions 走 chat，
+# 其余（图片端点/base）走 images。
+
+GPT_IMAGE_IMAGES_URL = "https://api.example.com/v1/images/generations"
 
 
-def test_gpt_image_text_uses_generations_endpoint():
-    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="sk-1", model="gpt-image-2")
+def test_gpt_image_images_url_text_uses_generations_endpoint():
+    """直接给图片端点也要能拼对，不能再补一遍 /v1/images/generations。"""
+    ep = Endpoint(type="custom_x", url=GPT_IMAGE_IMAGES_URL, key="sk-1", model="gpt-image-2")
     call = GptImageProvider().build(ep, text_req())
 
     assert call.url == "https://api.example.com/v1/images/generations"
@@ -229,8 +235,8 @@ def test_gpt_image_text_uses_generations_endpoint():
     assert call.files is None
 
 
-def test_gpt_image_with_image_uses_multipart_edits():
-    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="sk-1", model="gpt-image-2")
+def test_gpt_image_images_url_with_image_uses_multipart_edits():
+    ep = Endpoint(type="custom_x", url=GPT_IMAGE_IMAGES_URL, key="sk-1", model="gpt-image-2")
     call = GptImageProvider().build(ep, one_image_req())
 
     assert call.url == "https://api.example.com/v1/images/edits"
@@ -244,14 +250,93 @@ def test_gpt_image_with_image_uses_multipart_edits():
 
 
 def test_gpt_image_jpeg_extension():
-    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="sk-1", model="gpt-image-2")
+    ep = Endpoint(type="custom_x", url=GPT_IMAGE_IMAGES_URL, key="sk-1", model="gpt-image-2")
     req = DrawRequest(prompt="p", images=[JPG], mime_types=["image/jpeg"])
     assert GptImageProvider().build(ep, req).files["image"][0] == "input.jpg"
 
 
-def test_gpt_image_strips_chat_completions_suffix():
-    ep = Endpoint(type="custom_x", url="https://a.b/chat/completions", key="k", model="gpt-image-2")
-    assert GptImageProvider().build(ep, text_req()).url == "https://a.b/v1/images/generations"
+def test_gpt_image_chat_url_stays_on_chat_completions():
+    """本地 web2api 桥只暴露 chat 端点：地址带 /chat/completions 时必须原样发过去，
+    不能再改写成 /v1/images/generations（那正是这类桥没有的端点）。"""
+    ep = Endpoint(
+        type="custom_x",
+        url="http://host.docker.internal:4399/v1/chat/completions",
+        key="sk-1",
+        model="gpt-image-2",
+    )
+    call = GptImageProvider().build(ep, text_req())
+
+    assert call.url == "http://host.docker.internal:4399/v1/chat/completions"
+    assert call.files is None
+    assert call.json["model"] == "gpt-image-2"
+    assert call.json["messages"] == [{"role": "user", "content": [{"type": "text", "text": "一只猫"}]}]
+    assert call.json["stream"] is False
+
+
+def test_gpt_image_chat_url_sends_image_as_data_uri():
+    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="sk-1", model="gpt-image-2")
+    call = GptImageProvider().build(ep, one_image_req())
+
+    assert call.url == OPENAI_URL
+    assert call.files is None
+    content = call.json["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "换成水彩风格"}
+    assert content[1] == {"type": "image_url", "image_url": {"url": PNG_URL}}
+
+
+def test_gpt_image_chat_url_multi_image_matches_openai_compat_payload():
+    """chat 形态与 OpenAI 兼容协议必须发出逐字一致的请求体。"""
+    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="sk-1", model="gpt-image-2")
+    req = two_image_req()
+
+    gpt_call = GptImageProvider().build(ep, req)
+    openai_call = OpenAICompatProvider().build(ep, req)
+
+    assert gpt_call.url == openai_call.url
+    assert gpt_call.json == openai_call.json
+    labels = [part["text"] for part in gpt_call.json["messages"][0]["content"] if part["type"] == "text"]
+    assert labels == ["Prompt: 融合这两张图", "Image 1:", "Image 2:"]
+
+
+def test_gpt_image_chat_url_preserves_relay_prefix():
+    """反向代理保留前置路径（/relay/v1/chat/completions）时不能被剥掉。"""
+    ep = Endpoint(type="custom_x", url="https://a.b/relay/v1/chat/completions", key="k", model="gpt-image-2")
+    assert GptImageProvider().build(ep, text_req()).url == "https://a.b/relay/v1/chat/completions"
+
+
+def test_gpt_image_chat_url_honours_stream_flag():
+    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="k", model="gpt-image-2", stream=True)
+    call = GptImageProvider().build(ep, text_req())
+
+    assert call.stream is True
+    assert call.json["stream"] is True
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://a.b", "https://a.b/v1/images/generations"),
+        ("https://a.b/", "https://a.b/v1/images/generations"),
+        ("https://a.b/v1", "https://a.b/v1/images/generations"),
+        ("https://a.b/v1/images/generations", "https://a.b/v1/images/generations"),
+        ("https://a.b/images/generations", "https://a.b/v1/images/generations"),
+    ],
+)
+def test_gpt_image_images_base_normalization(url, expected):
+    ep = Endpoint(type="custom_x", url=url, key="k", model="gpt-image-2")
+    assert GptImageProvider().build(ep, text_req()).url == expected
+
+
+def test_gpt_image_images_edits_url_maps_to_edits():
+    ep = Endpoint(type="custom_x", url="https://a.b/v1/images/edits", key="k", model="gpt-image-2")
+    assert GptImageProvider().build(ep, one_image_req()).url == "https://a.b/v1/images/edits"
+
+
+def test_gpt_image_model_match_is_case_insensitive_and_prefix_agnostic():
+    """中转站常给模型加命名空间前缀，例如 l0veyou/gpt-image-2-16-9。"""
+    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="k", model="l0veyou/GPT-Image-2-16-9")
+    assert isinstance(resolve_provider(ep), GptImageProvider)
+    assert GptImageProvider().build(ep, text_req()).json["model"] == "l0veyou/GPT-Image-2-16-9"
 
 
 # ── TS-AI ────────────────────────────────────────────────────
