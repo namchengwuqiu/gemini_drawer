@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.12.0
+> **Version:** 1.13.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -90,6 +90,8 @@ pip install -r requirements.txt
 | `/渠道列表`                              | **[新]** 查看所有渠道的启用/禁用状态及流式设置。                                            |
 | `/渠道删除key {渠道} {序号}`             | **[新]** 删除指定渠道的指定 Key。                                                           |
 | `/渠道设置视频 {名称} {true\|false}`     | **[新]** 设置渠道是否用于视频生成。                                                         |
+| `/渠道设置协议 {名称} {协议\|自动}`      | **[新]** 显式指定渠道的请求协议，不再靠 URL / 模型名猜；`/渠道列表` 会显示每个渠道实际走的协议。 |
+| `/渠道设置输出格式 {名称} {url\|b64_json\|默认}` | **[新]** 为 `/images/generations` 形态渠道设置 `response_format` 覆盖。               |
 
 **注**：管理员指令在 `/基咪绘图帮助` 中仅对管理员可见。
 
@@ -182,7 +184,7 @@ pip install -r requirements.txt
 *   `selfie.base_prompt` (字符串): 人设身份与画风约束。默认要求严格保持底图人物的脸、五官、发色、发型、瞳色、体型特征和原始画风，只改变用户指定的动作、服装、表情、镜头与场景。
 *   `selfie.random_actions` (数组): 随机场景/动作列表。
 *   `selfie.polish_enable` (布尔值, 默认 `true`): 是否启用提示词润色 🆕。
-*   `selfie.polish_model` (字符串, 默认 `"replyer"`): 润色使用的文本模型名称 🆕。
+*   `selfie.polish_model` (字符串, 默认 `"replyer"`): 润色使用的模型任务配置名（如 `replyer`、`utils`）🆕。
 *   `selfie.polish_template` (字符串): 润色提示词模板。必须保留 `{original_prompt}`；默认模板禁止润色模型改变人物身份或在动漫与写实风格之间转换。
 
 ## 📸 自拍与照片生成
@@ -260,6 +262,48 @@ pip install -r requirements.txt
 
 协议参考：[图片文档](https://www.agnes-ai.com/zh-Hans/docs/agnes-image-25-flash)、[视频文档](https://www.agnes-ai.com/zh-Hans/docs/agnes-video-25-flash)。
 
+### 渠道协议（protocol）🆕
+
+每个渠道用哪种请求格式，由 `protocol` 字段决定。可选值固定为市面上常见的几种：
+
+| 协议 id | 适用 | 说明 |
+| :--- | :--- | :--- |
+| `openai_chat` | 绘图 / 视频 | OpenAI `/chat/completions` 兼容，参考图以 Data URI 放进 messages（lmarena、web2api 等中转） |
+| `gpt_image` | 绘图 | OpenAI gpt-image 系列，按 URL 自动选 `/images/*` 或 `/chat/completions` 形态 |
+| `images_json` | 绘图 | 豆包 seedream 及同协议中转：`/images/generations`，JSON 带 `image` / `response_format` |
+| `gemini` | 绘图 / 视频 | Google Gemini 原生 `generateContent` |
+| `agnes_image` | 绘图 | Agnes Image，参数放在 `extra_body` |
+| `tsai` | 绘图 | TS-AI 建任务 + 轮询 |
+| `seedance_video` | 视频 | 豆包 seedance：`/contents/generations/tasks` 建任务 + 轮询 |
+| `agnes_video` | 视频 | Agnes Video：`/v1/videos` 建任务 + 轮询 |
+| `tsai_video` | 视频 | TS-AI 视频：`?endpoint=video_generation` |
+
+```text
+/渠道设置协议 gpt_image2 images_json   # 显式指定
+/渠道设置协议 gpt_image2 自动          # 清除，回到自动识别
+/渠道列表                              # 每个渠道下方显示「协议: xxx」或「协议: xxx(自动)」
+```
+
+- **没写 `protocol` 的老渠道**照旧按 URL / 模型名自动识别，行为与之前完全一致；`/渠道列表` 会把识别结果标成 `(自动)`。识别不到的渠道会提示用 `/渠道设置协议` 指定。
+- **显式指定后不再猜**：例如把 `grok-imagine-image-2.0` 配在 `/v1/images/generations` 上，以前只能靠"模型名不含 gpt-image 且不是 agnes"才落到豆包协议；现在直接写 `images_json` 即可，改模型名也不会串到别的协议。
+- 常见别名会自动归一：`doubao` / `seedream` → `images_json`，`openai` → `openai_chat`，`gpt-image` → `gpt_image`，`seedance` → `seedance_video`，`agnes` → `agnes_image`。
+- 协议必须与渠道类型匹配：绘图渠道只能设绘图协议，视频渠道（`/渠道设置视频 ... true`）只能设视频协议；`openai_chat` 和 `gemini` 两边通用。
+- 也可以直接在 `data.json` 的渠道条目里加 `"protocol": "images_json"`；非法值会被当作未设置并在日志里提醒。
+- `/添加渠道` 语法不变，仍按 URL 形态做基本校验；添加后如需固定协议再执行一次 `/渠道设置协议`。
+
+### 图片渠道输出格式（response_format）
+
+`/images/generations` 形态的图片渠道（豆包及同协议的中转）默认请求 `response_format: "url"`。有些中转只允许 `b64_json`，否则返回 `400 private_media_required`（典型场景：把 `grok-imagine-image-2.0` 之类的模型配在 `/v1/images/generations` 地址上）。可以按渠道单独覆盖：
+
+```text
+/渠道设置输出格式 gpt_image2 b64_json
+/渠道设置输出格式 gpt_image2 默认      # 清除覆盖，回到协议默认值
+```
+
+- 只对走豆包协议的 `/images/generations` 渠道生效；`gpt-image` 系列和 Agnes 图片渠道有各自的协议，不读取该项。
+- 设置后 `/渠道列表` 会显示 `[b64_json]` 标签；`b64_json` 响应会按原有的 `data[].b64_json` 解析并直接发图。
+- 也可以直接在 `data.json` 的渠道条目里加 `"response_format": "b64_json"`。
+
 ### 流式请求配置
 
 某些 API 端点需要使用流式请求（SSE）来获取响应。插件支持为每个自定义渠道单独配置是否使用流式请求。
@@ -332,12 +376,13 @@ pip install -r requirements.txt
 
 ### 如何新增一种渠道类型？
 
-只需加一个文件并登记一行，不需要改动命令或 Action：
+只需加一个文件并登记两行，不需要改动命令或 Action：
 
 1. 在 `providers/` 下新建模块，继承 `Provider` 并实现两个方法：
 
    ```python
    class MyProvider(Provider):
+       protocol = "my_api"              # 规范协议 id，必须同时登记到 core/protocols.py
        name = "my_api"
        supports_stream = False          # 该协议是否走本插件的 SSE 解析路径
 
@@ -360,7 +405,12 @@ pip install -r requirements.txt
    OpenAI 兼容之前——它要按渠道 URL 自行决定走 images 端点还是 chat 端点，顺序写反会被
    一律当成 chat 处理，images 形态的渠道就拿不到 multipart 图生图。
 
-3. 在 `tests/test_providers.py` 中补上 `matches()` 与 `build()` 的断言。
+3. 在 `core/protocols.py` 的 `IMAGE_PROTOCOLS`（视频则 `VIDEO_PROTOCOLS`）登记同名协议 id 和一句说明，
+   需要的话在 `PROTOCOL_ALIASES` 加别名。`providers/__init__.py` 导入时会断言 provider 的 `protocol`
+   与 `IMAGE_PROTOCOLS` 完全一致，漏登记会直接报错。用户之后即可用 `/渠道设置协议 <渠道> my_api`
+   显式指定，不依赖 `matches()` 的启发式。
+
+4. 在 `tests/test_providers.py` 中补上 `matches()` 与 `build()` 的断言。
 
 ### 测试
 

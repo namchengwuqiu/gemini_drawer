@@ -14,6 +14,9 @@ Gemini Drawer 管理员命令模块
 - ToggleChannelCommand: 启用或禁用指定渠道 (/启用渠道, /禁用渠道)
 - ListChannelsCommand: 查看所有渠道状态 (/渠道列表)
 - ChannelSetStreamCommand: 设置渠道是否使用流式请求 (/渠道设置流式)
+- ChannelSetVideoCommand: 设置渠道是否用于视频生成 (/渠道设置视频)
+- ChannelSetResponseFormatCommand: 设置渠道输出格式 url/b64_json (/渠道设置输出格式)
+- ChannelSetProtocolCommand: 显式指定渠道请求协议 (/渠道设置协议)
 
 提示词管理命令：
 - AddPromptCommand: 添加绘图提示词预设 (/添加提示词)
@@ -23,13 +26,17 @@ Gemini Drawer 管理员命令模块
 所有命令均继承自 BaseAdminCommand，自动进行管理员权限验证。
 """
 import re
-from typing import Tuple, Optional
+from typing import Any, Tuple, Optional
 from pathlib import Path
 from maibot_sdk.compat.base import ReplyContentType
 from .base_commands import BaseAdminCommand
 from ..core.agnes_video import matches_agnes_video_endpoint
 from ..core.managers import key_manager, data_manager
-from ..providers import AgnesImageProvider, Endpoint
+from ..core.protocols import (
+    IMAGE_PROTOCOLS, PROTOCOL_AUTO_WORDS, VIDEO_PROTOCOLS,
+    normalize_protocol, protocol_choices_text,
+)
+from ..providers import AgnesImageProvider, Endpoint, describe_protocol
 from ..utils import logger, save_config_file
 
 class ChannelAddKeyCommand(BaseAdminCommand):
@@ -517,6 +524,25 @@ class ToggleChannelCommand(BaseAdminCommand):
         await self.send_text(f"✅ 渠道 `{name}` 已{action}！")
         return True, "操作成功", True
 
+def channel_protocol_summary(info: Any) -> str:
+    """渠道在 /渠道列表 里的协议标签。
+
+    显式指定 -> ``协议: xxx``；自动识别 -> ``协议: xxx(自动)``；识别不到 -> 提醒用 /渠道设置协议。
+    """
+    if isinstance(info, str):
+        info = {"url": info.rsplit(":", 1)[0]} if ":" in info else {"url": info}
+    if not isinstance(info, dict):
+        return "⚠️ 协议未识别"
+    if info.get("is_video"):
+        from ..core.video import describe_video_protocol
+        protocol, explicit = describe_video_protocol(info)
+    else:
+        protocol, explicit = describe_protocol(Endpoint.from_dict({"type": "", **info}))
+    if protocol is None:
+        return "⚠️ 协议未识别，请用 /渠道设置协议 指定"
+    return f"协议: {protocol}" if explicit else f"协议: {protocol}(自动)"
+
+
 class ListChannelsCommand(BaseAdminCommand):
     command_name: str = "gemini_list_channels"
     command_description: str = "查看所有渠道状态"
@@ -536,10 +562,15 @@ class ListChannelsCommand(BaseAdminCommand):
                 enabled = info.get("enabled", True) if isinstance(info, dict) else True
                 stream = info.get("stream", False) if isinstance(info, dict) else False
                 is_video = info.get("is_video", False) if isinstance(info, dict) else False
+                response_format = info.get("response_format") if isinstance(info, dict) else None
                 stream_info = " [流式]" if stream else ""
                 video_info = " [视频]" if is_video else ""
+                format_info = f" [{response_format}]" if response_format else ""
                 model_info = f" ({info['model']})" if isinstance(info, dict) and info.get("model") else ""
-                custom_lines.append(f"{'✅' if enabled else '❌'} **{name}**{model_info}{stream_info}{video_info}")
+                custom_lines.append(
+                    f"{'✅' if enabled else '❌'} **{name}**{model_info}{stream_info}{video_info}{format_info}\n"
+                    f"　　{channel_protocol_summary(info)}"
+                )
             custom_content = [(ReplyContentType.TEXT, "\n".join(custom_lines))]
             nodes_to_send.append(("1", bot_name, custom_content))
         else:
@@ -607,6 +638,130 @@ class ChannelSetVideoCommand(BaseAdminCommand):
         channel_info["is_video"] = video_value
         data_manager.update_channel(channel_name, channel_info)
         await self.send_text(f"✅ 渠道 `{channel_name}` 视频模式已{'启用' if video_value else '禁用'}！")
+        return True, "设置成功", True
+
+
+class ChannelSetProtocolCommand(BaseAdminCommand):
+    """显式指定渠道的请求协议，不再靠 URL / 模型名猜。
+
+    取值见 core/protocols.py；填 ``自动`` 清除显式设置、回到自动识别。
+    """
+    command_name: str = "gemini_channel_set_protocol"
+    command_description: str = "设置渠道请求协议 (格式: /渠道设置协议 <渠道> <协议|自动>)"
+    command_pattern: str = r"^/渠道设置协议"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        content = self.message.raw_message.replace("/渠道设置协议", "", 1).strip()
+        parts = content.split()
+        if len(parts) != 2:
+            await self.send_text(
+                "❌ 参数错误！格式：`/渠道设置协议 <渠道> <协议|自动>`\n\n"
+                f"绘图协议：\n{protocol_choices_text(video=False)}\n\n"
+                f"视频协议：\n{protocol_choices_text(video=True)}\n\n"
+                "填 `自动` 清除显式设置，回到按 URL / 模型名自动识别。"
+            )
+            return True, "参数不足", True
+
+        channel_name, protocol_str = parts
+        channels = data_manager.get_channels()
+        if channel_name not in channels:
+            await self.send_text(f"❌ 未找到渠道 `{channel_name}`。")
+            return True, "渠道不存在", True
+
+        channel_info = channels[channel_name]
+        if isinstance(channel_info, str):
+            url, key = channel_info.rsplit(":", 1)
+            channel_info = {"url": url, "key": key}
+
+        if protocol_str.strip().lower() in PROTOCOL_AUTO_WORDS:
+            channel_info.pop("protocol", None)
+            data_manager.update_channel(channel_name, channel_info)
+            await self.send_text(
+                f"✅ 渠道 `{channel_name}` 已改回自动识别。当前 {channel_protocol_summary(channel_info)}"
+            )
+            return True, "设置成功", True
+
+        protocol = normalize_protocol(protocol_str)
+        if protocol is None:
+            await self.send_text(
+                f"❌ 不支持的协议 `{protocol_str}`。\n绘图可选：{' / '.join(IMAGE_PROTOCOLS)}\n"
+                f"视频可选：{' / '.join(VIDEO_PROTOCOLS)}"
+            )
+            return True, "协议不支持", True
+
+        is_video = bool(channel_info.get("is_video", False))
+        allowed = VIDEO_PROTOCOLS if is_video else IMAGE_PROTOCOLS
+        if protocol not in allowed:
+            kind = "视频" if is_video else "绘图"
+            await self.send_text(
+                f"❌ `{protocol}` 不是{kind}协议，渠道 `{channel_name}` 是{kind}渠道。\n"
+                f"{kind}可选：{' / '.join(allowed)}。如需切换渠道类型请先用 /渠道设置视频。"
+            )
+            return True, "协议类型不匹配", True
+
+        channel_info["protocol"] = protocol
+        data_manager.update_channel(channel_name, channel_info)
+        await self.send_text(
+            f"✅ 渠道 `{channel_name}` 协议已设置为 `{protocol}`：{allowed[protocol]}"
+        )
+        return True, "设置成功", True
+
+
+#: /渠道设置输出格式 允许的取值；"默认" 表示清除覆盖、回到协议默认值
+RESPONSE_FORMAT_CHOICES = ("url", "b64_json")
+RESPONSE_FORMAT_RESET_WORDS = ("默认", "default", "reset", "清除", "none")
+
+
+class ChannelSetResponseFormatCommand(BaseAdminCommand):
+    """设置 /images/generations 形态渠道的输出格式。
+
+    同一图片协议下，不同中转对 ``response_format`` 的要求不同：豆包官方接受
+    ``url``，某些中转（例如 grok-imagine 私有媒体中转）只接受 ``b64_json``，
+    否则返回 400 ``private_media_required``。该命令把选择写进渠道配置，
+    由 ``Endpoint.response_format`` 透传给 provider。
+    """
+    command_name: str = "gemini_channel_set_response_format"
+    command_description: str = "设置渠道输出格式 (格式: /渠道设置输出格式 <渠道> <url|b64_json|默认>)"
+    command_pattern: str = r"^/渠道设置输出格式"
+
+    async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
+        content = self.message.raw_message.replace("/渠道设置输出格式", "", 1).strip()
+        parts = content.split()
+        if len(parts) != 2:
+            await self.send_text(
+                "❌ 参数错误！格式：`/渠道设置输出格式 <渠道> <url|b64_json|默认>`\n"
+                "仅对 /images/generations 形态的图片渠道生效；填 `默认` 可清除覆盖。"
+            )
+            return True, "参数不足", True
+
+        channel_name, format_str = parts
+        format_value = format_str.strip().lower()
+
+        channels = data_manager.get_channels()
+        if channel_name not in channels:
+            await self.send_text(f"❌ 未找到渠道 `{channel_name}`。")
+            return True, "渠道不存在", True
+
+        channel_info = channels[channel_name]
+        if isinstance(channel_info, str):
+            url, key = channel_info.rsplit(":", 1)
+            channel_info = {"url": url, "key": key}
+
+        if format_value in RESPONSE_FORMAT_RESET_WORDS:
+            channel_info.pop("response_format", None)
+            data_manager.update_channel(channel_name, channel_info)
+            await self.send_text(f"✅ 渠道 `{channel_name}` 输出格式已恢复为协议默认值。")
+            return True, "设置成功", True
+
+        if format_value not in RESPONSE_FORMAT_CHOICES:
+            await self.send_text(
+                f"❌ 不支持的输出格式 `{format_str}`，可选：{' / '.join(RESPONSE_FORMAT_CHOICES)}，或 `默认`。"
+            )
+            return True, "格式不支持", True
+
+        channel_info["response_format"] = format_value
+        data_manager.update_channel(channel_name, channel_info)
+        await self.send_text(f"✅ 渠道 `{channel_name}` 输出格式已设置为 `{format_value}`。")
         return True, "设置成功", True
 
 

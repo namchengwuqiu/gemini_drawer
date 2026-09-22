@@ -14,7 +14,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 import httpx
 
 from .managers import key_manager
-from ..providers import DrawRequest, Endpoint, resolve_provider
+from ..providers import DrawRequest, Endpoint, describe_protocol, resolve_provider
+from .protocols import normalize_protocol
 from ..utils import redact_url, safe_json_dumps
 
 #: lmarena 是无 Key 的中转，不参与 Key 健康度记账
@@ -48,16 +49,23 @@ async def run_drawing(
     last_error = ""
 
     for i, endpoint in enumerate(endpoint_list):
+        if endpoint.protocol and normalize_protocol(endpoint.protocol) is None:
+            logger.warning(
+                f"端点 {endpoint.type} 配置的协议 '{endpoint.protocol}' 无法识别，改为自动识别。"
+                f"可用 /渠道设置协议 重新设置。"
+            )
+        protocol, explicit = describe_protocol(endpoint)
         provider = resolve_provider(endpoint)
         if provider is None:
             logger.warning(
-                f"无法识别的API地址格式: {redact_url(endpoint.url)}，跳过。请检查配置。"
+                f"无法识别的API地址格式: {redact_url(endpoint.url)}，跳过。"
+                f"请检查配置，或用 /渠道设置协议 {endpoint.type.removeprefix('custom_')} <协议> 显式指定。"
             )
             continue
 
         logger.info(
             f"尝试第 {i + 1}/{len(endpoint_list)} 个端点: {endpoint.type} "
-            f"({redact_url(endpoint.url)}) [协议: {provider.name}]"
+            f"({redact_url(endpoint.url)}) [协议: {protocol}{'' if explicit else '(自动)'}]"
         )
 
         try:

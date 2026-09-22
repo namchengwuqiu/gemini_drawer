@@ -1,5 +1,43 @@
 # Gemini 绘图插件 更新日志
 
+## v1.13.0 (2026-09-22)
+
+### 新增
+
+- **渠道显式协议 `protocol`**：渠道用哪种请求格式不再只靠 URL / 模型名猜。新增 `core/protocols.py` 作为协议目录，绘图协议 `openai_chat` / `gpt_image` / `images_json` / `gemini` / `agnes_image` / `tsai`，视频协议 `openai_chat` / `seedance_video` / `agnes_video` / `tsai_video` / `gemini`，并支持 `doubao`、`openai`、`seedance` 等常见别名。`Endpoint` 新增 `protocol` 字段，`resolve_provider()` 与视频侧 `describe_video_protocol()` 都是"显式协议优先、未设置或非法时回退自动识别"。没写 `protocol` 的老渠道行为与之前完全一致。
+- **`/渠道设置协议 <渠道> <协议|自动>`**：为单个渠道显式指定协议，填 `自动` 清除；会校验协议与渠道类型（绘图 / 视频）是否匹配，参数缺失时列出全部可选协议。
+- **`/渠道列表` 显示协议**：每个渠道下方显示「协议: xxx」（显式）或「协议: xxx(自动)」（自动识别），识别不到的渠道提示用 `/渠道设置协议` 指定。绘图与视频的尝试日志同样带上协议及来源。
+
+### 重构
+
+- 各 provider 类增加 `protocol` 属性，注册表额外导出 `PROTOCOL_PROVIDERS` / `detect_provider()` / `describe_protocol()`，并在导入时断言与协议目录一致。
+- `core/video.py` 的 if/elif URL 判断链收敛为 `detect_video_protocol()`，分支改按协议 id 判定，判定顺序不变。
+- `core/endpoints.py` 的渠道字段元组改为 `ChannelFields` NamedTuple，`protocol` 在端点构建时即归一为规范 id。
+
+### 修复
+
+- **修复 `/images/generations` 中转返回 400 `private_media_required`**：`grok-imagine-image-2.0` 这类模型名不含 `gpt-image`、也不是 `agnes-image-` 系列，配在 `/v1/images/generations` 地址上会按注册表顺序落到豆包协议，而豆包协议把 `response_format` 写死为 `url`；部分中转（如 welfare.darkforger.com）只接受 `b64_json`，于是每次请求都被拒绝。现在 `Endpoint` 新增可选的 `response_format` 字段，由渠道配置透传到豆包协议；未配置的渠道行为不变，仍然发 `url`。响应解析与发图路径本来就支持 `data[].b64_json`，无需其他改动。
+
+### 新增
+
+- **`/渠道设置输出格式 <渠道> <url|b64_json|默认>`**：为单个渠道设置 `response_format` 覆盖，填 `默认` 清除覆盖回到协议默认值。`/渠道列表` 会在设置了覆盖的渠道后显示 `[b64_json]` 之类的标签。
+
+### 测试
+
+- 新增协议目录归一化与别名、视频协议识别、显式协议覆盖 / 回退、端点构建透传、`/渠道设置协议` 命令与 `/渠道列表` 协议标签测试。
+- 新增豆包协议输出格式默认值与渠道级覆盖、端点构建透传（绘图 / 视频）、以及 `/渠道设置输出格式` 命令的参数校验与持久化测试。
+
+## v1.12.1 (2026-09-19)
+
+### 修复
+
+- **修复自拍提示词润色在新版 SDK 下报“未找到名为 replyer 的模型”**：`selfie.polish_model` 的默认值 `replyer` 实际上是 MaiBot 的**模型任务配置名**，不是具体模型名。宿主在 2026 年 9 月 13 日的模型路由更新（提交 `008019c2a6`）后，SDK 的 `model` 参数改为表示具体模型，任务名必须单独通过 `task_name` 传递；插件原来把 `replyer` 传给 `model`，宿主便会尝试查找名为 `replyer` 的具体模型并失败。现在新版 SDK 显式使用 `task_name=replyer`，同时保留旧 SDK 不接受 `task_name` 时回退到 `model=replyer` 的兼容路径。
+- **配置文案修正**：`selfie.polish_model` 改称“润色任务”，避免把任务配置名误解成具体模型名。
+
+### 测试
+
+- 新增新版 SDK 的 `task_name` 调用断言，以及旧 SDK 的 `model` 参数兼容回退测试；插件完整测试 360 项通过。
+
 ## v1.12.0 (2026-09-18)
 
 ### 新增

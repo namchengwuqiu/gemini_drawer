@@ -12,8 +12,9 @@ resolve_provider() 按 REGISTRY 顺序返回首个 matches() 命中的 provider�
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
+from ..core.protocols import IMAGE_PROTOCOLS, normalize_protocol
 from .agnes_image import AgnesImageProvider
 from .base import DrawRequest, Endpoint, HttpCall, Provider
 from .doubao import DoubaoProvider
@@ -32,14 +33,48 @@ REGISTRY: List[Type[Provider]] = [
 ]
 
 
-def resolve_provider(endpoint: Union[Endpoint, Dict[str, Any]]) -> Optional[Provider]:
-    """返回处理该端点的 provider 实例；无人认领时返回 None。"""
-    if not isinstance(endpoint, Endpoint):
-        endpoint = Endpoint.from_dict(endpoint)
+#: 协议 id -> provider 类；键必须与 core/protocols.py 的 IMAGE_PROTOCOLS 一一对应
+PROTOCOL_PROVIDERS: Dict[str, Type[Provider]] = {cls.protocol: cls for cls in REGISTRY}
+assert set(PROTOCOL_PROVIDERS) == set(IMAGE_PROTOCOLS), (
+    f"providers 与 IMAGE_PROTOCOLS 不一致: {set(PROTOCOL_PROVIDERS) ^ set(IMAGE_PROTOCOLS)}"
+)
+
+
+def _as_endpoint(endpoint: Union[Endpoint, Dict[str, Any]]) -> Endpoint:
+    return endpoint if isinstance(endpoint, Endpoint) else Endpoint.from_dict(endpoint)
+
+
+def detect_provider(endpoint: Union[Endpoint, Dict[str, Any]]) -> Optional[Type[Provider]]:
+    """按 URL / 模型名自动识别 provider 类（忽略显式 protocol）；无人认领返回 None。"""
+    endpoint = _as_endpoint(endpoint)
     for provider_cls in REGISTRY:
         if provider_cls.matches(endpoint):
-            return provider_cls()
+            return provider_cls
     return None
+
+
+def describe_protocol(endpoint: Union[Endpoint, Dict[str, Any]]) -> Tuple[Optional[str], bool]:
+    """返回 (协议 id, 是否显式指定)。
+
+    显式 protocol 合法时直接采用；不合法或未指定时回退自动识别，识别不到返回 (None, False)。
+    """
+    endpoint = _as_endpoint(endpoint)
+    explicit = normalize_protocol(endpoint.protocol)
+    if explicit in PROTOCOL_PROVIDERS:
+        return explicit, True
+    detected = detect_provider(endpoint)
+    return (detected.protocol if detected else None), False
+
+
+def resolve_provider(endpoint: Union[Endpoint, Dict[str, Any]]) -> Optional[Provider]:
+    """返回处理该端点的 provider 实例；无人认领时返回 None。
+
+    渠道显式写了 protocol 就按 protocol 取，不再猜；否则按 REGISTRY 顺序自动识别。
+    """
+    protocol, _ = describe_protocol(endpoint)
+    if protocol is None:
+        return None
+    return PROTOCOL_PROVIDERS[protocol]()
 
 
 __all__ = [
@@ -48,6 +83,9 @@ __all__ = [
     "HttpCall",
     "Provider",
     "REGISTRY",
+    "PROTOCOL_PROVIDERS",
+    "describe_protocol",
+    "detect_provider",
     "resolve_provider",
     "AgnesImageProvider",
     "DoubaoProvider",

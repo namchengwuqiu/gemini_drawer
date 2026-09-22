@@ -10,6 +10,7 @@ DEFAULT_MODEL = "agnes-image-2.5-flash"
 
 
 class AgnesImageProvider(Provider):
+    protocol = "agnes_image"
     name = "agnes_image"
     supports_stream = False
     timeout = 180.0

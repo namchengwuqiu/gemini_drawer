@@ -98,6 +98,49 @@ def test_legacy_url_colon_key_string_channel(wire):
     }]
 
 
+def test_channel_response_format_is_passed_through(wire):
+    """渠道配置里的 response_format 要跟着端点走到 provider；未配置的渠道不带该键。"""
+    wire(
+        {
+            "grok": {"url": "https://x.example/v1/images/generations", "model": "grok-imagine-image-2.0",
+                     "response_format": "b64_json"},
+            "plain": {"url": "https://ark.example/api/v3/images/generations", "model": "doubao-x"},
+            "blank": {"url": "https://ark.example/api/v3/images/generations", "response_format": "  "},
+        },
+        [key("k-grok", "grok"), key("k-plain", "plain"), key("k-blank", "blank")],
+    )
+    got = {e["type"]: e for e in ep_mod.build_drawing_endpoints()}
+    assert got["custom_grok"]["response_format"] == "b64_json"
+    assert "response_format" not in got["custom_plain"]
+    assert "response_format" not in got["custom_blank"]
+
+
+def test_channel_protocol_is_normalized_and_passed_through(wire):
+    """protocol 在端点构建时就归一成规范 id；非法值当作未设置。"""
+    wire(
+        {
+            "a": {"url": OPENAI, "model": "m", "protocol": "Doubao"},
+            "b": {"url": OPENAI, "model": "m", "protocol": "gpt_image"},
+            "c": {"url": OPENAI, "model": "m", "protocol": "nonsense"},
+            "d": {"url": OPENAI, "model": "m"},
+        },
+        [key("ka", "a"), key("kb", "b"), key("kc", "c"), key("kd", "d")],
+    )
+    got = {e["type"]: e for e in ep_mod.build_drawing_endpoints()}
+    assert got["custom_a"]["protocol"] == "images_json"
+    assert got["custom_b"]["protocol"] == "gpt_image"
+    assert "protocol" not in got["custom_c"]
+    assert "protocol" not in got["custom_d"]
+
+
+def test_video_channel_response_format_is_passed_through(wire):
+    wire({"vid": {"url": VIDEO, "is_video": True, "key": "inline", "response_format": "url"}},
+         [key("managed", "vid")])
+    got = ep_mod.build_video_endpoints()
+    assert [e["key"] for e in got] == ["inline", "managed"]
+    assert all(e["response_format"] == "url" for e in got)
+
+
 def test_untyped_key_is_attributed_by_prefix(wire):
     """早期 keys.json 没有 type 字段，按 sk- 前缀猜归属。"""
     wire({"bailili": {"url": OPENAI, "model": "m"}, "google": {"url": GEMINI}},

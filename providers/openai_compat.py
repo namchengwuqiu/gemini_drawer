@@ -55,6 +55,7 @@ def build_chat_completions_call(
 
 
 class OpenAICompatProvider(Provider):
+    protocol = "openai_chat"
     name = "openai_compat"
     supports_stream = True
 

@@ -32,6 +32,11 @@ class Endpoint:
     key: str = ""
     model: Optional[str] = None
     stream: bool = False
+    #: 渠道级输出格式覆盖（如 "url" / "b64_json"）；None 表示沿用 provider 默认值。
+    #: 用于 /images/generations 形态的中转：同一协议下不同上游对输出格式的要求不同。
+    response_format: Optional[str] = None
+    #: 渠道显式指定的协议 id（见 core/protocols.py）；None 表示按 URL / 模型名自动识别。
+    protocol: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Endpoint":
@@ -42,6 +47,8 @@ class Endpoint:
             key=data.get("key") or "",
             model=data.get("model"),
             stream=bool(data.get("stream", False)),
+            response_format=data.get("response_format") or None,
+            protocol=data.get("protocol") or None,
         )
 
     @property
@@ -109,6 +116,8 @@ class HttpCall:
 class Provider(ABC):
     """所有渠道协议适配器的基类。"""
 
+    #: 规范协议 id（见 core/protocols.py）；显式 protocol 路由与 /渠道列表 展示都用它
+    protocol: str = ""
     name: str = ""
     #: 该协议是否支持本插件的 SSE 流式解析路径。为 False 时忽略渠道的 stream 开关。
     supports_stream: bool = False

@@ -20,6 +20,7 @@ _URL_MARKERS = ("tavr.top", "tsart.lat", "endpoint=image")
 
 
 class TsAiProvider(Provider):
+    protocol = "tsai"
     name = "tsai"
     supports_stream = False
     timeout = 60.0

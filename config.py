@@ -31,8 +31,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.12.0", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.12.0", description="配置版本",
+    version: str = Field(default="1.13.0", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.13.0", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -139,8 +139,8 @@ class SelfieConfig(PluginConfigBase):
     )
     polish_model: str = Field(
         default="replyer",
-        description="润色使用的文本模型名称(默认replyer不需要更改)",
-        json_schema_extra=ui("润色模型", "使用 MaiBot 中已配置的文本模型名称，默认 replyer 通常无需修改。"),
+        description="润色使用的任务配置名（默认 replyer）",
+        json_schema_extra=ui("润色任务", "使用 MaiBot 中已配置的模型任务名，默认 replyer 通常无需修改。"),
     )
     polish_template: str = Field(
         default=DEFAULT_SELFIE_POLISH_TEMPLATE,

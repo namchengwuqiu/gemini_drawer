@@ -284,13 +284,26 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
 
             template = self.get_config(self.polish_template_key, "") or self.polish_template_default
             logger.info(f"正在润色{self.feature_name}提示词: {original_prompt}")
-            result = await self.ctx.llm.generate(
-                prompt=template.format(original_prompt=original_prompt),
-                model=model_name,
-                request_type=self.polish_request_type,
-                temperature=0.5,
-                max_tokens=512,
-            )
+            generate_kwargs = {
+                "prompt": template.format(original_prompt=original_prompt),
+                "task_name": model_name,
+                "request_type": self.polish_request_type,
+                "temperature": 0.5,
+                "max_tokens": 512,
+            }
+            try:
+                # SDK 2.8+ 将 model 定义为具体模型名，任务配置名（如 replyer）
+                # 必须通过 task_name 传递；否则宿主会把 replyer 当成具体模型查找。
+                result = await self.ctx.llm.generate(**generate_kwargs)
+            except TypeError as exc:
+                # 兼容仍使用旧 SDK、且 generate() 不接受 task_name 的宿主：
+                # 旧版的 model 参数语义就是任务名。
+                if "task_name" not in str(exc):
+                    raise
+                legacy_kwargs = dict(generate_kwargs)
+                legacy_kwargs.pop("task_name", None)
+                legacy_kwargs["model"] = model_name
+                result = await self.ctx.llm.generate(**legacy_kwargs)
 
             if result.get("success") and result.get("response"):
                 final_prompt = f"{self.polish_prefix}：{result['response'].strip()}"

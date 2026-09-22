@@ -23,6 +23,7 @@ from .commands.admin_commands import (
     AddPromptCommand, DeletePromptCommand, ViewPromptCommand, ModifyPromptCommand,
     AddChannelCommand, DeleteChannelCommand, ToggleChannelCommand,
     ListChannelsCommand, ChannelSetStreamCommand, ChannelSetVideoCommand,
+    ChannelSetResponseFormatCommand, ChannelSetProtocolCommand,
     SyncBananaPromptsCommand, ToggleBananaRestrictedCommand, BananaPromptSearchCommand
 )
 from .commands.actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoAction
@@ -849,6 +850,14 @@ class GeminiDrawerPlugin(MaiBotPlugin):
     @Command("gemini_channel_set_video", description=ChannelSetVideoCommand.command_description, pattern=ChannelSetVideoCommand.command_pattern)
     async def handle_channel_set_video(self, stream_id: str = "", message: Any = None, **kwargs: Any):
         return await self._run_command(ChannelSetVideoCommand, stream_id, message, kwargs.get("matched_groups"))
+
+    @Command("gemini_channel_set_response_format", description=ChannelSetResponseFormatCommand.command_description, pattern=ChannelSetResponseFormatCommand.command_pattern)
+    async def handle_channel_set_response_format(self, stream_id: str = "", message: Any = None, **kwargs: Any):
+        return await self._run_command(ChannelSetResponseFormatCommand, stream_id, message, kwargs.get("matched_groups"))
+
+    @Command("gemini_channel_set_protocol", description=ChannelSetProtocolCommand.command_description, pattern=ChannelSetProtocolCommand.command_pattern)
+    async def handle_channel_set_protocol(self, stream_id: str = "", message: Any = None, **kwargs: Any):
+        return await self._run_command(ChannelSetProtocolCommand, stream_id, message, kwargs.get("matched_groups"))
 
     @Command("gemini_sync_banana", description=SyncBananaPromptsCommand.command_description, pattern=SyncBananaPromptsCommand.command_pattern)
     async def handle_sync_banana(self, stream_id: str = "", message: Any = None, **kwargs: Any):

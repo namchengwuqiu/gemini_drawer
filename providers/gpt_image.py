@@ -63,6 +63,7 @@ def _images_base(url: str) -> str:
 
 
 class GptImageProvider(Provider):
+    protocol = "gpt_image"
     name = "gpt_image"
     #: images API 不支持本插件的 SSE 解析路径；chat 形态另按渠道 stream 开关处理
     supports_stream = False

@@ -9,11 +9,13 @@ from gemini_drawer.config import DEFAULT_SELFIE_BASE_PROMPT, DEFAULT_SELFIE_POLI
 class FakeLlm:
     def __init__(self):
         self.prompt = None
+        self.generate_kwargs = None
 
     async def get_available_models(self):
         return ["replyer"]
 
     async def generate(self, **kwargs):
+        self.generate_kwargs = kwargs
         self.prompt = kwargs["prompt"]
         return {"success": True, "response": "在海边挥手，半身自拍构图"}
 
@@ -61,8 +63,37 @@ def test_polish_keeps_identity_constraint_and_uses_default_template():
         assert action.ctx.llm.prompt == DEFAULT_SELFIE_POLISH_TEMPLATE.format(
             original_prompt=original
         )
+        assert action.ctx.llm.generate_kwargs["task_name"] == "replyer"
+        assert "model" not in action.ctx.llm.generate_kwargs
         assert result.startswith("根据图中人物按以下要求生成图片：")
         assert "身份与画风约束：" in result
         assert DEFAULT_SELFIE_BASE_PROMPT in result
+
+    asyncio.run(run())
+
+
+class LegacyFakeLlm(FakeLlm):
+    """旧 SDK：generate 不接受 task_name，只接受 model 任务别名。"""
+
+    async def generate(self, prompt, model, request_type, temperature, max_tokens):
+        self.generate_kwargs = {
+            "prompt": prompt,
+            "model": model,
+            "request_type": request_type,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        self.prompt = prompt
+        return {"success": True, "response": "旧 SDK 润色结果"}
+
+
+def test_polish_falls_back_to_legacy_model_argument():
+    async def run():
+        action = DummySelfie()
+        action.ctx = type("Ctx", (), {"llm": LegacyFakeLlm()})()
+        result = await action._polish_prompt("在海边挥手")
+        assert action.ctx.llm.generate_kwargs["model"] == "replyer"
+        assert "task_name" not in action.ctx.llm.generate_kwargs
+        assert "旧 SDK 润色结果" in result
 
     asyncio.run(run())

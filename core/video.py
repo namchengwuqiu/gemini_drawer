@@ -21,7 +21,37 @@ from .agnes_video import (
     AgnesVideoPendingError, generate_agnes_video, matches_agnes_video_endpoint,
 )
 from .managers import key_manager
+from .protocols import VIDEO_PROTOCOLS, normalize_protocol
 from ..utils import extract_video_data
+
+_TSAI_VIDEO_MARKERS = ("api.tavr.top", "api.tsart.lat", "tsart.lat", "endpoint=video_generation")
+
+
+def detect_video_protocol(endpoint: Dict[str, Any]) -> Optional[str]:
+    """按 URL / 模型名自动识别视频协议（忽略显式 protocol）；识别不到返回 None。
+
+    判定顺序与重构前的 if/elif 链保持一致。
+    """
+    api_url = str(endpoint.get("url") or "")
+    if matches_agnes_video_endpoint(endpoint):
+        return "agnes_video"
+    if "volces.com" in api_url or "/contents/generations/tasks" in api_url:
+        return "seedance_video"
+    if "/chat/completions" in api_url:
+        return "openai_chat"
+    if any(marker in api_url for marker in _TSAI_VIDEO_MARKERS):
+        return "tsai_video"
+    if "generateContent" in api_url:
+        return "gemini"
+    return None
+
+
+def describe_video_protocol(endpoint: Dict[str, Any]) -> Tuple[Optional[str], bool]:
+    """返回 (视频协议 id, 是否显式指定)；显式值不合法时回退自动识别。"""
+    explicit = normalize_protocol(endpoint.get("protocol"))
+    if explicit in VIDEO_PROTOCOLS:
+        return explicit, True
+    return detect_video_protocol(endpoint), False
 
 
 async def process_video_generation(
@@ -51,8 +81,12 @@ async def process_video_generation(
         api_url = endpoint["url"]
         api_key = endpoint["key"]
         endpoint_type = endpoint["type"]
+        protocol, explicit = describe_video_protocol(endpoint)
         
-        logger.info(f"[视频] 尝试端点: {endpoint_type}")
+        logger.info(
+            f"[视频] 尝试端点: {endpoint_type} "
+            f"[协议: {protocol or '未识别'}{'' if explicit else '(自动)'}]"
+        )
         
         headers = {
             "Content-Type": "application/json",
@@ -61,14 +95,14 @@ async def process_video_generation(
         
         try:
             # Agnes Videos API：独立任务协议，成片复用下方下载/发送链路。
-            if matches_agnes_video_endpoint(endpoint):
+            if protocol == "agnes_video":
                 video_url = await generate_agnes_video(
                     endpoint, prompt, base64_img, mime_type, proxy, logger,
                 )
                 video_data = f"url:{video_url}"
 
             # 豆包 API (异步任务模式)
-            elif "volces.com" in api_url or "/contents/generations/tasks" in api_url:
+            elif protocol == "seedance_video":
                 doubao_content = [{"type": "text", "text": prompt}]
                 if base64_img:
                     doubao_content.append({
@@ -127,7 +161,7 @@ async def process_video_generation(
                         raise Exception("任务超时")
             
             # OpenAI 格式
-            elif "/chat/completions" in api_url:
+            elif protocol == "openai_chat":
                 content_list = [{"type": "text", "text": prompt}]
                 if base64_img:
                     content_list.append({
@@ -210,7 +244,7 @@ async def process_video_generation(
                             raise Exception(f"API请求失败: {response.status_code} - {response.text}")
             
             # TS-AI 视频生成
-            elif "api.tavr.top" in api_url or "api.tsart.lat" in api_url or "tsart.lat" in api_url or "endpoint=video_generation" in api_url:
+            elif protocol == "tsai_video":
                 base_url = api_url.split("?")[0]
                 request_url = f"{base_url}?endpoint=video_generation"
                 headers["x-api-key"] = api_key
@@ -261,7 +295,7 @@ async def process_video_generation(
                         raise Exception("TS-AI视频任务轮询超时")
 
             # Gemini 格式
-            elif "generateContent" in api_url:
+            elif protocol == "gemini":
                 parts = [{"text": prompt}]
                 if base64_img:
                     parts.append({"inline_data": {"mime_type": mime_type, "data": base64_img}})

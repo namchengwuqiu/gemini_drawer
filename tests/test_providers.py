@@ -18,6 +18,7 @@ from gemini_drawer.providers import (
     GptImageProvider,
     OpenAICompatProvider,
     TsAiProvider,
+    describe_protocol,
     resolve_provider,
 )
 
@@ -215,6 +216,73 @@ def test_doubao_ignores_stream_flag():
     """豆包图片接口不支持本插件的 SSE 解析路径，渠道开了流式也必须忽略。"""
     ep = Endpoint(type="custom_d", url=DOUBAO_URL, key="ark-1", stream=True)
     assert DoubaoProvider().build(ep, text_req()).stream is False
+
+
+def test_doubao_response_format_defaults_to_url():
+    ep = Endpoint(type="custom_d", url=DOUBAO_URL, key="ark-1")
+    assert DoubaoProvider().build(ep, text_req()).json["response_format"] == "url"
+
+
+def test_doubao_response_format_can_be_overridden_per_channel():
+    """非豆包的 /images/generations 中转（如 grok-imagine）只接受 b64_json，
+    否则 400 private_media_required；渠道级覆盖必须原样进 payload。"""
+    ep = Endpoint(
+        type="custom_gpt_image2",
+        url="https://welfare.example/v1/images/generations",
+        key="sk-1",
+        model="grok-imagine-image-2.0",
+        response_format="b64_json",
+    )
+    assert isinstance(resolve_provider(ep), DoubaoProvider)
+    call = DoubaoProvider().build(ep, one_image_req())
+    assert call.json["response_format"] == "b64_json"
+    assert call.json["model"] == "grok-imagine-image-2.0"
+    assert call.json["image"] == PNG_URL
+
+
+# ── 显式协议 ──────────────────────────────────────────────────
+
+
+def test_explicit_protocol_overrides_detection():
+    """写了 protocol 就不再猜：/images/generations 地址也能强制走 gpt_image；chat 地址也能强制走豆包协议。"""
+    ep = Endpoint(type="custom_x", url=DOUBAO_URL, key="k", model="whatever", protocol="gpt_image")
+    assert isinstance(resolve_provider(ep), GptImageProvider)
+    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="k", model="whatever", protocol="images_json")
+    assert isinstance(resolve_provider(ep), DoubaoProvider)
+
+
+def test_explicit_protocol_accepts_aliases():
+    ep = Endpoint(type="custom_x", url="https://a.b/anything", key="k", protocol="Doubao")
+    assert isinstance(resolve_provider(ep), DoubaoProvider)
+    ep = Endpoint(type="custom_x", url="https://a.b/anything", key="k", protocol="openai")
+    assert isinstance(resolve_provider(ep), OpenAICompatProvider)
+
+
+def test_unknown_protocol_falls_back_to_detection():
+    ep = Endpoint(type="custom_x", url=OPENAI_URL, key="k", model="gpt-image-2", protocol="nonsense")
+    assert isinstance(resolve_provider(ep), GptImageProvider)
+    assert describe_protocol(ep) == ("gpt_image", False)
+
+
+def test_describe_protocol_reports_source():
+    assert describe_protocol(Endpoint(type="custom_x", url=DOUBAO_URL, key="k")) == ("images_json", False)
+    assert describe_protocol(Endpoint(type="custom_x", url=DOUBAO_URL, key="k", protocol="images_json")) == ("images_json", True)
+    assert describe_protocol(Endpoint(type="custom_x", url="https://a.b/unknown", key="k")) == (None, False)
+    assert describe_protocol({"type": "custom_x", "url": "https://a.b/unknown", "protocol": "gemini"}) == ("gemini", True)
+
+
+def test_every_provider_declares_a_known_protocol():
+    from gemini_drawer.core.protocols import IMAGE_PROTOCOLS
+    assert {cls.protocol for cls in REGISTRY} == set(IMAGE_PROTOCOLS)
+    assert len({cls.protocol for cls in REGISTRY}) == len(REGISTRY)
+
+
+def test_endpoint_from_dict_reads_response_format():
+    assert Endpoint.from_dict({"type": "custom_x", "url": DOUBAO_URL}).response_format is None
+    assert Endpoint.from_dict({"type": "custom_x", "url": DOUBAO_URL, "response_format": ""}).response_format is None
+    assert Endpoint.from_dict(
+        {"type": "custom_x", "url": DOUBAO_URL, "response_format": "b64_json"}
+    ).response_format == "b64_json"
 
 
 # ── gpt-image ────────────────────────────────────────────────

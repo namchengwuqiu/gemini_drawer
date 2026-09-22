@@ -7,6 +7,7 @@ from .base import DrawRequest, Endpoint, HttpCall, Provider
 
 
 class GeminiProvider(Provider):
+    protocol = "gemini"
     name = "gemini"
     supports_stream = True
 

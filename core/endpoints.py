@@ -11,31 +11,51 @@ Key 有两个来源，都要兼容：
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from .managers import data_manager, key_manager
+from .protocols import normalize_protocol
 
 
-def _channel_fields(channel_info: Any) -> Tuple[str, str, Optional[str], bool, bool, bool]:
-    """把渠道条目normalize成 (url, key, model, enabled, is_video, stream)。
+class ChannelFields(NamedTuple):
+    """data.json 里一个渠道条目归一化后的字段。"""
+    url: str
+    key: str
+    model: Optional[str]
+    enabled: bool
+    is_video: bool
+    stream: bool
+    response_format: Optional[str]
+    protocol: Optional[str]
+
+
+def _optional_str(value: Any) -> Optional[str]:
+    return (str(value).strip() or None) if value else None
+
+
+def _channel_fields(channel_info: Any) -> ChannelFields:
+    """把渠道条目 normalize 成 ChannelFields。
 
     早期版本允许渠道值是 "URL:KEY" 这样的字符串，这里一并兼容。
+    protocol 在这里就归一成规范 id，非法值当作未设置（回退自动识别）。
     """
     if isinstance(channel_info, dict):
-        return (
-            channel_info.get("url") or "",
-            channel_info.get("key") or "",
-            channel_info.get("model"),
-            bool(channel_info.get("enabled", True)),
-            bool(channel_info.get("is_video", False)),
-            bool(channel_info.get("stream", False)),
+        return ChannelFields(
+            url=channel_info.get("url") or "",
+            key=channel_info.get("key") or "",
+            model=channel_info.get("model"),
+            enabled=bool(channel_info.get("enabled", True)),
+            is_video=bool(channel_info.get("is_video", False)),
+            stream=bool(channel_info.get("stream", False)),
+            response_format=_optional_str(channel_info.get("response_format")),
+            protocol=normalize_protocol(channel_info.get("protocol")),
         )
 
     if isinstance(channel_info, str) and ":" in channel_info:
         url, key = channel_info.rsplit(":", 1)
-        return url, key, None, True, False, False
+        return ChannelFields(url, key, None, True, False, False, None, None)
 
-    return "", "", None, True, False, False
+    return ChannelFields("", "", None, True, False, False, None, None)
 
 
 def _resolve_key_channel(key_info: Dict[str, Any]) -> str:
@@ -55,8 +75,17 @@ def _active_keys_for(channel_name: str) -> List[str]:
     ]
 
 
-def _make_endpoint(name: str, url: str, key: str, model: Optional[str], stream: bool) -> Dict[str, Any]:
-    return {"type": f"custom_{name}", "url": url, "key": key, "model": model, "stream": stream}
+def _make_endpoint(name: str, key: str, fields: ChannelFields) -> Dict[str, Any]:
+    endpoint: Dict[str, Any] = {
+        "type": f"custom_{name}", "url": fields.url, "key": key,
+        "model": fields.model, "stream": fields.stream,
+    }
+    # 可选字段只在渠道显式配置时带上，未配置时保持旧的 dict 形态
+    if fields.response_format:
+        endpoint["response_format"] = fields.response_format
+    if fields.protocol:
+        endpoint["protocol"] = fields.protocol
+    return endpoint
 
 
 def build_drawing_endpoints() -> List[Dict[str, Any]]:
@@ -70,10 +99,10 @@ def build_drawing_endpoints() -> List[Dict[str, Any]]:
 
     # 1. 渠道条目里内联的 Key（兼容旧数据格式）
     for name, channel_info in channels.items():
-        url, key, model, enabled, is_video, stream = _channel_fields(channel_info)
-        if is_video or not enabled or not url or not key:
+        fields = _channel_fields(channel_info)
+        if fields.is_video or not fields.enabled or not fields.url or not fields.key:
             continue
-        endpoints.append(_make_endpoint(name, url, key, model, stream))
+        endpoints.append(_make_endpoint(name, fields.key, fields))
 
     # 2. KeyManager 管理的 Key，按其所属渠道取 URL / 模型
     for key_info in key_manager.get_all_keys():
@@ -83,10 +112,10 @@ def build_drawing_endpoints() -> List[Dict[str, Any]]:
         if channel_name not in channels:
             continue
 
-        url, _, model, enabled, is_video, stream = _channel_fields(channels[channel_name])
-        if is_video or not enabled or not url:
+        fields = _channel_fields(channels[channel_name])
+        if fields.is_video or not fields.enabled or not fields.url:
             continue
-        endpoints.append(_make_endpoint(channel_name, url, key_info["value"], model, stream))
+        endpoints.append(_make_endpoint(channel_name, key_info["value"], fields))
 
     return endpoints
 
@@ -98,18 +127,18 @@ def build_video_endpoints(logger=None) -> List[Dict[str, Any]]:
     for name, channel_info in data_manager.get_channels().items():
         if not isinstance(channel_info, dict):
             continue
-        url, key, model, enabled, is_video, stream = _channel_fields(channel_info)
-        if not is_video or not enabled or not url:
+        fields = _channel_fields(channel_info)
+        if not fields.is_video or not fields.enabled or not fields.url:
             continue
 
-        if key:
-            endpoints.append(_make_endpoint(name, url, key, model, stream))
+        if fields.key:
+            endpoints.append(_make_endpoint(name, fields.key, fields))
 
         managed_keys = _active_keys_for(name)
         for managed_key in managed_keys:
-            endpoints.append(_make_endpoint(name, url, managed_key, model, stream))
+            endpoints.append(_make_endpoint(name, managed_key, fields))
 
-        if not key and not managed_keys and logger:
+        if not fields.key and not managed_keys and logger:
             logger.warning(
                 f"[视频] 渠道 '{name}' 已启用但未找到有效Key (检查了 key_manager 和 data.json)"
             )
