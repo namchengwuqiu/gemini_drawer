@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.14.0
+> **Version:** 1.14.1
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -41,12 +41,12 @@ pip install -r requirements.txt
 ### 开发者发布版本
 
 1. 更新 `_manifest.json` 的 `version`、`config.py` 中的 `version` / `config_version` 默认值以及 README 顶部版本号，并在 `CHANGELOG.md` 添加对应的 `## vX.Y.Z` 更新说明。保持插件 ID `namchengwuqiu.gemini_drawer` 不变，按实际兼容情况声明 MaiBot 与 SDK 版本范围。
-2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如首次发布当前 `1.14.0`：
+2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如首次发布当前 `1.14.1`：
 
    ```shell
    git push origin main
-   git tag v1.14.0
-   git push origin v1.14.0
+   git tag v1.14.1
+   git push origin v1.14.1
    ```
 
 3. GitHub Actions 的 **Publish plugin release** 工作流会校验 Tag、插件 ID、manifest 版本及必需文件，从更新日志提取该版本说明，并创建正式 GitHub Release。使用 GitHub 自动生成的源码包即可，无需额外上传附件。
@@ -476,7 +476,9 @@ pending 会话隔离、等待提示随机取值）。测试不参与插件运行
 
 Key 默认遮盖且不回显明文，编辑时留空表示保留旧密钥。编辑保存会保留最新使用统计和未修改的额外字段；记录发生编辑冲突时页面保留输入并提示重新打开。删除渠道会保留其 Key，便于之后恢复渠道或重新分配。渠道和提示词的名称作为引用标识，编辑时保持原名称。
 
-页面管理的是本地 `data.json` 提示词；独立同步词库 `banana_prompts.json` 不在本页编辑范围内。原有聊天管理指令仍可使用，修改后点击页面“刷新”即可看到最新数据。
+**大香蕉词库（v1.14.1）**：独立的 `banana_prompts.json` 通过“大香蕉词库”标签页只读展示，支持按名称、分类或全文搜索、分页和弹框查看全文，并显示限制级标记、本地同步时间与云端更新时间。不提供新增、编辑或删除词条的入口，后端也拒绝这些写操作。
+
+点击“更新词库”会复用 `/渠道同步大香蕉` 的云端同步逻辑，后台获取和校验词库后只写回 `banana_prompts.json`；页面显示进度与结果，更新失败保留已有缓存，重复点击不会重复创建同步任务。运行时的限制级过滤配置保持原样。原有聊天管理指令仍可使用，修改后点击页面“刷新”即可看到最新数据。
 
 本页面使用当前项目宿主支持的 WebUI v2 自定义页面和受限 API 桥接，需要 dashboard 支持 `custom_pages`。在线 [WebUI 页面文档](https://docs.mai-mai.org/plugin/webui-pages) 当前介绍的是 v1 声明式组件；本实现沿用页面声明与本插件静态 API 绑定机制，页面模式以当前宿主协议为准。
 

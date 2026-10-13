@@ -388,6 +388,13 @@
     align-self: center;
     font-size: 13px;
   }
+  .banana-progress {
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: var(--maibot-soft);
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+  }
   .channel-heading td {
     border-bottom: 0;
   }
@@ -519,6 +526,9 @@
     <button class="maibot-button" data-kind="prompts">
       提示词 <span class="count" id="count-prompts">—</span>
     </button>
+    <button class="maibot-button" data-kind="banana">
+      大香蕉词库 <span class="count" id="count-banana">—</span>
+    </button>
     <span class="muted key-summary"
       >共 <span id="count-keys">—</span> 个 Key</span
     >
@@ -543,7 +553,16 @@
     <button class="maibot-button maibot-button-primary" id="add">
       添加渠道
     </button>
+    <button
+      class="maibot-button maibot-button-primary"
+      id="update-banana"
+      hidden
+    >
+      更新词库
+    </button>
   </div>
+  <p id="banana-meta" class="muted" style="margin-bottom: 16px" hidden></p>
+  <p id="banana-progress" class="banana-progress" role="status" hidden></p>
   <dialog id="editor" class="editor-dialog" aria-labelledby="editor-title">
     <div class="editor-heading">
       <h2 id="editor-title">编辑记录</h2>
@@ -611,7 +630,12 @@
 <script>
   (() => {
     const $ = (id) => document.getElementById(id);
-    const labels = { channels: "渠道", prompts: "提示词", keys: "Key" };
+    const labels = {
+      channels: "渠道",
+      prompts: "提示词",
+      keys: "Key",
+      banana: "大香蕉词库",
+    };
     let kind = "channels",
       search = "",
       page = 1,
@@ -621,7 +645,11 @@
       dirty = false,
       toastTimer,
       discardResolve,
-      returnFocus;
+      returnFocus,
+      bananaRunning = false,
+      bananaJob = "",
+      bananaTimer;
+
     const keyPanels = new Map();
     const inputs = {};
     function text(tag, value, className = "") {
@@ -640,6 +668,7 @@
       if (!value) {
         $("prev").disabled = page <= 1;
         $("next").disabled = page >= pages;
+        $("update-banana").disabled = bananaRunning;
         document
           .querySelectorAll('[data-page-disabled="true"]')
           .forEach((button) => (button.disabled = true));
@@ -690,7 +719,7 @@
       dirty = false;
       if ($("editor").open) $("editor").close();
       if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
-      else $("add").focus();
+      else $("refresh").focus({ preventScroll: true });
       $("fields").replaceChildren();
       Object.keys(inputs).forEach((name) => delete inputs[name]);
     }
@@ -730,6 +759,13 @@
         $("page-info").textContent = `${page} / ${pages}`;
         renderRows(result.rows);
         renderUnassigned(result.unassigned);
+        if (kind === "banana") {
+          $("banana-meta").textContent =
+            `只读词库 · 本地同步：${result.banana.synced_at} · 云端版本：${result.banana.remote_last_updated}`;
+          const state = await call("query", "banana_status", {});
+          watchBanana(state);
+          if (state.status === "error") showError(new Error(state.message));
+        }
       } catch (error) {
         showError(error);
         if (!$("rows").querySelector("[data-record]"))
@@ -749,7 +785,9 @@
       const titles =
         kind === "channels"
           ? ["渠道 / API 地址", "模型 / 协议", "状态", "操作"]
-          : ["名称", "内容预览", "长度", "操作"];
+          : kind === "banana"
+            ? ["名称 / 分类", "内容预览", "标记 / 长度", "操作"]
+            : ["名称", "内容预览", "长度", "操作"];
       $("columns").replaceChildren(
         ...titles.map((title, i) => {
           const cell = text("th", title);
@@ -765,7 +803,9 @@
           emptyRow(
             search
               ? "没有匹配记录，请调整搜索条件。"
-              : `暂无${labels[kind]}，点击“添加${labels[kind]}”开始。`,
+              : kind === "banana"
+                ? "暂无大香蕉词库，点击“更新词库”获取。"
+                : `暂无${labels[kind]}，点击“添加${labels[kind]}”开始。`,
           ),
         );
         return;
@@ -796,19 +836,30 @@
             ),
           );
         } else {
+          if (kind === "banana")
+            cells[0].append(text("div", record.section_title, "subline"));
           cells[1].append(text("div", record.preview));
           cells[2].textContent = `${record.length} 字符`;
+          if (kind === "banana")
+            cells[2].append(
+              text("div", record.restricted ? "限制级" : "普通", "subline"),
+            );
         }
         const actions = document.createElement("div");
         actions.className = "row-actions";
-        actions.append(
-          button(kind === "channels" ? "编辑渠道" : "编辑", () =>
-            openEditor(record),
-          ),
-          button(kind === "channels" ? "删除渠道" : "删除", () =>
-            runAction("delete", record),
-          ),
-        );
+        if (kind === "banana")
+          actions.append(
+            button("查看全文", () => openEditor(record, "banana")),
+          );
+        else
+          actions.append(
+            button(kind === "channels" ? "编辑渠道" : "编辑", () =>
+              openEditor(record),
+            ),
+            button(kind === "channels" ? "删除渠道" : "删除", () =>
+              runAction("delete", record),
+            ),
+          );
         cells[3].append(actions);
         row.append(...cells);
         $("rows").append(row);
@@ -1021,7 +1072,8 @@
       editKind = kind,
       presetChannel = "",
     ) {
-      if (busy || !(await mayDiscard())) return;
+      if (busy || (editKind === "banana" && !record) || !(await mayDiscard()))
+        return;
       returnFocus = document.activeElement;
       setBusy(true);
       $("error").hidden = true;
@@ -1044,6 +1096,29 @@
           (record ? "编辑" : "添加") +
           (editKind === "keys" ? " Key" : labels[editKind]);
         $("editor-error").hidden = true;
+        $("save").hidden = detail.readonly === true;
+        $("cancel").textContent = detail.readonly ? "关闭" : "取消";
+        if (editKind === "banana") {
+          $("editor-title").textContent = "查看大香蕉提示词";
+          field("source_title", "提示词名称", data.source_title, {
+            readonly: true,
+            wide: true,
+          });
+          field("section_title", "分类", data.section_title, {
+            readonly: true,
+          });
+          field("restricted", "标记", data.restricted ? "限制级" : "普通", {
+            readonly: true,
+          });
+          field("text", "提示词全文", data.text, {
+            area: true,
+            wide: true,
+            rows: 10,
+            readonly: true,
+          });
+          $("editor").showModal();
+          return;
+        }
         if (editKind !== "keys")
           field("name", "名称", detail.id, {
             required: true,
@@ -1167,7 +1242,7 @@
     );
     $("save").addEventListener("click", async (event) => {
       event.preventDefault();
-      if (busy || !editing) return;
+      if (busy || !editing || editing.readonly) return;
       if (!$("record-form").reportValidity()) return;
       $("editor-error").hidden = true;
       let payload,
@@ -1257,6 +1332,54 @@
       )
         dismiss();
     });
+    function watchBanana(state) {
+      clearTimeout(bananaTimer);
+      bananaJob = state.job_id;
+      bananaRunning = state.status === "running";
+      $("update-banana").textContent = bananaRunning ? "更新中…" : "更新词库";
+      $("update-banana").disabled = busy || bananaRunning;
+      $("banana-progress").hidden = !bananaRunning;
+      $("banana-progress").textContent = bananaRunning
+        ? "正在从云端更新词库，可以继续查看现有词条。"
+        : "";
+      if (bananaRunning) bananaTimer = setTimeout(pollBanana, 3000);
+    }
+    async function pollBanana() {
+      if (busy) {
+        bananaTimer = setTimeout(pollBanana, 3000);
+        return;
+      }
+      try {
+        const state = await call("query", "banana_status", {
+          job_id: bananaJob,
+        });
+        watchBanana(state);
+        if (!bananaRunning) {
+          if (state.status === "success") toast(state.message);
+          else if (state.status === "error")
+            showError(new Error(state.message));
+          await load();
+          // load() 仅清理查询错误，保留更新失败提示。
+          if (state.status === "error") showError(new Error(state.message));
+        }
+      } catch (error) {
+        watchBanana({ status: "error", job_id: bananaJob });
+        showError(error);
+      }
+    }
+    $("update-banana").onclick = async () => {
+      if (busy || bananaRunning) return;
+      setBusy(true);
+      $("error").hidden = true;
+      try {
+        watchBanana(await call("action", "update_banana", {}));
+      } catch (error) {
+        showError(error);
+      } finally {
+        setBusy(false);
+      }
+    };
+    addEventListener("pagehide", () => clearTimeout(bananaTimer));
     $("add").onclick = () => openEditor();
     $("refresh").onclick = load;
     $("retry").onclick = load;
@@ -1287,17 +1410,24 @@
     window.maibot.ready
       .then(() => {
         const state = window.maibot.page.state || {};
-        kind = state.kind === "prompts" ? "prompts" : "channels";
+        kind = ["prompts", "banana"].includes(state.kind)
+          ? state.kind
+          : "channels";
         search = typeof state.search === "string" ? state.search : "";
         page = Number.isInteger(state.page) && state.page > 0 ? state.page : 1;
         $("search").value = search;
         $("search").placeholder =
-          kind === "prompts"
-            ? "搜索提示词名称或内容"
-            : kind === "keys"
-              ? "搜索所属渠道或状态"
-              : "搜索名称、模型或地址";
+          kind === "banana"
+            ? "搜索词条名称、分类或全文"
+            : kind === "prompts"
+              ? "搜索提示词名称或内容"
+              : kind === "keys"
+                ? "搜索所属渠道或状态"
+                : "搜索名称、模型或地址";
         $("add").textContent = "添加" + labels[kind];
+        $("add").hidden = kind === "banana";
+        $("update-banana").hidden = kind !== "banana";
+        $("banana-meta").hidden = kind !== "banana";
         document
           .querySelectorAll("[data-kind]")
           .forEach((button) =>

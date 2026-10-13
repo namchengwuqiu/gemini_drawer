@@ -236,3 +236,41 @@ def test_channel_search_finds_keys_and_legacy_key_ownership(store):
     joined = web.list_records("channels", search="disabled")
     assert joined["total"] == 1 and joined["rows"][0]["keys"][0]["channel"] == "google"
     assert web.list_records("keys", channel="google")["total"] == 1
+
+
+def test_banana_readonly_listing_search_and_full_detail(store):
+    web, data, keys, config = store
+    banana = {"synced_at": "2026-10-13T18:00:00+08:00", "remote_last_updated": "2026-10-12",
+              "prompts": {f"大香蕉/风景/词条{i}": {"content": "前缀" * 100 + "全文匹配",
+                                                 "section_title": "风景", "source_title": f"词条{i}",
+                                                 "restricted": i % 2 == 0} for i in range(25)}}
+    data.save_banana_data(banana)
+    before = [path.read_bytes() for path in (data.data_file, data.banana_file, keys.keys_file, config)]
+    result = web.list_records("banana", search="全文匹配", page=2)
+    assert result["total"] == 25 and len(result["rows"]) == 5
+    assert result["banana"]["readonly"] and result["banana"]["remote_last_updated"] == "2026-10-12"
+    assert result["counts"]["banana"] == 25
+    assert web.list_records("banana", search="风景")["total"] == 25
+    detail = web.detail("banana", result["rows"][0]["id"])
+    assert detail["readonly"] and detail["payload"]["text"].endswith("全文匹配")
+    assert [path.read_bytes() for path in (data.data_file, data.banana_file, keys.keys_file, config)] == before
+
+
+@pytest.mark.parametrize("operation", ["save", "delete", "reset"])
+def test_banana_mutations_are_rejected_without_changing_files(store, operation):
+    web, data, keys, config = store
+    data.save_banana_data({"prompts": {"旧格式": "只读词条"}})
+    before = [path.read_bytes() for path in (data.data_file, data.banana_file, keys.keys_file, config)]
+    with pytest.raises(ValueError, match="只读"):
+        web.change("banana", operation, "旧格式", "", {"text": "覆盖"})
+    assert web.detail("banana", "旧格式")["payload"]["text"] == "只读词条"
+    assert [path.read_bytes() for path in (data.data_file, data.banana_file, keys.keys_file, config)] == before
+
+
+def test_banana_missing_and_corrupt_file_are_distinguished(store):
+    web, data, _, _ = store
+    assert web.list_records("banana")["total"] == 0
+    data.banana_file.write_text('{"prompts":', encoding="utf-8")
+    with pytest.raises(ValueError, match="JSON 格式"):
+        web.list_records("banana")
+    assert data.banana_file.read_text() == '{"prompts":'

@@ -477,6 +477,7 @@ class DataManager:
             logger.error(f"Failed to save data.json: {e}")
             raise
 
+    @_serialized()
     def load_banana_data(self) -> Dict[str, Any]:
         """读取大香蕉独立词库；失败时不影响本地 data.json。
 
@@ -506,10 +507,11 @@ class DataManager:
             logger.warning(f"读取 banana_prompts.json 失败，已忽略大香蕉扩展词库: {e}")
             return {"schema_version": 1, "prompts": {}}
 
+    @_serialized()
     def save_banana_data(self, banana_data: Dict[str, Any]) -> None:
         """原子写入大香蕉独立词库，不触碰 data.json。"""
         try:
-            self.data_dir.mkdir(parents=True, exist_ok=True)
+            self.banana_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_file = self.banana_file.with_suffix(self.banana_file.suffix + ".tmp")
             with open(tmp_file, 'w', encoding='utf-8') as f:
                 json.dump(banana_data, f, indent=2, ensure_ascii=False)

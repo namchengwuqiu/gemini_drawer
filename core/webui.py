@@ -92,6 +92,21 @@ class DrawerWebUI:
             raise ValueError("页码必须是正整数。")
         with self.data.lock, self.keys.lock:
             data, keys = self._snapshot()
+            if kind == "banana":
+                banana, entries = self._banana_entries()
+                rows = []
+                for name, entry in entries.items():
+                    if search.casefold() not in (name + " " + json.dumps(entry, ensure_ascii=False)).casefold():
+                        continue
+                    rows.append({"id": name, "name": entry.get("source_title") or name,
+                                 "section_title": entry.get("section_title") or "未分类",
+                                 "preview": entry["content"][:160], "length": len(entry["content"]),
+                                 "restricted": bool(entry.get("restricted", False))})
+                result = self._page(rows, page, data, keys)
+                result["banana"] = {"synced_at": str(banana.get("synced_at") or "尚未同步"),
+                                    "remote_last_updated": str(banana.get("remote_last_updated") or "未知"),
+                                    "readonly": True}
+                return result
             key_rows = [
                 {"id": record_id, "version": _version("keys", raw), "name": _masked(raw["value"]),
                  "channel": _key_channel(raw), "status": raw.get("status", "active"),
@@ -137,17 +152,42 @@ class DrawerWebUI:
                 result["unassigned"] = self._page(orphan_keys, 1, data, keys)
             return result
 
-    @staticmethod
-    def _page(rows: list, page: int, data: Dict[str, Any], keys: Dict[str, Any]) -> Dict[str, Any]:
+    def _page(self, rows: list, page: int, data: Dict[str, Any], keys: Dict[str, Any]) -> Dict[str, Any]:
         total = len(rows)
         page = min(page, max(1, (total + 19) // 20))
         return {"rows": rows[(page - 1) * 20:page * 20], "total": total, "page": page,
                     "pages": max(1, (total + 19) // 20),
                     "counts": {"channels": len(data.get("channels", {})), "prompts": len(data.get("prompts", {})),
-                               "keys": len(keys.get("keys", []))}}
+                               "keys": len(keys.get("keys", [])),
+                               "banana": len(self.data.get_banana_prompt_entries(show_restricted=True))}}
+
+    def _banana_entries(self) -> tuple[Dict[str, Any], Dict[str, Any]]:
+        banana = _read(self.data.banana_file, {"schema_version": 1, "prompts": {}})
+        raw_entries = banana.get("prompts", {})
+        if not isinstance(raw_entries, dict):
+            raise ValueError("banana_prompts.json 的 prompts 必须是对象。")
+        entries = {}
+        for name, raw in raw_entries.items():
+            entry = {"content": raw} if isinstance(raw, str) else raw
+            if isinstance(entry, dict) and isinstance(entry.get("content"), str) and entry["content"].strip():
+                entries[name] = entry
+        return banana, entries
 
     def detail(self, kind: str, record_id: str) -> Dict[str, Any]:
         with self.data.lock, self.keys.lock:
+            if kind == "banana":
+                _, entries = self._banana_entries()
+                if record_id not in entries:
+                    raise ValueError("词条已更新或不存在，请刷新词库列表。")
+                entry = entries[record_id]
+                result = {"id": record_id, "readonly": True,
+                          "payload": {"text": entry["content"], "source_title": entry.get("source_title") or record_id,
+                                      "section_title": entry.get("section_title") or "未分类",
+                                      "prompt_id": str(entry.get("prompt_id") or ""),
+                                      "restricted": bool(entry.get("restricted", False))}}
+                if len(json.dumps(result, ensure_ascii=False).encode()) > 400000:
+                    raise ValueError("该词条超过页面查看大小限制，请直接查看 banana_prompts.json。")
+                return result
             data, keys = self._snapshot()
             collection = self._collection(kind, data, keys)
             if record_id not in collection:
@@ -174,6 +214,8 @@ class DrawerWebUI:
 
     def change(self, kind: str, operation: str, record_id: str, version: str,
                payload: Dict[str, Any]) -> Dict[str, Any]:
+        if kind == "banana":
+            raise ValueError("大香蕉词库只读，不能新增、修改或删除词条；请使用更新词库按钮同步。")
         if operation not in {"save", "delete", "reset"}:
             raise ValueError("不支持的操作。")
         if not isinstance(payload, dict):

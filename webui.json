@@ -20,7 +20,7 @@
             "kind": {
               "type": "string",
               "required": true,
-              "choices": ["channels", "prompts", "keys"]
+              "choices": ["channels", "prompts", "keys", "banana"]
             },
             "search": {
               "type": "string",
@@ -46,12 +46,22 @@
             "kind": {
               "type": "string",
               "required": true,
-              "choices": ["channels", "prompts", "keys"]
+              "choices": ["channels", "prompts", "keys", "banana"]
             },
             "record_id": {
               "type": "string",
               "required": true,
-              "max_length": 120
+              "max_length": 1024
+            }
+          }
+        },
+        "banana_status": {
+          "api": "drawer_banana_update_status",
+          "version": "1",
+          "parameters": {
+            "job_id": {
+              "type": "string",
+              "max_length": 64
             }
           }
         }
@@ -121,6 +131,11 @@
               "max_length": 64
             }
           }
+        },
+        "update_banana": {
+          "api": "drawer_update_banana",
+          "version": "1",
+          "parameters": {}
         }
       }
     }

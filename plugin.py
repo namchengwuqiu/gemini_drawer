@@ -269,6 +269,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         # 常常还在处理同一条用户消息，于是又拍一张——pending 那时已经清零，拦不住。
         self._media_last_sent_at: dict[str, float] = {}
         self._webui = DrawerWebUI(data_manager, key_manager)
+        self._banana_update_task: Optional[asyncio.Task] = None
+        self._banana_update_state: dict[str, Any] = {"job_id": "", "status": "idle", "message": ""}
 
     async def _webui_call(self, method, **kwargs: Any) -> dict[str, Any]:
         # 文件解析与写入在工作线程执行，不占用插件的消息处理循环。
@@ -307,6 +309,29 @@ class GeminiDrawerPlugin(MaiBotPlugin):
     async def drawer_reset_key(self, record_id: str, version: str) -> dict[str, Any]:
         return await self._webui_call(self._webui.change, kind="keys", operation="reset", record_id=record_id,
                                       version=version, payload={})
+
+    @API("drawer_update_banana", description="后台更新大香蕉只读词库", version="1")
+    async def drawer_update_banana(self) -> dict[str, Any]:
+        if self._banana_update_task is None or self._banana_update_task.done():
+            self._banana_update_state = {"job_id": f"banana-{time.time_ns()}", "status": "running", "message": "正在更新词库…"}
+            self._banana_update_task = asyncio.create_task(self._run_banana_update())
+        return {"ok": True, **self._banana_update_state}
+
+    @API("drawer_banana_update_status", description="读取词库更新进度", version="1")
+    async def drawer_banana_update_status(self, job_id: str = "") -> dict[str, Any]:
+        if job_id and job_id != self._banana_update_state["job_id"]:
+            return {"ok": False, "message": "更新任务已变化或插件已重载，请刷新页面核对词库。"}
+        return {"ok": True, **self._banana_update_state}
+
+    async def _run_banana_update(self) -> None:
+        try:
+            success, message = await self.sync_banana_website_prompts()
+            self._banana_update_state.update(status="success" if success else "error", message=message)
+        except asyncio.CancelledError:
+            self._banana_update_state.update(status="error", message="更新已因插件重载中断，请刷新后重试。")
+            raise
+        except Exception:
+            self._banana_update_state.update(status="error", message="更新失败，请查看插件日志并重试。")
 
     def _begin_media_task(self, stream_id: str) -> None:
         key = str(stream_id or "").strip()
@@ -426,98 +451,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.get(BANANA_PROMPTS_URL)
 
-            if response.status_code != 200:
-                return False, f"下载云端词库失败，HTTP 状态码: {response.status_code}"
-
-            try:
-                web_data = response.json()
-            except ValueError as e:
-                return False, f"云端词库不是有效 JSON: {e}"
-
-            if not isinstance(web_data, dict):
-                return False, "云端词库格式错误：顶层不是对象"
-
-            sections = web_data.get("sections")
-            if not isinstance(sections, list):
-                return False, "云端词库格式错误：sections 不是列表"
-
-            prompts = {}
-            seen_keys = set()
-            total_prompt_count = 0
-            restricted_count = 0
-            duplicate_count = 0
-            skipped_count = 0
-
-            for section in sections:
-                if not isinstance(section, dict):
-                    continue
-                section_id = str(section.get("id") or "").strip()
-                section_title = str(section.get("title") or section_id or "未分类").strip()
-                is_restricted = bool(section.get("isRestricted", False))
-                section_prompts = section.get("prompts", [])
-                if not isinstance(section_prompts, list):
-                    continue
-
-                for prompt in section_prompts:
-                    total_prompt_count += 1
-                    if not isinstance(prompt, dict):
-                        skipped_count += 1
-                        continue
-
-                    prompt_id = str(prompt.get("id") or "").strip()
-                    title = str(prompt.get("title") or "").strip()
-                    content = prompt.get("content")
-                    if not isinstance(content, str):
-                        skipped_count += 1
-                        continue
-                    content = content.strip()
-                    if not title or not content:
-                        skipped_count += 1
-                        continue
-
-                    key = f"大香蕉/{section_title}/{title}"
-                    if key in seen_keys:
-                        duplicate_count += 1
-                        short_id = prompt_id[-6:] if prompt_id else str(duplicate_count)
-                        key = f"{key}#{short_id}"
-                        while key in seen_keys:
-                            duplicate_count += 1
-                            key = f"大香蕉/{section_title}/{title}#{short_id}-{duplicate_count}"
-                    seen_keys.add(key)
-
-                    if is_restricted:
-                        restricted_count += 1
-
-                    prompts[key] = {
-                        "content": content,
-                        "prompt_id": prompt_id,
-                        "source_title": title,
-                        "section_id": section_id,
-                        "section_title": section_title,
-                        "restricted": is_restricted,
-                    }
-
-            if not prompts:
-                return False, f"同步失败：未解析到有效提示词，跳过 {skipped_count} 条"
-
-            from datetime import datetime, timezone
-            banana_data = {
-                "schema_version": 1,
-                "source_url": BANANA_PROMPTS_URL,
-                "synced_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
-                "remote_last_updated": web_data.get("lastUpdated"),
-                "prompts": prompts,
-            }
-            data_manager.save_banana_data(banana_data)
-
-            return (
-                True,
-                "大香蕉词库同步完成："
-                f"sections={len(sections)}，远端prompts={total_prompt_count}，"
-                f"保存={len(prompts)}，restricted={restricted_count}，"
-                f"重名处理={duplicate_count}，跳过={skipped_count}，"
-                f"remote_last_updated={web_data.get('lastUpdated') or '未知'}"
-            )
+            return await asyncio.to_thread(self._save_banana_response, response)
         except httpx.TimeoutException:
             return False, "同步超时：访问大香蕉 GitHub raw 超过 15 秒"
         except httpx.HTTPError as e:
@@ -525,7 +459,109 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         except Exception as e:
             return False, f"同步发生未知异常: {e}"
 
+    @staticmethod
+    def _save_banana_response(response: httpx.Response) -> Tuple[bool, str]:
+        """在线程中解析、校验并写入词库，避免大 JSON 阻塞插件事件循环。"""
+        if response.status_code != 200:
+            return False, f"下载云端词库失败，HTTP 状态码: {response.status_code}"
+
+        try:
+            web_data = response.json()
+        except ValueError as e:
+            return False, f"云端词库不是有效 JSON: {e}"
+
+        if not isinstance(web_data, dict):
+            return False, "云端词库格式错误：顶层不是对象"
+
+        sections = web_data.get("sections")
+        if not isinstance(sections, list):
+            return False, "云端词库格式错误：sections 不是列表"
+
+        prompts = {}
+        seen_keys = set()
+        total_prompt_count = 0
+        restricted_count = 0
+        duplicate_count = 0
+        skipped_count = 0
+
+        for section in sections:
+            if not isinstance(section, dict):
+                continue
+            section_id = str(section.get("id") or "").strip()
+            section_title = str(section.get("title") or section_id or "未分类").strip()
+            is_restricted = bool(section.get("isRestricted", False))
+            section_prompts = section.get("prompts", [])
+            if not isinstance(section_prompts, list):
+                continue
+
+            for prompt in section_prompts:
+                total_prompt_count += 1
+                if not isinstance(prompt, dict):
+                    skipped_count += 1
+                    continue
+
+                prompt_id = str(prompt.get("id") or "").strip()
+                title = str(prompt.get("title") or "").strip()
+                content = prompt.get("content")
+                if not isinstance(content, str):
+                    skipped_count += 1
+                    continue
+                content = content.strip()
+                if not title or not content:
+                    skipped_count += 1
+                    continue
+
+                key = f"大香蕉/{section_title}/{title}"
+                if key in seen_keys:
+                    duplicate_count += 1
+                    short_id = prompt_id[-6:] if prompt_id else str(duplicate_count)
+                    key = f"{key}#{short_id}"
+                    while key in seen_keys:
+                        duplicate_count += 1
+                        key = f"大香蕉/{section_title}/{title}#{short_id}-{duplicate_count}"
+                seen_keys.add(key)
+
+                if is_restricted:
+                    restricted_count += 1
+
+                prompts[key] = {
+                    "content": content,
+                    "prompt_id": prompt_id,
+                    "source_title": title,
+                    "section_id": section_id,
+                    "section_title": section_title,
+                    "restricted": is_restricted,
+                }
+
+        if not prompts:
+            return False, f"同步失败：未解析到有效提示词，跳过 {skipped_count} 条"
+
+        from datetime import datetime, timezone
+        banana_data = {
+            "schema_version": 1,
+            "source_url": BANANA_PROMPTS_URL,
+            "synced_at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
+            "remote_last_updated": web_data.get("lastUpdated"),
+            "prompts": prompts,
+        }
+        data_manager.save_banana_data(banana_data)
+
+        return (
+            True,
+            "大香蕉词库同步完成："
+            f"sections={len(sections)}，远端prompts={total_prompt_count}，"
+            f"保存={len(prompts)}，restricted={restricted_count}，"
+            f"重名处理={duplicate_count}，跳过={skipped_count}，"
+            f"remote_last_updated={web_data.get('lastUpdated') or '未知'}"
+        )
+
     async def on_unload(self) -> None:
+        if self._banana_update_task is not None and not self._banana_update_task.done():
+            self._banana_update_task.cancel()
+            try:
+                await self._banana_update_task
+            except asyncio.CancelledError:
+                pass
         self._media_pending.clear()
         self._media_last_sent_at.clear()
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
