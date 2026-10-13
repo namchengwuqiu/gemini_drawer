@@ -2,6 +2,10 @@
 
 ## v1.13.0 (2026-09-22)
 
+### 发布流程
+
+- 补齐插件市场多版本发布流程：推送 `vX.Y.Z` 或 `X.Y.Z` Tag 后，GitHub Actions 校验 Tag 与 manifest 版本一致、插件身份及必需文件，并从本更新日志提取说明创建正式 Release；已有 Tag 支持手动触发发布。README 补充市场安装、发版和历史版本发布要求，版本需经市场同步与审核收录后才会出现在安装列表中。
+
 ### 新增
 
 - **渠道显式协议 `protocol`**：渠道用哪种请求格式不再只靠 URL / 模型名猜。新增 `core/protocols.py` 作为协议目录，绘图协议 `openai_chat` / `gpt_image` / `images_json` / `gemini` / `agnes_image` / `tsai`，视频协议 `openai_chat` / `seedance_video` / `agnes_video` / `tsai_video` / `gemini`，并支持 `doubao`、`openai`、`seedance` 等常见别名。`Endpoint` 新增 `protocol` 字段，`resolve_provider()` 与视频侧 `describe_video_protocol()` 都是"显式协议优先、未设置或非法时回退自动识别"。没写 `protocol` 的老渠道行为与之前完全一致。

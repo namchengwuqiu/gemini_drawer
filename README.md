@@ -21,6 +21,14 @@
 
 ## 安装
 
+### 从插件市场安装
+
+在 MaiBot WebUI 的插件市场搜索「Gemini 绘图」，进入详情后，在「安装版本」中选择兼容的发布版本进行安装或更新。
+
+版本列表来自插件仓库已发布且已被市场收录的 GitHub Release。仅更新本仓库的版本号或创建 Tag 不会生成市场的可选版本；发布后还需要等待市场同步和审核收录。
+
+### 手动安装依赖
+
 在使用此插件前，请确保已安装其所需的 Python 依赖。
 
 在您的机器人项目环境的命令行中，进入本插件目录 (`plugins/gemini_drawer`)，然后运行以下指令：
@@ -28,6 +36,24 @@
 ```shell
 pip install -r requirements.txt
 ```
+
+### 开发者发布版本
+
+1. 更新 `_manifest.json` 的 `version`、`config.py` 中的 `version` / `config_version` 默认值以及 README 顶部版本号，并在 `CHANGELOG.md` 添加对应的 `## vX.Y.Z` 更新说明。保持插件 ID `namchengwuqiu.gemini_drawer` 不变，按实际兼容情况声明 MaiBot 与 SDK 版本范围。
+2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如首次发布当前 `1.13.0`：
+
+   ```shell
+   git push origin main
+   git tag v1.13.0
+   git push origin v1.13.0
+   ```
+
+3. GitHub Actions 的 **Publish plugin release** 工作流会校验 Tag、插件 ID、manifest 版本及必需文件，从更新日志提取该版本说明，并创建正式 GitHub Release。使用 GitHub 自动生成的源码包即可，无需额外上传附件。
+4. 等待插件市场同步、审核和收录。市场收录完成后，详情页会显示该版本供用户选择。
+
+如果 Tag 已推送但 Release 尚未创建，可在仓库 Actions 页面手动运行 **Publish plugin release**，填写已有 Tag。历史版本需在其实际对应的提交上创建 Tag 和 Release；不要把多个版本号都指向当前代码。
+
+已经收录的 Tag 与提交应保持不变；后续修复请使用新版本号发布。完整要求见[插件市场贡献指南](https://github.com/Mai-with-u/plugin-repo/blob/main/CONTRIBUTING.md)和[多版本说明](https://github.com/Mai-with-u/plugin-repo/blob/main/VERSIONING.md)。
 
 ---
 

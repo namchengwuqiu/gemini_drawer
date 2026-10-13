@@ -1,0 +1,84 @@
+name: Publish plugin release
+
+on:
+  push:
+    tags:
+      - 'v*'
+      - '[0-9]*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing version tag (for example v1.13.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+    steps:
+      - name: Check out the version tag
+        uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+
+      - name: Validate version and prepare release notes
+        env:
+          RELEASE_NOTES: ${{ runner.temp }}/gemini-drawer-release-notes.md
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          tag = os.environ['RELEASE_TAG']
+          match = re.fullmatch(r'v?((?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*))', tag)
+          if match is None:
+              raise SystemExit('Release tag must be vX.Y.Z or X.Y.Z.')
+          version = match.group(1)
+          manifest = json.loads(Path('_manifest.json').read_text(encoding='utf-8'))
+          if manifest.get('manifest_version') != 2:
+              raise SystemExit('The plugin marketplace requires manifest v2.')
+          if manifest.get('id') != 'namchengwuqiu.gemini_drawer':
+              raise SystemExit('The plugin ID must remain namchengwuqiu.gemini_drawer.')
+          if manifest.get('version') != version:
+              raise SystemExit(f'Tag {tag} does not match manifest version {manifest.get("version")}.')
+          for filename in ('plugin.py', 'LICENSE', 'README.md'):
+              if not Path(filename).is_file():
+                  raise SystemExit(f'Missing required plugin file: {filename}')
+
+          changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
+          heading = re.search(rf'^## v?{re.escape(version)}(?:[ \t].*)?$', changelog, re.MULTILINE)
+          if heading is None:
+              raise SystemExit(f'CHANGELOG.md is missing the section for {version}.')
+          remainder = changelog[heading.end():]
+          next_heading = re.search(r'^## ', remainder, re.MULTILINE)
+          notes = remainder[:next_heading.start()] if next_heading else remainder
+          if not notes.strip():
+              raise SystemExit(f'CHANGELOG.md has no release notes for {version}.')
+          Path(os.environ['RELEASE_NOTES']).write_text(notes.strip() + '\n', encoding='utf-8')
+          print(f'Validated {tag}; release notes are ready.')
+          PY
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_NOTES: ${{ runner.temp }}/gemini-drawer-release-notes.md
+        run: |
+          gh release create "$RELEASE_TAG" \
+            --verify-tag \
+            --title "Gemini 绘图 $RELEASE_TAG" \
+            --notes-file "$RELEASE_NOTES"
