@@ -28,12 +28,30 @@ DataManager (配置数据管理器):
     - data_manager: DataManager 的单例实例
 """
 import json
+from functools import wraps
 from pathlib import Path
+from threading import RLock
 from typing import List, Tuple, Optional, Dict, Any
 from .host_bridge import get_plugin_logger
 from ..utils import save_config_file
 
 logger = get_plugin_logger("plugin.gemini_drawer.managers")
+
+
+def _serialized(refresh: bool = False):
+    """让页面线程和绘图/聊天指令共享锁；修改前读取最新文件。"""
+    def decorate(method):
+        @wraps(method)
+        def wrapped(self, *args, **kwargs):
+            with self.lock:
+                if refresh:
+                    if isinstance(self, KeyManager):
+                        self.config = self._load_config()
+                    else:
+                        self.data = self._load_data()
+                return method(self, *args, **kwargs)
+        return wrapped
+    return decorate
 
 
 def _get_external_data_dir() -> Path:
@@ -102,6 +120,7 @@ def _file_stamp(path: Path) -> Optional[Tuple[float, int]]:
 
 class KeyManager:
     def __init__(self, keys_file_path: Path = None):
+        self.lock = RLock()
         if keys_file_path is None:
             self.plugin_dir = Path(__file__).parent.parent
             self.data_dir = _get_external_data_dir()
@@ -210,6 +229,7 @@ class KeyManager:
             logger.error(f"读取密钥配置失败: {e}")
             return {"keys": [], "current_index": 0}
 
+    @_serialized()
     def save_config(self, config_data: Dict[str, Any]):
         """原子写入：并发绘图时多个 record_key_usage 同时落盘不会写出半截文件。"""
         try:
@@ -220,7 +240,9 @@ class KeyManager:
             tmp_file.replace(self.keys_file)
         except IOError as e:
             logger.error(f"保存密钥配置失败: {e}")
+            raise
 
+    @_serialized(refresh=True)
     def add_keys(self, new_keys: List[str], key_type: str) -> Tuple[int, int]:
         existing_keys = {key['value'] for key in self.config.get('keys', [])}
         added_count = 0
@@ -231,15 +253,18 @@ class KeyManager:
             else:
                 key_obj = {"value": key_value, "type": key_type, "status": "active", "error_count": 0, "last_used": None, "max_errors": 5}
                 self.config['keys'].append(key_obj)
+                existing_keys.add(key_value)
                 added_count += 1
         self.save_config(self.config)
         return added_count, duplicate_count
 
+    @_serialized()
     def get_all_keys(self) -> List[Dict[str, Any]]:
         # 每次调用时从文件重新加载，支持实时更新
         self.config = self._load_config()
         return self.config.get('keys', [])
 
+    @_serialized(refresh=True)
     def record_key_usage(self, key_value: str, success: bool, force_disable: bool = False):
         keys = self.config.get('keys', [])
         for key_obj in keys:
@@ -257,6 +282,7 @@ class KeyManager:
                 self.save_config(self.config)
                 return
 
+    @_serialized(refresh=True)
     def manual_reset_keys(self, key_type: Optional[str] = None) -> int:
         keys = self.config.get('keys', [])
         reset_count = 0
@@ -271,6 +297,7 @@ class KeyManager:
             self.save_config(self.config)
         return reset_count
 
+    @_serialized(refresh=True)
     def reset_specific_key(self, key_type: str, index: int) -> bool:
         keys = self.config.get('keys', [])
         target_keys = []
@@ -286,6 +313,16 @@ class KeyManager:
         self.save_config(self.config)
         return True
 
+    @_serialized(refresh=True)
+    def set_key_error_limit(self, key_type: str, index: int, limit: int) -> bool:
+        keys = [key for key in self.config.get('keys', []) if key.get('type') == key_type]
+        if index < 1 or index > len(keys):
+            return False
+        keys[index - 1]['max_errors'] = limit
+        self.save_config(self.config)
+        return True
+
+    @_serialized(refresh=True)
     def delete_key(self, key_type: str, index: int) -> bool:
         """删除指定渠道的特定 Key"""
         keys = self.config.get('keys', [])
@@ -303,6 +340,7 @@ class KeyManager:
         logger.info(f"已删除渠道 {key_type} 的第 {index} 个 Key: {key_obj['value'][:8]}...")
         return True
 
+    @_serialized(refresh=True)
     def delete_keys_by_type(self, key_type: str) -> int:
         """删除指定渠道的所有 Key，返回删除数量"""
         keys = self.config.get('keys', [])
@@ -316,6 +354,7 @@ class KeyManager:
 
 class DataManager:
     def __init__(self, data_file_path: Path = None):
+        self.lock = RLock()
         # 文件版本指纹缓存：避免每次取渠道/提示词都重新解析大 JSON
         # （data.json 约 700KB，banana_prompts.json 约 2.6MB）
         self._data_cache: Optional[Dict[str, Any]] = None
@@ -422,6 +461,7 @@ class DataManager:
             logger.error(f"Failed to load data.json: {e}")
             return {"prompts": {}, "channels": {}}
 
+    @_serialized()
     def save_data(self):
         """原子写入，避免并发或中断时留下半截 data.json。"""
         try:
@@ -435,6 +475,7 @@ class DataManager:
             self._data_stamp = _file_stamp(self.data_file)
         except Exception as e:
             logger.error(f"Failed to save data.json: {e}")
+            raise
 
     def load_banana_data(self) -> Dict[str, Any]:
         """读取大香蕉独立词库；失败时不影响本地 data.json。
@@ -621,17 +662,20 @@ class DataManager:
         except Exception as e:
             logger.error(f"Migration from TOML failed: {e}")
 
+    @_serialized()
     def get_prompts(self) -> Dict[str, str]:
         # 与 get_channels 一致：从文件刷新（命中指纹缓存时无额外解析开销）
         self.data = self._load_data()
         return self.data.get("prompts", {})
 
+    @_serialized(refresh=True)
     def add_prompt(self, name: str, prompt: str):
         if "prompts" not in self.data:
             self.data["prompts"] = {}
         self.data["prompts"][name] = prompt
         self.save_data()
 
+    @_serialized(refresh=True)
     def delete_prompt(self, name: str) -> bool:
         if name in self.data.get("prompts", {}):
             del self.data["prompts"][name]
@@ -639,6 +683,7 @@ class DataManager:
             return True
         return False
 
+    @_serialized(refresh=True)
     def update_prompt(self, name: str, prompt: str) -> bool:
         """修改已存在的提示词"""
         if name in self.data.get("prompts", {}):
@@ -647,17 +692,20 @@ class DataManager:
             return True
         return False
 
+    @_serialized()
     def get_channels(self) -> Dict[str, Any]:
         # 每次调用时从文件重新加载，支持实时更新（命中指纹缓存时无额外解析开销）
         self.data = self._load_data()
         return self.data.get("channels", {})
 
+    @_serialized(refresh=True)
     def add_channel(self, name: str, info: Dict[str, Any]):
         if "channels" not in self.data:
             self.data["channels"] = {}
         self.data["channels"][name] = info
         self.save_data()
 
+    @_serialized(refresh=True)
     def delete_channel(self, name: str) -> bool:
         if name in self.data.get("channels", {}):
             del self.data["channels"][name]
@@ -665,6 +713,7 @@ class DataManager:
             return True
         return False
         
+    @_serialized(refresh=True)
     def update_channel(self, name: str, info: Dict[str, Any]):
          if "channels" not in self.data:
             self.data["channels"] = {}

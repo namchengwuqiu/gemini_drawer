@@ -1,14 +1,17 @@
 from typing import Any, Tuple, Optional, Type
 from pathlib import Path
+import asyncio
+import json
 import random
 import time
 import httpx
-from maibot_sdk import Command, HookHandler, MaiBotPlugin, Tool
+from maibot_sdk import API, Command, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from maibot_sdk.context import PluginContext
 
 from .config import GeminiDrawerConfig
 from .core.managers import data_manager, key_manager
+from .core.webui import DrawerWebUI
 from .utils.version import get_plugin_version
 
 from .commands.help_command import HelpCommand
@@ -265,6 +268,45 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         # 上一次成功发出媒体的时间戳。图片发完后对话循环不会停，下一轮 Planner
         # 常常还在处理同一条用户消息，于是又拍一张——pending 那时已经清零，拦不住。
         self._media_last_sent_at: dict[str, float] = {}
+        self._webui = DrawerWebUI(data_manager, key_manager)
+
+    async def _webui_call(self, method, **kwargs: Any) -> dict[str, Any]:
+        # 文件解析与写入在工作线程执行，不占用插件的消息处理循环。
+        try:
+            return {"ok": True, **await asyncio.to_thread(method, **kwargs)}
+        except ValueError as exc:
+            return {"ok": False, "message": str(exc)}
+        except OSError:
+            return {"ok": False, "message": "保存失败，请检查数据目录权限或磁盘空间，刷新列表核实结果后再试。"}
+
+    @API("drawer_list", description="读取绘图管理页面的分页数据", version="1")
+    async def drawer_list(self, kind: str, search: str = "", page: int = 1,
+                          channel: str = "", unassigned: bool = False) -> dict[str, Any]:
+        return await self._webui_call(self._webui.list_records, kind=kind, search=search, page=page,
+                                      channel=channel, unassigned=unassigned)
+
+    @API("drawer_detail", description="读取单条绘图数据；Key 不返回明文", version="1")
+    async def drawer_detail(self, kind: str, record_id: str) -> dict[str, Any]:
+        return await self._webui_call(self._webui.detail, kind=kind, record_id=record_id)
+
+    @API("drawer_save", description="保存单条记录到原 JSON 文件", version="1")
+    async def drawer_save(self, kind: str, record_id: str, version: str, payload: str) -> dict[str, Any]:
+        try:
+            record = json.loads(payload)
+        except ValueError:
+            return {"ok": False, "message": "记录内容不是有效的 JSON。"}
+        return await self._webui_call(self._webui.change, kind=kind, operation="save", record_id=record_id,
+                                      version=version, payload=record)
+
+    @API("drawer_delete", description="从原 JSON 文件删除单条记录", version="1")
+    async def drawer_delete(self, kind: str, record_id: str, version: str) -> dict[str, Any]:
+        return await self._webui_call(self._webui.change, kind=kind, operation="delete", record_id=record_id,
+                                      version=version, payload={})
+
+    @API("drawer_reset_key", description="启用 Key 并清零错误次数", version="1")
+    async def drawer_reset_key(self, record_id: str, version: str) -> dict[str, Any]:
+        return await self._webui_call(self._webui.change, kind="keys", operation="reset", record_id=record_id,
+                                      version=version, payload={})
 
     def _begin_media_task(self, stream_id: str) -> None:
         key = str(stream_id or "").strip()

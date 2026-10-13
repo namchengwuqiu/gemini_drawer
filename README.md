@@ -1,12 +1,13 @@
 # Gemini 绘图插件
 
-> **Version:** 1.13.0
+> **Version:** 1.14.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
 ## 主要特性
 
 - **动态指令**：无需修改代码，即可通过管理指令添加绘图渠道、API Key 和绘图风格。
+- **WebUI 管理页面（v1.14.0）**：渠道与 Key 联合展示，通过弹框管理渠道、提示词和密钥，数据仍保存到各自的 JSON 文件。
 - **多样化图片源**：支持多种方式获取原始图片，极大提升了使用的便利性。
 - **多 API Key 管理**：自动轮换并管理多个 API Key，保证服务稳定。
 - **多后端支持**：支持 Google 官方、OpenAI 兼容格式、第三方兼容 API、LMArena 后端、火山豆包 API 以及 Agnes 图片/视频 API，渠道统一通过指令管理。
@@ -40,12 +41,12 @@ pip install -r requirements.txt
 ### 开发者发布版本
 
 1. 更新 `_manifest.json` 的 `version`、`config.py` 中的 `version` / `config_version` 默认值以及 README 顶部版本号，并在 `CHANGELOG.md` 添加对应的 `## vX.Y.Z` 更新说明。保持插件 ID `namchengwuqiu.gemini_drawer` 不变，按实际兼容情况声明 MaiBot 与 SDK 版本范围。
-2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如首次发布当前 `1.13.0`：
+2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如首次发布当前 `1.14.0`：
 
    ```shell
    git push origin main
-   git tag v1.13.0
-   git push origin v1.13.0
+   git tag v1.14.0
+   git push origin v1.14.0
    ```
 
 3. GitHub Actions 的 **Publish plugin release** 工作流会校验 Tag、插件 ID、manifest 版本及必需文件，从更新日志提取该版本说明，并创建正式 GitHub Release。使用 GitHub 自动生成的源码包即可，无需额外上传附件。
@@ -452,8 +453,8 @@ pending 会话隔离、等待提示随机取值）。测试不参与插件运行
 
 ### 发版
 
-版本号只需改 `_manifest.json` 的 `version`；`config.py` 的 `version` /
-`config_version` 是配置 schema 的默认值与兜底（WebUI 与配置版本升级用），
+发版时同步修改 `_manifest.json` 的 `version`、`config.py` 的 `version` /
+`config_version` 默认值、README 顶部版本号和带版本号的更新日志。配置默认值用于 WebUI 与配置版本升级；
 启动日志的版本号由 `utils/version.py` 直接读清单文件得到，不会因为运行时
 `config.toml` 里的旧副本而报错版本。`tests/test_version.py` 会校验三处
 （清单 / schema 默认值 / README 顶部）一致，改漏了会直接失败。
@@ -461,6 +462,25 @@ pending 会话隔离、等待提示随机取值）。测试不参与插件运行
 ---
 
 ## API Key 及后端说明
+
+### WebUI 数据管理（v1.14.0）
+
+支持自定义插件页面的 MaiBot WebUI 会在侧栏“插件扩展”下显示 **Gemini 绘图管理**。也可以从插件列表底部“管理插件页面”进入。
+
+- **渠道与 Key**：渠道信息和所属 Key 在同一列表展示，可就地添加、编辑、删除或重置 Key；未匹配渠道的历史 Key 在页面底部保留管理入口。
+- **渠道**：通过弹框添加、编辑渠道，配置 API 地址、模型、图片/视频类型、协议、返回格式和启用状态，也可删除渠道。
+- **提示词**：按名称或全文搜索、分页浏览，添加、修改和删除本地提示词。
+- **Key**：通过弹框添加或替换密钥，调整所属渠道、状态及错误禁用上限；重置可启用密钥并清零错误次数。渠道下添加时自动填写所属渠道，Key 较多时支持按渠道分页。
+
+页面直接读取插件当前使用的外部数据目录，渠道和提示词保存到 `data.json`，Key 保存到 `keys.json`。这些操作不迁移数据，也不会把业务数据写入 `config.toml`。Docker 部署下，数据仍位于 `/MaiMBot/data/gemini_drawer/`（本项目宿主机对应 `data/MaiMBot/gemini_drawer/`）。
+
+Key 默认遮盖且不回显明文，编辑时留空表示保留旧密钥。编辑保存会保留最新使用统计和未修改的额外字段；记录发生编辑冲突时页面保留输入并提示重新打开。删除渠道会保留其 Key，便于之后恢复渠道或重新分配。渠道和提示词的名称作为引用标识，编辑时保持原名称。
+
+页面管理的是本地 `data.json` 提示词；独立同步词库 `banana_prompts.json` 不在本页编辑范围内。原有聊天管理指令仍可使用，修改后点击页面“刷新”即可看到最新数据。
+
+本页面使用当前项目宿主支持的 WebUI v2 自定义页面和受限 API 桥接，需要 dashboard 支持 `custom_pages`。在线 [WebUI 页面文档](https://docs.mai-mai.org/plugin/webui-pages) 当前介绍的是 v1 声明式组件；本实现沿用页面声明与本插件静态 API 绑定机制，页面模式以当前宿主协议为准。
+
+---
 
 本插件支持三种类型的后端，并会自动轮询尝试：
 

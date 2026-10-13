@@ -1,0 +1,128 @@
+{
+  "schema_version": 2,
+  "required_capabilities": ["custom_pages"],
+  "workspace_title": "Gemini 绘图",
+  "pages": [
+    {
+      "id": "manage",
+      "title": "Gemini 绘图管理",
+      "description": "管理绘图渠道、提示词与 API Key。",
+      "placement": "sidebar",
+      "icon": "database",
+      "mode": "custom",
+      "entry": "webui/manage.html",
+      "layout": "document",
+      "queries": {
+        "list": {
+          "api": "drawer_list",
+          "version": "1",
+          "parameters": {
+            "kind": {
+              "type": "string",
+              "required": true,
+              "choices": ["channels", "prompts", "keys"]
+            },
+            "search": {
+              "type": "string",
+              "max_length": 200
+            },
+            "page": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "channel": {
+              "type": "string",
+              "max_length": 120
+            },
+            "unassigned": {
+              "type": "boolean"
+            }
+          }
+        },
+        "detail": {
+          "api": "drawer_detail",
+          "version": "1",
+          "parameters": {
+            "kind": {
+              "type": "string",
+              "required": true,
+              "choices": ["channels", "prompts", "keys"]
+            },
+            "record_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 120
+            }
+          }
+        }
+      },
+      "actions": {
+        "save": {
+          "api": "drawer_save",
+          "version": "1",
+          "parameters": {
+            "kind": {
+              "type": "string",
+              "required": true,
+              "choices": ["channels", "prompts", "keys"]
+            },
+            "record_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 120
+            },
+            "version": {
+              "type": "string",
+              "required": true,
+              "max_length": 64
+            },
+            "payload": {
+              "type": "string",
+              "required": true,
+              "max_length": 50000
+            }
+          }
+        },
+        "delete": {
+          "api": "drawer_delete",
+          "version": "1",
+          "confirmation": "确认删除这条记录？删除渠道不会删除其 Key；删除后请核对当前列表。",
+          "parameters": {
+            "kind": {
+              "type": "string",
+              "required": true,
+              "choices": ["channels", "prompts", "keys"]
+            },
+            "record_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 120
+            },
+            "version": {
+              "type": "string",
+              "required": true,
+              "max_length": 64
+            }
+          }
+        },
+        "reset": {
+          "api": "drawer_reset_key",
+          "version": "1",
+          "confirmation": "确认启用这个 Key 并将错误次数清零？",
+          "parameters": {
+            "record_id": {
+              "type": "string",
+              "required": true,
+              "max_length": 120
+            },
+            "version": {
+              "type": "string",
+              "required": true,
+              "max_length": 64
+            }
+          }
+        }
+      }
+    }
+  ]
+}

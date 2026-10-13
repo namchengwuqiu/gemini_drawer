@@ -1,0 +1,1313 @@
+<style>
+  :root {
+    --maibot-background: #fafafa;
+    --maibot-surface: #fff;
+    --maibot-foreground: #202124;
+    --maibot-muted: #62666d;
+    --maibot-soft: #f3f4f5;
+    --maibot-border: #dddfe3;
+    --maibot-primary: #253b50;
+    --maibot-primary-foreground: #fff;
+    --maibot-danger: #b3261e;
+    --maibot-radius: 8px;
+  }
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+    font-family:
+      -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Microsoft YaHei", sans-serif;
+    font-size: 14px;
+    line-height: 1.6;
+  }
+  button,
+  input,
+  textarea,
+  select {
+    font: inherit;
+  }
+  button {
+    min-height: 40px;
+  }
+  button:disabled {
+    opacity: 0.5;
+    cursor: wait;
+  }
+  button:active {
+    filter: brightness(0.92);
+  }
+  :focus-visible {
+    outline: 2px solid var(--maibot-primary);
+    outline-offset: 3px;
+  }
+  main {
+    padding: 24px;
+    max-width: 1440px;
+    margin: auto;
+  }
+  .header,
+  .toolbar,
+  .pager,
+  .form-actions,
+  .editor-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  h1 {
+    font-size: 22px;
+    font-weight: 600;
+    margin: 0;
+  }
+  h2 {
+    font-size: 18px;
+    font-weight: 600;
+    margin: 0;
+  }
+  .muted {
+    color: var(--maibot-muted);
+  }
+  p {
+    margin: 6px 0 0;
+  }
+  .tabs {
+    display: flex;
+    gap: 8px;
+    margin: 24px 0 16px;
+    border-bottom: 1px solid var(--maibot-border);
+    padding-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .tabs button {
+    gap: 8px;
+  }
+  .count {
+    font-variant-numeric: tabular-nums;
+    font-size: 12px;
+    padding: 1px 7px;
+    border-radius: 12px;
+    background: var(--maibot-soft);
+    color: var(--maibot-foreground);
+  }
+  .search {
+    display: flex;
+    gap: 8px;
+    flex: 1;
+    max-width: 540px;
+  }
+  .search input {
+    flex: 1;
+    min-width: 0;
+  }
+  .toolbar {
+    margin-bottom: 16px;
+  }
+  .maibot-button {
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+    background: var(--maibot-surface);
+    color: var(--maibot-foreground);
+    padding: 8px 14px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .maibot-button-primary,
+  .maibot-button[aria-pressed="true"] {
+    background: var(--maibot-primary);
+    color: var(--maibot-primary-foreground);
+  }
+  .maibot-input,
+  .maibot-select {
+    width: 100%;
+    padding: 9px 12px;
+    background: var(--maibot-surface);
+    color: var(--maibot-foreground);
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+  }
+  textarea {
+    resize: vertical;
+    min-height: 110px;
+    line-height: 1.6;
+  }
+  .table-wrap {
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+    overflow: hidden;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    table-layout: fixed;
+    text-align: left;
+  }
+  th,
+  td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--maibot-border);
+    vertical-align: top;
+    overflow-wrap: anywhere;
+  }
+  th {
+    font-weight: 500;
+    color: var(--maibot-muted);
+    background: var(--maibot-soft);
+  }
+  tbody tr:last-child td {
+    border-bottom: 0;
+  }
+  .record-name {
+    font-weight: 500;
+  }
+  .subline {
+    font-size: 13px;
+    margin-top: 4px;
+    color: var(--maibot-muted);
+  }
+  .row-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .row-actions button {
+    padding: 6px 10px;
+    min-height: 34px;
+  }
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .badge:before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--maibot-muted);
+  }
+  .badge.on:before {
+    background: #278252;
+  }
+  .pager {
+    margin-top: 16px;
+    font-variant-numeric: tabular-nums;
+  }
+  .pager > div {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .empty {
+    text-align: center;
+    padding: 48px 20px;
+    color: var(--maibot-muted);
+  }
+  .notice {
+    border: 1px solid var(--maibot-danger);
+    padding: 12px 16px;
+    border-radius: var(--maibot-radius);
+    margin-bottom: 16px;
+    overflow-wrap: anywhere;
+  }
+  .notice button {
+    margin-left: 12px;
+  }
+  .editor {
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+    padding: 20px;
+    margin-bottom: 20px;
+    background: var(--maibot-surface);
+  }
+  .editor-heading {
+    border-bottom: 1px solid var(--maibot-border);
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+  }
+  .fields {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 16px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    min-width: 0;
+  }
+  .field.wide {
+    grid-column: 1/-1;
+  }
+  .field small {
+    color: var(--maibot-muted);
+    font-size: 13px;
+  }
+  .toggles {
+    display: flex;
+    gap: 20px;
+    flex-wrap: wrap;
+    grid-column: 1/-1;
+  }
+  .toggle {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 40px;
+  }
+  .toggle input {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--maibot-primary);
+  }
+  .form-actions {
+    justify-content: flex-end;
+    margin-top: 20px;
+  }
+  .editor-error {
+    margin-top: 16px;
+    color: var(--maibot-danger);
+    overflow-wrap: anywhere;
+  }
+  .toast {
+    position: fixed;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    padding: 10px 20px;
+    background: var(--maibot-foreground);
+    color: var(--maibot-surface);
+    border-radius: var(--maibot-radius);
+    z-index: 10;
+    max-width: 90vw;
+  }
+  .danger-text {
+    color: var(--maibot-danger);
+  }
+  dialog {
+    top: calc(var(--maibot-viewport-top, 0px) + 40px);
+    margin: 0 auto;
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+    padding: 24px;
+    max-width: calc(100% - 32px);
+    color: var(--maibot-foreground);
+    background: var(--maibot-surface);
+  }
+  dialog::backdrop {
+    background: rgba(0, 0, 0, 0.3);
+  }
+  [hidden] {
+    display: none !important;
+  }
+  .mono {
+    font-family: var(--maibot-font-mono, ui-monospace, monospace);
+    font-size: 13px;
+  }
+  input[readonly] {
+    background: var(--maibot-soft);
+  }
+  @media (max-width: 680px) {
+    main {
+      padding: 16px;
+    }
+    .header {
+      align-items: flex-start;
+    }
+    h1 {
+      font-size: 20px;
+    }
+    .toolbar {
+      flex-wrap: wrap;
+    }
+    .search {
+      max-width: none;
+      width: 100%;
+      flex-basis: 100%;
+    }
+    .fields {
+      grid-template-columns: 1fr;
+    }
+    .editor {
+      padding: 16px;
+    }
+    .pager {
+      align-items: flex-start;
+      flex-wrap: wrap;
+    }
+    .table-wrap {
+      overflow: visible;
+    }
+    table,
+    tbody,
+    tr,
+    td {
+      display: block;
+      width: 100%;
+    }
+    thead {
+      display: none;
+    }
+    tr {
+      border-bottom: 1px solid var(--maibot-border);
+      padding: 12px;
+    }
+    tr:last-child {
+      border: 0;
+    }
+    td {
+      border: 0;
+      padding: 4px 0;
+    }
+    .row-actions {
+      justify-content: flex-start;
+      margin-top: 8px;
+    }
+    .tabs {
+      gap: 6px;
+    }
+    .tabs button {
+      padding: 8px 10px;
+    }
+    .count {
+      padding: 1px 5px;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      scroll-behavior: auto !important;
+    }
+  }
+</style>
+<style>
+  .key-summary {
+    margin-left: auto;
+    align-self: center;
+    font-size: 13px;
+  }
+  .channel-heading td {
+    border-bottom: 0;
+  }
+  .key-container > td {
+    padding-top: 0;
+    padding-bottom: 20px;
+  }
+  .key-group {
+    background: var(--maibot-soft);
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+    padding: 12px 16px;
+  }
+  .key-heading,
+  .key-pager {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+  .key-title {
+    font-weight: 500;
+  }
+  .key-heading button {
+    padding: 6px 10px;
+    min-height: 34px;
+  }
+  .key-row {
+    display: grid;
+    grid-template-columns:
+      minmax(130px, 1fr) minmax(70px, 0.5fr) minmax(100px, 0.7fr)
+      minmax(240px, 1fr);
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-top: 1px solid var(--maibot-border);
+    margin-top: 8px;
+  }
+  .key-pager {
+    justify-content: flex-end;
+    margin-top: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .unassigned {
+    margin-top: 28px;
+  }
+  .unassigned > p {
+    margin-bottom: 12px;
+  }
+  dialog.editor-dialog {
+    position: fixed;
+    top: calc(var(--maibot-viewport-top, 0px) + 16px);
+    margin: 0 auto;
+    width: min(760px, calc(100% - 32px));
+    max-width: none;
+    max-height: max(160px, calc(var(--maibot-viewport-height, 80vh) - 32px));
+    overflow-y: auto;
+    overscroll-behavior: contain;
+    padding: 0;
+    border: 1px solid var(--maibot-border);
+    border-radius: var(--maibot-radius);
+    background: var(--maibot-surface);
+    color: var(--maibot-foreground);
+  }
+  .editor-dialog .editor-heading {
+    position: sticky;
+    top: 0;
+    background: var(--maibot-surface);
+    padding: 16px 24px;
+    margin: 0;
+    z-index: 1;
+  }
+  .editor-dialog #record-form {
+    padding: 20px 24px;
+  }
+  .editor-dialog .form-actions {
+    position: sticky;
+    bottom: 0;
+    background: var(--maibot-surface);
+    padding-top: 12px;
+  }
+  dialog::backdrop {
+    background: rgba(0, 0, 0, 0.45);
+  }
+  @media (max-width: 680px) {
+    .key-container {
+      padding-top: 0;
+    }
+    .key-container > td {
+      padding: 0;
+    }
+    .key-row {
+      grid-template-columns: 1fr auto;
+      gap: 6px;
+    }
+    .key-row .row-actions {
+      grid-column: 1/-1;
+      justify-content: flex-start;
+    }
+    .key-row > span.muted {
+      grid-column: 1/-1;
+    }
+    .key-summary {
+      margin-left: 0;
+    }
+    .key-group {
+      padding: 12px;
+    }
+    .editor-dialog .editor-heading {
+      padding: 12px 16px;
+    }
+    .editor-dialog #record-form {
+      padding: 16px;
+    }
+  }
+</style>
+<main class="maibot-page">
+  <header class="header">
+    <div>
+      <h1>Gemini 绘图管理</h1>
+      <p class="muted">管理渠道、提示词和 Key。</p>
+    </div>
+    <button class="maibot-button" id="refresh">刷新</button>
+  </header>
+  <nav class="tabs" aria-label="数据分类">
+    <button class="maibot-button" data-kind="channels">
+      渠道与 Key <span class="count" id="count-channels">—</span>
+    </button>
+    <button class="maibot-button" data-kind="prompts">
+      提示词 <span class="count" id="count-prompts">—</span>
+    </button>
+    <span class="muted key-summary"
+      >共 <span id="count-keys">—</span> 个 Key</span
+    >
+  </nav>
+  <div id="error" class="notice" role="alert" hidden>
+    <span id="error-text"></span
+    ><button class="maibot-button" id="retry">重试</button>
+  </div>
+  <div class="toolbar">
+    <form id="search-form" class="search">
+      <input
+        class="maibot-input"
+        id="search"
+        type="search"
+        aria-label="搜索记录"
+        placeholder="搜索名称、模型或地址"
+        maxlength="200"
+      /><button class="maibot-button" type="button" id="search-submit">
+        搜索
+      </button>
+    </form>
+    <button class="maibot-button maibot-button-primary" id="add">
+      添加渠道
+    </button>
+  </div>
+  <dialog id="editor" class="editor-dialog" aria-labelledby="editor-title">
+    <div class="editor-heading">
+      <h2 id="editor-title">编辑记录</h2>
+      <button class="maibot-button" id="close">关闭</button>
+    </div>
+    <form id="record-form">
+      <fieldset id="fieldset" style="border: 0; padding: 0; margin: 0">
+        <div id="fields" class="fields"></div>
+        <p id="editor-error" class="editor-error" role="alert" hidden></p>
+        <div class="form-actions">
+          <button class="maibot-button" type="button" id="cancel">取消</button
+          ><button
+            class="maibot-button maibot-button-primary"
+            type="button"
+            id="save"
+          >
+            保存
+          </button>
+        </div>
+      </fieldset>
+    </form>
+  </dialog>
+  <div class="table-wrap" aria-busy="true" id="table-wrap">
+    <table aria-label="记录列表">
+      <thead>
+        <tr id="columns"></tr>
+      </thead>
+      <tbody id="rows">
+        <tr>
+          <td class="empty">正在读取记录…</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <footer class="pager">
+    <span id="total" class="muted"></span>
+    <div>
+      <button class="maibot-button" id="prev">上一页</button
+      ><span id="page-info"></span
+      ><button class="maibot-button" id="next">下一页</button>
+    </div>
+  </footer>
+  <section
+    id="unassigned"
+    class="unassigned"
+    aria-labelledby="unassigned-title"
+    hidden
+  >
+    <h2 id="unassigned-title">未匹配渠道的 Key</h2>
+    <p class="muted">这些 Key 的所属渠道尚未配置。可以编辑归属、重置或删除。</p>
+    <div id="unassigned-keys"></div>
+  </section>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="discard" aria-labelledby="discard-title">
+    <h2 id="discard-title">放弃未保存的修改？</h2>
+    <p>当前输入尚未保存。</p>
+    <div class="form-actions">
+      <button class="maibot-button" id="keep">继续编辑</button
+      ><button class="maibot-button maibot-button-primary" id="discard-confirm">
+        放弃修改
+      </button>
+    </div>
+  </dialog>
+</main>
+<script>
+  (() => {
+    const $ = (id) => document.getElementById(id);
+    const labels = { channels: "渠道", prompts: "提示词", keys: "Key" };
+    let kind = "channels",
+      search = "",
+      page = 1,
+      pages = 1,
+      busy = false,
+      editing = null,
+      dirty = false,
+      toastTimer,
+      discardResolve,
+      returnFocus;
+    const keyPanels = new Map();
+    const inputs = {};
+    function text(tag, value, className = "") {
+      const node = document.createElement(tag);
+      node.textContent = value;
+      node.className = className;
+      return node;
+    }
+    function setBusy(value) {
+      busy = value;
+      document
+        .querySelectorAll("button")
+        .forEach((button) => (button.disabled = value));
+      $("fieldset").disabled = value;
+      $("table-wrap").setAttribute("aria-busy", String(value));
+      if (!value) {
+        $("prev").disabled = page <= 1;
+        $("next").disabled = page >= pages;
+        document
+          .querySelectorAll('[data-page-disabled="true"]')
+          .forEach((button) => (button.disabled = true));
+      }
+    }
+    function showError(error, editor = false) {
+      const message = error.message || String(error);
+      if (message.includes("Action cancelled")) return;
+      $(editor ? "editor-error" : "error-text").textContent = message;
+      $(editor ? "editor-error" : "error").hidden = false;
+    }
+    function toast(message) {
+      clearTimeout(toastTimer);
+      $("toast").textContent = message;
+      $("toast").hidden = false;
+      toastTimer = setTimeout(() => ($("toast").hidden = true), 3000);
+    }
+    async function call(action, name, args) {
+      const result = await window.maibot[action](name, args);
+      if (!result.ok)
+        throw new Error(result.message || "操作失败，请刷新后重试。");
+      return result;
+    }
+    async function mayDiscard() {
+      if (!dirty) return true;
+      const focus = document.activeElement;
+      $("discard").showModal();
+      $("keep").focus();
+      const accepted = await new Promise(
+        (resolve) => (discardResolve = resolve),
+      );
+      focus?.focus({ preventScroll: true });
+      return accepted;
+    }
+    function finishDiscard(accepted) {
+      $("discard").close();
+      discardResolve?.(accepted);
+      discardResolve = null;
+    }
+    $("keep").onclick = () => finishDiscard(false);
+    $("discard-confirm").onclick = () => finishDiscard(true);
+    $("discard").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      finishDiscard(false);
+    });
+    function closeEditor() {
+      editing = null;
+      dirty = false;
+      if ($("editor").open) $("editor").close();
+      if (returnFocus?.isConnected) returnFocus.focus({ preventScroll: true });
+      else $("add").focus();
+      $("fields").replaceChildren();
+      Object.keys(inputs).forEach((name) => delete inputs[name]);
+    }
+    async function navigate(nextKind, nextSearch, nextPage) {
+      if (busy || !(await mayDiscard())) return;
+      setBusy(true);
+      try {
+        await window.maibot.navigate("manage", {
+          kind: nextKind,
+          search: nextSearch,
+          page: nextPage,
+        });
+      } catch (error) {
+        showError(error);
+        setBusy(false);
+      }
+    }
+    function button(label, callback) {
+      const node = text("button", label, "maibot-button");
+      node.type = "button";
+      node.onclick = callback;
+      return node;
+    }
+    async function load() {
+      if (busy) return;
+      setBusy(true);
+      $("error").hidden = true;
+      try {
+        const result = await call("query", "list", { kind, search, page });
+        page = result.page;
+        pages = result.pages;
+        Object.entries(result.counts).forEach(
+          ([name, count]) => ($("count-" + name).textContent = count),
+        );
+        $("total").textContent =
+          `共 ${result.total} 条${search ? "匹配记录" : ""}`;
+        $("page-info").textContent = `${page} / ${pages}`;
+        renderRows(result.rows);
+        renderUnassigned(result.unassigned);
+      } catch (error) {
+        showError(error);
+        if (!$("rows").querySelector("[data-record]"))
+          $("rows").replaceChildren(emptyRow("读取失败，点击“重试”重新加载。"));
+      } finally {
+        setBusy(false);
+      }
+    }
+    function emptyRow(message) {
+      const row = document.createElement("tr");
+      const cell = text("td", message, "empty");
+      cell.colSpan = 4;
+      row.append(cell);
+      return row;
+    }
+    function renderRows(rows) {
+      const titles =
+        kind === "channels"
+          ? ["渠道 / API 地址", "模型 / 协议", "状态", "操作"]
+          : ["名称", "内容预览", "长度", "操作"];
+      $("columns").replaceChildren(
+        ...titles.map((title, i) => {
+          const cell = text("th", title);
+          cell.scope = "col";
+          cell.style.width = ["28%", "32%", "16%", "24%"][i];
+          return cell;
+        }),
+      );
+      $("rows").replaceChildren();
+      keyPanels.clear();
+      if (!rows.length) {
+        $("rows").append(
+          emptyRow(
+            search
+              ? "没有匹配记录，请调整搜索条件。"
+              : `暂无${labels[kind]}，点击“添加${labels[kind]}”开始。`,
+          ),
+        );
+        return;
+      }
+      rows.forEach((record) => {
+        const row = document.createElement("tr");
+        row.dataset.record = record.id;
+        const cells = Array.from({ length: 4 }, () =>
+          document.createElement("td"),
+        );
+        cells[0].append(text("div", record.name, "record-name"));
+        if (kind === "channels") {
+          row.className = "channel-heading";
+          cells[0].append(text("div", record.url, "subline"));
+          cells[1].append(
+            text("div", record.model || "未指定模型"),
+            text(
+              "div",
+              `${record.is_video ? "视频" : "图片"} · ${record.protocol === "auto" ? "自动识别协议" : record.protocol}`,
+              "subline",
+            ),
+          );
+          cells[2].append(
+            text(
+              "span",
+              record.enabled ? "已启用" : "已禁用",
+              "badge" + (record.enabled ? " on" : ""),
+            ),
+          );
+        } else {
+          cells[1].append(text("div", record.preview));
+          cells[2].textContent = `${record.length} 字符`;
+        }
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        actions.append(
+          button(kind === "channels" ? "编辑渠道" : "编辑", () =>
+            openEditor(record),
+          ),
+          button(kind === "channels" ? "删除渠道" : "删除", () =>
+            runAction("delete", record),
+          ),
+        );
+        cells[3].append(actions);
+        row.append(...cells);
+        $("rows").append(row);
+        if (kind === "channels") {
+          const keyRow = document.createElement("tr");
+          keyRow.className = "key-container";
+          const cell = document.createElement("td");
+          cell.colSpan = 4;
+          const panel = document.createElement("div");
+          panel.className = "key-group";
+          keyPanels.set(record.id, {
+            record,
+            panel,
+            page: 1,
+            pages: record.key_pages,
+            preview: true,
+          });
+          paintKeys(panel, record.keys, record.key_count, {
+            channel: record.id,
+            preview: record.key_count > 5,
+            page: 1,
+            pages: record.key_pages,
+            hasInlineKey: record.has_inline_key,
+          });
+          cell.append(panel);
+          keyRow.append(cell);
+          $("rows").append(keyRow);
+        }
+      });
+    }
+    function paintKeys(panel, rows, total, options) {
+      panel.replaceChildren();
+      const heading = document.createElement("div");
+      heading.className = "key-heading";
+      heading.append(text("span", `Key · ${total}`, "key-title"));
+      if (!options.unassigned)
+        heading.append(
+          button("添加 Key", () => openEditor(null, "keys", options.channel)),
+        );
+      panel.append(heading);
+      if (options.hasInlineKey)
+        panel.append(
+          text("p", "另有内联 Key，可在“编辑渠道”中维护。", "muted"),
+        );
+      if (!rows.length) panel.append(text("p", "未配置独立 Key。", "muted"));
+      rows.forEach((record) => {
+        const row = document.createElement("div");
+        row.className = "key-row";
+        row.dataset.key = record.id;
+        const name = text("div", record.name, "mono");
+        if (options.unassigned)
+          name.append(text("div", record.channel, "subline"));
+        const status = text(
+          "span",
+          record.status === "active" ? "可用" : "已禁用",
+          "badge" + (record.status === "active" ? " on" : ""),
+        );
+        const errors = text(
+          "span",
+          `错误 ${record.error_count} / ${record.max_errors === -1 ? "不限" : record.max_errors}`,
+          "muted",
+        );
+        const actions = document.createElement("div");
+        actions.className = "row-actions";
+        actions.append(
+          button("编辑 Key", () => openEditor(record, "keys")),
+          button("重置", () => runAction("reset", record, "keys")),
+          button("删除 Key", () => runAction("delete", record, "keys")),
+        );
+        row.append(name, status, errors, actions);
+        panel.append(row);
+      });
+      if (options.preview)
+        panel.append(
+          button(`查看全部 ${total} 个 Key`, () =>
+            loadKeys(options.channel, 1, options.unassigned),
+          ),
+        );
+      else if (options.pages > 1) {
+        const pager = document.createElement("div");
+        pager.className = "key-pager";
+        const prev = button("上一页 Key", () =>
+          loadKeys(options.channel, options.page - 1, options.unassigned),
+        );
+        const next = button("下一页 Key", () =>
+          loadKeys(options.channel, options.page + 1, options.unassigned),
+        );
+        prev.dataset.pageDisabled = String(options.page <= 1);
+        next.dataset.pageDisabled = String(options.page >= options.pages);
+        prev.disabled = options.page <= 1;
+        next.disabled = options.page >= options.pages;
+        pager.append(
+          prev,
+          text("span", `${options.page} / ${options.pages}`),
+          next,
+        );
+        panel.append(pager);
+      }
+    }
+    function renderUnassigned(result) {
+      $("unassigned").hidden = kind !== "channels" || !result?.total;
+      if (kind === "channels" && result?.total)
+        paintKeys($("unassigned-keys"), result.rows, result.total, {
+          unassigned: true,
+          channel: "",
+          page: result.page,
+          pages: result.pages,
+        });
+    }
+    async function loadKeys(channel, keyPage, unassigned = false) {
+      if (busy) return;
+      setBusy(true);
+      $("error").hidden = true;
+      try {
+        const result = await call("query", "list", {
+          kind: "keys",
+          channel,
+          unassigned,
+          page: keyPage,
+          search: unassigned ? search : "",
+        });
+        const panel = unassigned
+          ? $("unassigned-keys")
+          : keyPanels.get(channel)?.panel;
+        if (panel)
+          paintKeys(panel, result.rows, result.total, {
+            channel,
+            unassigned,
+            page: result.page,
+            pages: result.pages,
+            hasInlineKey: keyPanels.get(channel)?.record.has_inline_key,
+          });
+      } catch (error) {
+        showError(error);
+      } finally {
+        setBusy(false);
+      }
+    }
+    async function runAction(action, record, recordKind = kind) {
+      if (busy || !(await mayDiscard())) return;
+      setBusy(true);
+      $("error").hidden = true;
+      try {
+        const args = { record_id: record.id, version: record.version };
+        if (action === "delete") args.kind = recordKind;
+        const result = await call("action", action, args);
+        closeEditor();
+        toast(result.message);
+      } catch (error) {
+        showError(error);
+      } finally {
+        setBusy(false);
+      }
+      await load();
+    }
+    function field(name, label, value = "", options = {}) {
+      const wrap = document.createElement("label");
+      wrap.className = "field" + (options.wide ? " wide" : "");
+      wrap.append(text("span", label));
+      let input;
+      if (options.options) {
+        input = document.createElement("select");
+        input.className = "maibot-select";
+        options.options.forEach(([value, label]) => {
+          const option = text("option", label);
+          option.value = value;
+          input.append(option);
+        });
+      } else {
+        input = document.createElement(options.area ? "textarea" : "input");
+        input.className = "maibot-input";
+        if (!options.area) input.type = options.type || "text";
+        if (options.area) input.rows = options.rows || 6;
+      }
+      input.id = "field-" + name;
+      input.name = name;
+      input.value = value ?? "";
+      input.required = !!options.required;
+      input.readOnly = !!options.readonly;
+      if (options.maxLength) input.maxLength = options.maxLength;
+      if (options.type === "number") input.step = "1";
+      if (options.hint) {
+        const hint = text("small", options.hint);
+        hint.id = input.id + "-hint";
+        input.setAttribute("aria-describedby", hint.id);
+        wrap.append(input, hint);
+      } else wrap.append(input);
+      inputs[name] = input;
+      $("fields").append(wrap);
+      return input;
+    }
+    function toggles(values) {
+      const group = document.createElement("div");
+      group.className = "toggles";
+      values.forEach(([name, label, value]) => {
+        const wrap = document.createElement("label");
+        wrap.className = "toggle";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = name;
+        input.checked = !!value;
+        inputs[name] = input;
+        wrap.append(input, text("span", label));
+        group.append(wrap);
+      });
+      $("fields").append(group);
+    }
+    async function openEditor(
+      record = null,
+      editKind = kind,
+      presetChannel = "",
+    ) {
+      if (busy || !(await mayDiscard())) return;
+      returnFocus = document.activeElement;
+      setBusy(true);
+      $("error").hidden = true;
+      try {
+        const detail = record
+          ? await call("query", "detail", {
+              kind: editKind,
+              record_id: record.id,
+            })
+          : {
+              id: "",
+              version: "",
+              payload: editKind === "keys" ? { type: presetChannel } : {},
+              has_key: false,
+            };
+        closeEditor();
+        editing = { ...detail, kind: editKind };
+        const data = detail.payload;
+        $("editor-title").textContent =
+          (record ? "编辑" : "添加") +
+          (editKind === "keys" ? " Key" : labels[editKind]);
+        $("editor-error").hidden = true;
+        if (editKind !== "keys")
+          field("name", "名称", detail.id, {
+            required: true,
+            readonly: !!record,
+            maxLength: 120,
+            hint: record
+              ? "名称用于引用，编辑时保留原名称。"
+              : "不能包含空白字符。",
+          });
+        if (editKind === "prompts")
+          field("text", "提示词内容", data.text, {
+            area: true,
+            wide: true,
+            required: true,
+            rows: 10,
+            maxLength: 45000,
+          });
+        else if (editKind === "channels") {
+          field("url", "API 地址", data.url, {
+            required: true,
+            type: "url",
+            maxLength: 4000,
+          });
+          field("model", "模型（可选）", data.model, { maxLength: 200 });
+          field("protocol", "请求协议", data.protocol || "", {
+            options: [
+              ["", "自动识别"],
+              ["openai_chat", "OpenAI Chat"],
+              ["gpt_image", "GPT Image"],
+              ["images_json", "Images JSON / Seedream"],
+              ["gemini", "Gemini"],
+              ["agnes_image", "Agnes 图片"],
+              ["tsai", "TS-AI 图片"],
+              ["seedance_video", "Seedance 视频"],
+              ["agnes_video", "Agnes 视频"],
+              ["tsai_video", "TS-AI 视频"],
+            ],
+          });
+          field("response_format", "返回格式", data.response_format || "", {
+            options: [
+              ["", "由渠道决定"],
+              ["url", "URL"],
+              ["b64_json", "Base64 JSON"],
+            ],
+          });
+          toggles([
+            ["enabled", "启用渠道", data.enabled !== false],
+            ["is_video", "视频渠道", data.is_video],
+            ["stream", "流式请求", data.stream],
+          ]);
+          field("key", "内联 Key（可选）", "", {
+            type: "password",
+            maxLength: 4000,
+            hint: detail.has_key
+              ? "已配置。留空保留原 Key，输入新值替换。"
+              : "推荐在渠道下添加独立 Key，支持多 Key。",
+          });
+          if (detail.has_key) toggles([["clear_key", "清除原内联 Key", false]]);
+          const known = [
+            "url",
+            "model",
+            "protocol",
+            "response_format",
+            "enabled",
+            "is_video",
+            "stream",
+            "key",
+          ];
+          const extra = Object.fromEntries(
+            Object.entries(data).filter(([name]) => !known.includes(name)),
+          );
+          field(
+            "extra",
+            "其他渠道字段（JSON，可选）",
+            JSON.stringify(extra, null, 2),
+            {
+              area: true,
+              wide: true,
+              rows: 3,
+              hint: "已有额外字段会保留；可在此调整其值。",
+            },
+          );
+        } else {
+          field("type", "所属渠道", data.type, {
+            required: true,
+            maxLength: 120,
+            hint: "填写已有渠道的名称。",
+          });
+          field("value", record ? "替换 Key（可选）" : "Key", "", {
+            type: "password",
+            required: !record,
+            maxLength: 4000,
+            hint: record
+              ? "留空保留原 Key。错误次数与使用统计保留最新值。"
+              : "密钥不会在列表或编辑表单中回显。",
+          });
+          field("status", "状态", data.status || "active", {
+            options: [
+              ["active", "可用"],
+              ["disabled", "禁用"],
+            ],
+          });
+          field("max_errors", "错误禁用上限", data.max_errors ?? 5, {
+            required: true,
+            type: "number",
+            hint: "正整数；-1 表示永不自动禁用。",
+          });
+        }
+        $("editor").showModal();
+      } catch (error) {
+        showError(error);
+      } finally {
+        setBusy(false);
+        if (editing) Object.values(inputs)[0]?.focus({ preventScroll: true });
+      }
+    }
+    $("record-form").addEventListener("input", () => (dirty = true));
+    // 插件 iframe 未开放 allow-forms；显式按钮调用桥接 API，保留原生字段校验。
+    $("record-form").addEventListener("submit", (event) =>
+      event.preventDefault(),
+    );
+    $("save").addEventListener("click", async (event) => {
+      event.preventDefault();
+      if (busy || !editing) return;
+      if (!$("record-form").reportValidity()) return;
+      $("editor-error").hidden = true;
+      let payload,
+        recordId = editing.id;
+      try {
+        const value = (name) => inputs[name].value;
+        if (editing.kind === "prompts") {
+          recordId = value("name");
+          payload = { text: value("text") };
+        } else if (editing.kind === "channels") {
+          recordId = value("name");
+          const extra = JSON.parse(value("extra") || "{}");
+          if (!extra || Array.isArray(extra) || typeof extra !== "object")
+            throw new Error("其他渠道字段必须是 JSON 对象。");
+          if (["key", "clear_key"].some((key) => Object.hasOwn(extra, key)))
+            throw new Error("请使用内联 Key 输入框管理密钥。");
+          payload = {
+            ...extra,
+            url: value("url"),
+            model: value("model"),
+            protocol: value("protocol"),
+            response_format: value("response_format"),
+            enabled: inputs.enabled.checked,
+            is_video: inputs.is_video.checked,
+            stream: inputs.stream.checked,
+            key: value("key"),
+            clear_key: inputs.clear_key?.checked || false,
+          };
+        } else {
+          payload = {
+            type: value("type"),
+            value: value("value"),
+            max_errors: Number(value("max_errors")),
+          };
+          if (!editing.version || value("status") !== editing.payload.status)
+            payload.status = value("status");
+        }
+        const serialized = JSON.stringify(payload);
+        const args = {
+          kind: editing.kind,
+          record_id: recordId,
+          version: editing.version,
+          payload: serialized,
+        };
+        if (
+          serialized.length > 50000 ||
+          new TextEncoder().encode(JSON.stringify(args)).length > 60000
+        )
+          throw new Error(
+            "记录内容超过 50 KB，请缩短内容或直接编辑 JSON 文件。",
+          );
+        setBusy(true);
+        const result = await call("action", "save", {
+          kind: editing.kind,
+          record_id: recordId,
+          version: editing.version,
+          payload: serialized,
+        });
+        closeEditor();
+        toast(result.message);
+        setBusy(false);
+        await load();
+      } catch (error) {
+        showError(error, true);
+        setBusy(false);
+      }
+    });
+    async function dismiss() {
+      if (!busy && (await mayDiscard())) {
+        closeEditor();
+      }
+    }
+    $("close").onclick = dismiss;
+    $("cancel").onclick = dismiss;
+    $("editor").addEventListener("cancel", (event) => {
+      event.preventDefault();
+      dismiss();
+    });
+    $("editor").addEventListener("click", (event) => {
+      const bounds = $("editor").getBoundingClientRect();
+      if (
+        event.target === $("editor") &&
+        (event.clientX < bounds.left ||
+          event.clientX > bounds.right ||
+          event.clientY < bounds.top ||
+          event.clientY > bounds.bottom)
+      )
+        dismiss();
+    });
+    $("add").onclick = () => openEditor();
+    $("refresh").onclick = load;
+    $("retry").onclick = load;
+    $("prev").onclick = () => navigate(kind, search, page - 1);
+    $("next").onclick = () => navigate(kind, search, page + 1);
+    document
+      .querySelectorAll("[data-kind]")
+      .forEach(
+        (button) =>
+          (button.onclick = () => navigate(button.dataset.kind, "", 1)),
+      );
+    $("search-form").onsubmit = (event) => event.preventDefault();
+    $("search-submit").onclick = () => {
+      navigate(kind, $("search").value.trim(), 1);
+    };
+    $("search").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        $("search-submit").click();
+      }
+    });
+    $("record-form").addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && event.target.tagName === "INPUT") {
+        event.preventDefault();
+        $("save").click();
+      }
+    });
+    window.maibot.ready
+      .then(() => {
+        const state = window.maibot.page.state || {};
+        kind = state.kind === "prompts" ? "prompts" : "channels";
+        search = typeof state.search === "string" ? state.search : "";
+        page = Number.isInteger(state.page) && state.page > 0 ? state.page : 1;
+        $("search").value = search;
+        $("search").placeholder =
+          kind === "prompts"
+            ? "搜索提示词名称或内容"
+            : kind === "keys"
+              ? "搜索所属渠道或状态"
+              : "搜索名称、模型或地址";
+        $("add").textContent = "添加" + labels[kind];
+        document
+          .querySelectorAll("[data-kind]")
+          .forEach((button) =>
+            button.setAttribute(
+              "aria-pressed",
+              String(button.dataset.kind === kind),
+            ),
+          );
+        load();
+      })
+      .catch(showError);
+  })();
+</script>

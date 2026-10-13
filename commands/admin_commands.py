@@ -194,17 +194,10 @@ class ChannelSetKeyErrorLimitCommand(BaseAdminCommand):
             await self.send_text("❌ 序号和次数必须是数字！")
             return True, "参数类型错误", True
 
-        keys_list = key_manager.config.get('keys', [])
-        target_keys_indices = [i for i, key in enumerate(keys_list) if key.get('type') == channel_name]
-
-        if index < 1 or index > len(target_keys_indices):
+        if not key_manager.set_key_error_limit(channel_name, index, limit):
             await self.send_text(f"❌ 渠道 `{channel_name}` 不存在第 `{index}` 个 Key。")
             return True, "序号无效", True
         
-        real_index = target_keys_indices[index - 1]
-        keys_list[real_index]['max_errors'] = limit
-        key_manager.save_config(key_manager.config)
-
         limit_text = "永不禁用" if limit == -1 else f"{limit}次"
         await self.send_text(f"✅ 设置成功！\n渠道 `{channel_name}` Key {index} 错误上限: **{limit_text}**。")
         return True, "设置成功", True

@@ -1,0 +1,238 @@
+"""管理页面的真实 JSON 写回、并发统计和编辑冲突测试。"""
+
+from concurrent.futures import ThreadPoolExecutor
+
+import json
+
+import pytest
+
+from gemini_drawer.core.managers import DataManager, KeyManager
+from gemini_drawer.core.webui import DrawerWebUI
+
+
+@pytest.fixture
+def store(tmp_path):
+    data_file = tmp_path / "data.json"
+    keys_file = tmp_path / "keys.json"
+    data_file.write_text(json.dumps({"channels": {"google": {"url": "https://example.com/v1/images/generations",
+                                                            "key": "legacy-secret", "custom": {"nested": True}}},
+                                     "prompts": {"头像": "人物头像"}, "other": "preserve"}), encoding="utf-8")
+    keys_file.write_text(json.dumps({"keys": [{"value": "test-secret-key-one", "type": "google", "status": "active",
+                                              "error_count": 2, "last_used": "yesterday", "max_errors": 5,
+                                              "custom": "preserve"}], "current_index": 7}), encoding="utf-8")
+    config_file = tmp_path / "config.toml"
+    config_file.write_text('[plugin]\nenabled = true\n', encoding="utf-8")
+    data = DataManager(data_file)
+    keys = KeyManager(keys_file)
+    return DrawerWebUI(data, keys), data, keys, config_file
+
+
+def test_prompt_crud_only_writes_data_json(store):
+    web, data, keys, config = store
+    old_keys, old_config = keys.keys_file.read_bytes(), config.read_bytes()
+    web.change("prompts", "save", "风景", "", {"text": "山与海"})
+    detail = web.detail("prompts", "风景")
+    web.change("prompts", "save", "风景", detail["version"], {"text": "日落下的山与海"})
+    assert data.get_prompts()["风景"] == "日落下的山与海"
+    detail = web.detail("prompts", "风景")
+    web.change("prompts", "delete", "风景", detail["version"], {})
+    assert data.get_prompts() == {"头像": "人物头像"}
+    assert json.loads(data.data_file.read_text())["other"] == "preserve"
+    assert old_keys == keys.keys_file.read_bytes()
+    assert old_config == config.read_bytes()
+
+
+def test_channel_preserves_inline_key_and_unknown_fields(store):
+    web, data, _, _ = store
+    detail = web.detail("channels", "google")
+    assert detail["has_key"] and detail["payload"]["key"] == ""
+    assert "legacy-secret" not in json.dumps(detail)
+    web.change("channels", "save", "google", detail["version"], {"url": "https://example.com/new", "key": "",
+                                                               "model": "model-2", "protocol": "images_json"})
+    channel = data.get_channels()["google"]
+    assert channel["custom"] == {"nested": True}
+    assert channel["key"] == "legacy-secret"
+    assert channel["model"] == "model-2"
+    detail = web.detail("channels", "google")
+    web.change("channels", "save", "google", detail["version"], {"clear_key": True, "protocol": ""})
+    assert "key" not in data.get_channels()["google"]
+    assert "protocol" not in data.get_channels()["google"]
+
+
+def test_listing_is_paginated_searches_full_prompt_and_masks_keys(store):
+    web, data, _, _ = store
+    data.data["prompts"] = {f"名称{i}": "前缀" * 100 + "全文匹配" for i in range(45)}
+    data.save_data()
+    result = web.list_records("prompts", "全文匹配", 2)
+    assert result["total"] == 45 and len(result["rows"]) == 20 and result["pages"] == 3
+    assert web.list_records("prompts", "名称1")["total"] == 11
+    key_result = web.list_records("keys")
+    detail = web.detail("keys", key_result["rows"][0]["id"])
+    assert "test-secret-key-one" not in json.dumps(key_result)
+    assert "test-secret-key-one" not in json.dumps(detail)
+    assert detail["payload"]["value"] == ""
+
+
+def test_edit_conflict_does_not_overwrite_new_content(store):
+    web, data, _, _ = store
+    detail = web.detail("prompts", "头像")
+    data.update_prompt("头像", "聊天指令已修改")
+    before = data.data_file.read_bytes()
+    with pytest.raises(ValueError, match="其他操作"):
+        web.change("prompts", "save", "头像", detail["version"], {"text": "页面旧内容"})
+    assert data.data_file.read_bytes() == before
+    with pytest.raises(ValueError, match="已存在"):
+        web.change("prompts", "save", "头像", "", {"text": "重复新增"})
+
+
+def test_key_edit_keeps_latest_usage_state_order_and_unknown_fields(store):
+    web, data, keys, config = store
+    keys.add_keys(["test-secret-key-two"], "google")
+    detail = web.detail("keys", web.list_records("keys")["rows"][0]["id"])
+    old_data, old_config = data.data_file.read_bytes(), config.read_bytes()
+    keys.record_key_usage("test-secret-key-one", False, force_disable=True)
+    web.change("keys", "save", detail["id"], detail["version"], {"value": "", "max_errors": 9, "type": "google"})
+    saved = json.loads(keys.keys_file.read_text())
+    assert [key["value"] for key in saved["keys"]] == ["test-secret-key-one", "test-secret-key-two"]
+    key = saved["keys"][0]
+    assert key["error_count"] == 3 and key["status"] == "disabled"
+    assert key["last_used"] == "yesterday" and key["custom"] == "preserve" and key["max_errors"] == 9
+    assert saved["current_index"] == 7
+    assert data.data_file.read_bytes() == old_data and config.read_bytes() == old_config
+    detail = web.detail("keys", detail["id"])
+    web.change("keys", "reset", detail["id"], detail["version"], {})
+    assert keys.get_all_keys()[0]["status"] == "active" and keys.get_all_keys()[0]["error_count"] == 0
+
+
+def test_key_add_replace_delete_and_duplicate_validation(store):
+    web, _, keys, _ = store
+    result = web.change("keys", "save", "", "", {"value": "new-test-key", "type": "google"})
+    detail = web.detail("keys", result["id"])
+    with pytest.raises(ValueError, match="已存在"):
+        web.change("keys", "save", "", "", {"value": "new-test-key", "type": "google"})
+    result = web.change("keys", "save", detail["id"], detail["version"], {"value": "replacement-test-key"})
+    assert keys.get_all_keys()[1]["value"] == "replacement-test-key"
+    detail = web.detail("keys", result["id"])
+    web.change("keys", "delete", detail["id"], detail["version"], {})
+    assert len(keys.get_all_keys()) == 1
+
+
+def test_corrupt_file_is_not_overwritten(store):
+    web, data, _, _ = store
+    data.data_file.write_text('{"channels":', encoding="utf-8")
+    before = data.data_file.read_bytes()
+    with pytest.raises(ValueError, match="JSON 格式"):
+        web.change("prompts", "save", "新记录", "", {"text": "新内容"})
+    assert data.data_file.read_bytes() == before
+
+
+def test_write_error_is_reported(store, monkeypatch):
+    web, data, _, _ = store
+    before = data.data_file.read_bytes()
+    def fail(*args, **kwargs):
+        raise PermissionError("read only")
+    monkeypatch.setattr(data, "save_data", fail)
+    with pytest.raises(PermissionError):
+        web.change("prompts", "save", "新记录", "", {"text": "新内容"})
+    assert data.data_file.read_bytes() == before
+
+
+@pytest.mark.parametrize("payload", [
+    {"url": "file:///etc/passwd"}, {"url": "https://example.com", "protocol": "seedance_video"},
+    {"url": "https://example.com", "enabled": "yes"},
+])
+def test_invalid_channel_is_not_saved(store, payload):
+    web, data, _, _ = store
+    before = data.data_file.read_bytes()
+    with pytest.raises(ValueError):
+        web.change("channels", "save", "bad", "", payload)
+    assert data.data_file.read_bytes() == before
+
+
+def test_concurrent_usage_updates_and_new_records_are_not_lost(store):
+    web, data, keys, _ = store
+    def record_usage(_):
+        keys.record_key_usage("test-secret-key-one", False)
+    def add_prompt(index):
+        web.change("prompts", "save", f"并发{index}", "", {"text": "提示词"})
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(record_usage, range(20)))
+        list(pool.map(add_prompt, range(20)))
+    assert keys.get_all_keys()[0]["error_count"] == 22
+    assert len(data.get_prompts()) == 21
+
+
+def test_two_managers_reload_before_chat_mutation(store):
+    web, data, keys, _ = store
+    other_data = DataManager(data.data_file)
+    other_keys = KeyManager(keys.keys_file)
+    web.change("prompts", "save", "页面新增", "", {"text": "保留"})
+    other_data.add_prompt("聊天新增", "保留")
+    assert set(data.get_prompts()) == {"头像", "页面新增", "聊天新增"}
+    keys.add_keys(["another-test-key"], "google")
+    other_keys.set_key_error_limit("google", 1, 10)
+    assert len(keys.get_all_keys()) == 2
+    assert keys.get_all_keys()[0]["max_errors"] == 10
+
+
+def test_reused_key_and_historical_duplicates_remain_individual_records(store):
+    web, data, keys, _ = store
+    data.add_channel("other", {"url": "https://example.com/v1/images/generations"})
+    first = dict(keys.get_all_keys()[0])
+    keys.config["keys"] += [{**first, "type": "other"}, dict(first)]
+    keys.save_config(keys.config)
+    rows = web.list_records("keys")["rows"]
+    assert len(rows) == 3 and len({row["id"] for row in rows}) == 3
+    detail = web.detail("keys", rows[0]["id"])
+    web.change("keys", "save", detail["id"], detail["version"], {"max_errors": 10})
+    saved = keys.get_all_keys()
+    assert [key["max_errors"] for key in saved] == [10, 5, 5]
+    detail = web.detail("keys", rows[2]["id"])
+    web.change("keys", "delete", detail["id"], detail["version"], {})
+    assert [key["type"] for key in keys.get_all_keys()] == ["google", "other"]
+
+
+def test_same_key_can_be_added_for_another_channel(store):
+    web, data, keys, _ = store
+    data.add_channel("other", {"url": "https://example.com/v1/images/generations"})
+    web.change("keys", "save", "", "", {"value": "test-secret-key-one", "type": "other"})
+    assert len(keys.get_all_keys()) == 2
+
+
+def test_channel_view_joins_keys_without_modifying_either_file(store):
+    web, data, keys, config = store
+    data.add_channel("other", {"url": "https://example.com/other"})
+    keys.add_keys([f"extra-test-key-{index}" for index in range(24)], "google")
+    keys.add_keys(["other-channel-test-key"], "other")
+    before = [file.read_bytes() for file in (data.data_file, keys.keys_file, config)]
+    result = web.list_records("channels")
+    google, other = result["rows"]
+    assert google["key_count"] == 25 and len(google["keys"]) == 5
+    assert google["has_inline_key"] is True
+    assert other["key_count"] == 1 and other["keys"][0]["channel"] == "other"
+    second_page = web.list_records("keys", channel="google", page=2)
+    assert second_page["total"] == 25 and len(second_page["rows"]) == 5
+    assert all(row["channel"] == "google" for row in second_page["rows"])
+    assert "test-secret-key-one" not in json.dumps(result)
+    assert [file.read_bytes() for file in (data.data_file, keys.keys_file, config)] == before
+
+
+def test_orphan_keys_are_visible_after_channel_deletion(store):
+    web, data, keys, _ = store
+    data.delete_channel("google")
+    joined = web.list_records("channels")
+    assert joined["rows"] == []
+    assert joined["unassigned"]["total"] == 1
+    detail = web.detail("keys", joined["unassigned"]["rows"][0]["id"])
+    web.change("keys", "save", detail["id"], detail["version"], {"type": "google", "max_errors": 10})
+    assert keys.get_all_keys()[0]["max_errors"] == 10
+
+
+def test_channel_search_finds_keys_and_legacy_key_ownership(store):
+    web, _, keys, _ = store
+    keys.config["keys"][0].pop("type")
+    keys.config["keys"][0]["status"] = "disabled"
+    keys.save_config(keys.config)
+    joined = web.list_records("channels", search="disabled")
+    assert joined["total"] == 1 and joined["rows"][0]["keys"][0]["channel"] == "google"
+    assert web.list_records("keys", channel="google")["total"] == 1
