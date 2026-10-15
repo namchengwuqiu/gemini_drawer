@@ -10,7 +10,7 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from maibot_sdk.context import PluginContext
 
 from .config import GeminiDrawerConfig
-from .core.budget import DRAW_COMMAND_TIMEOUT_MS, VIDEO_COMMAND_TIMEOUT_MS
+from .core.budget import DRAW_COMMAND_TIMEOUT_MS, VIDEO_COMMAND_TIMEOUT_MS, MediaDeliveryUncertain
 from .core.managers import data_manager, key_manager
 from .core.webui import DrawerWebUI
 from .utils import configure_policy
@@ -43,6 +43,8 @@ BANANA_PROMPTS_URL = "https://raw.githubusercontent.com/unknowlei/nanobanana-web
 _COMMAND_HINT = "、".join(DRAW_COMMAND_PREFIXES)
 #: 媒体冷却表的条目上限，防止长期按会话数增长（P1-6）
 _MEDIA_COOLDOWN_MAX_ENTRIES = 2048
+# 回执丢失后的保护独立于可关闭的普通媒体冷却，覆盖后续 Planner 自动重试。
+_VIDEO_DELIVERY_GUARD_SECONDS = 600.0
 
 
 # ── Compatibility wrapper classes ──
@@ -285,6 +287,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         # 上一次成功发出媒体的时间戳。图片发完后对话循环不会停，下一轮 Planner
         # 常常还在处理同一条用户消息，于是又拍一张——pending 那时已经清零，拦不住。
         self._media_last_sent_at: dict[str, float] = {}
+        self._video_delivery_uncertain_until: dict[str, float] = {}
         self._webui = DrawerWebUI(data_manager, key_manager)
         self._banana_update_task: Optional[asyncio.Task] = None
         self._banana_update_state: dict[str, Any] = {"job_id": "", "status": "idle", "message": ""}
@@ -642,6 +645,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         await self._cancel_background_tasks()
         self._media_pending.clear()
         self._media_last_sent_at.clear()
+        self._video_delivery_uncertain_until.clear()
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
@@ -859,6 +863,18 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 "error": reason,
             }
 
+        if tool_name == "gemini_selfie_video":
+            now = time.monotonic()
+            self._video_delivery_uncertain_until = {
+                key: until for key, until in self._video_delivery_uncertain_until.items() if until > now
+            }
+            if stream_id in self._video_delivery_uncertain_until:
+                reason = str(MediaDeliveryUncertain()) + "本次重复调用已拦截，没有创建新的视频任务。"
+                return {
+                    "name": tool_name, "success": False, "content": reason, "error": reason,
+                    "delivery_status": "unknown", "retryable": False,
+                }
+
         remaining = self._media_cooldown_remaining(stream_id)
         if remaining > 0:
             # 跨轮防连发。媒体发完后对话循环不会暂停，下一轮 Planner 往往还在处理
@@ -887,6 +903,15 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 wait_message=self._pick_wait_message(wait_kind),
                 **kwargs,
             )
+            if isinstance(message, MediaDeliveryUncertain):
+                self._video_delivery_uncertain_until[stream_id] = time.monotonic() + _VIDEO_DELIVERY_GUARD_SECONDS
+                if len(self._video_delivery_uncertain_until) > _MEDIA_COOLDOWN_MAX_ENTRIES:
+                    oldest = min(self._video_delivery_uncertain_until, key=self._video_delivery_uncertain_until.get)
+                    self._video_delivery_uncertain_until.pop(oldest, None)
+                return {
+                    "name": tool_name, "success": False, "content": str(message), "error": str(message),
+                    "delivery_status": "unknown", "retryable": False,
+                }
             if success:
                 # 只在真正发出去之后才起算冷却，生成失败时用户应该能立刻重试。
                 self._mark_media_sent(stream_id)

@@ -432,3 +432,96 @@ def test_media_components_are_native_tools_with_long_timeouts():
         for component in components.values()
     )
     assert components["gemini_selfie"]["metadata"]["timeout_ms"] == DRAW_COMMAND_TIMEOUT_MS
+
+
+@pytest.mark.asyncio
+async def test_video_receipt_lost_blocks_planner_regeneration(monkeypatch, tmp_path):
+    """真实 Action + 发送路径：宿主返回失败但实际可能送达，只生成和发送一次。"""
+    from gemini_drawer.commands.actions import SelfieVideoAction
+    from gemini_drawer.core import endpoints, video
+    from gemini_drawer.core.budget import MediaDeliveryUncertain, TimeBudget
+
+    plugin = _plugin_with_cooldown(monkeypatch, 0)
+    action = SelfieVideoAction()
+    action.ctx = type("Ctx", (), {"send": type("Send", (), {})()})()
+    action.group_id, action.user_id = "g1", None
+    ref = tmp_path / "ref.png"
+    ref.write_bytes(b"fake image")
+    counts = {"generate": 0, "send": 0}
+    texts = []
+
+    async def generate(**kwargs):
+        counts["generate"] += 1
+        return "ZmFrZQ==", ""
+
+    async def send(*args, **kwargs):
+        counts["send"] += 1
+        return {"sent": False, "message_id": None}
+
+    async def no_fallback(**kwargs):
+        raise AssertionError("不能回退重发")
+
+    async def polish(prompt, budget):
+        return prompt
+
+    async def text(message):
+        texts.append(message)
+
+    monkeypatch.setattr(endpoints, "build_video_endpoints", lambda **kw: [{}])
+    monkeypatch.setattr(video, "process_video_generation", generate)
+    monkeypatch.setattr(video, "send_video_via_napcat", no_fallback)
+    monkeypatch.setattr(action.ctx.send, "custom", send, raising=False)
+    monkeypatch.setattr(action, "get_config", lambda key, default=None: default)
+    monkeypatch.setattr(action, "_compose_prompt", lambda *args: "wave")
+    monkeypatch.setattr(action, "_polish_with_budget", polish)
+    monkeypatch.setattr(action, "_proxy", lambda: None)
+    monkeypatch.setattr(action, "_target_stream_id", lambda: "stream-1")
+    monkeypatch.setattr(action, "_send_text", text)
+
+    async def run(*args, **kwargs):
+        result = await action._do_video(ref, "wave", TimeBudget(100, reserve_seconds=0))
+        assert isinstance(result[1], MediaDeliveryUncertain)
+        return result
+
+    monkeypatch.setattr(plugin, "_run_action", run)
+    monkeypatch.setattr(plugin, "_pick_wait_message", lambda kind: "")
+    for _ in range(3):
+        result = await plugin._run_media_tool(
+            "gemini_selfie_video", SelfieVideoAction, "stream-1", "video", {}
+        )
+        assert result["success"] is False
+        assert result["delivery_status"] == "unknown"
+        assert result["retryable"] is False
+        assert "可能已经送达" in result["content"]
+    assert counts == {"generate": 1, "send": 1}
+    assert texts == []
+    # 其他会话仍可执行。
+    await plugin._run_media_tool("gemini_selfie_video", SelfieVideoAction, "stream-2", "video", {})
+    assert counts["generate"] == 2
+
+
+@pytest.mark.asyncio
+async def test_uncertain_video_guard_expires_without_extending_on_duplicates(monkeypatch):
+    from gemini_drawer.commands.actions import SelfieVideoAction
+    from gemini_drawer.core.budget import MediaDeliveryUncertain
+    from gemini_drawer.plugin import _VIDEO_DELIVERY_GUARD_SECONDS
+
+    plugin = _plugin_with_cooldown(monkeypatch, 0)
+    now = [1000.0]
+    calls = []
+    monkeypatch.setattr("gemini_drawer.plugin.time.monotonic", lambda: now[0])
+    monkeypatch.setattr(plugin, "_pick_wait_message", lambda kind: "")
+
+    async def uncertain(*args, **kwargs):
+        calls.append(1)
+        return False, MediaDeliveryUncertain()
+
+    monkeypatch.setattr(plugin, "_run_action", uncertain)
+    args = ("gemini_selfie_video", SelfieVideoAction, "stream-1", "video", {})
+    await plugin._run_media_tool(*args)
+    now[0] += _VIDEO_DELIVERY_GUARD_SECONDS - 1
+    await plugin._run_media_tool(*args)
+    assert len(calls) == 1
+    now[0] += 2
+    await plugin._run_media_tool(*args)
+    assert len(calls) == 2

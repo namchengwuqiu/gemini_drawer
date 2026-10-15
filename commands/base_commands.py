@@ -33,6 +33,7 @@ from ..core.budget import (
     VIDEO_COMMAND_TIMEOUT_MS,
     VIDEO_HOST_RETURN_MARGIN_SECONDS,
     BudgetExpiredError,
+    MediaDeliveryUncertain,
     budgeted_entry,
     current_budget,
     TimeBudget,
@@ -765,6 +766,9 @@ class BaseVideoCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
             logger=logger,
             budget=budget,
         )
+
+        if isinstance(send_error, MediaDeliveryUncertain):
+            return True, send_error, True
 
         if success:
             await self._send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")

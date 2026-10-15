@@ -50,10 +50,24 @@ class BudgetExpiredError(RuntimeError):
     """整体时间预算耗尽，不应再开始新的生成或发送。"""
 
 
+class MediaDeliveryUncertain(str):
+    """带投递状态的内部文案，兼容 Action/发送函数现有的 tuple 返回接口。
+
+    转成普通字符串之前由工具层识别，不能把投递未确认误当成生成失败。
+    """
+
+    def __new__(cls):
+        return super().__new__(cls, (
+            "视频已经生成，并已尝试投递，但发送回执未确认，投递状态不确定；视频可能已经送达。"
+            "为避免重复生成和重复发送，本次不再重试。禁止自动再次调用视频工具，"
+            "不要声称视频生成失败或已经确认送达；请等待用户确认是否收到。"
+        ))
+
+
 class TimeBudget:
     """一次命令/工具流程的整体时间预算。"""
 
-    __slots__ = ("_clock", "_deadline", "_reserve", "media_sent")
+    __slots__ = ("_clock", "_deadline", "_reserve", "media_sent", "media_delivery_pending")
 
     def __init__(
         self,
@@ -66,6 +80,7 @@ class TimeBudget:
         self._reserve = max(0.0, float(reserve_seconds))
         self._deadline = clock() + max(0.0, float(total_seconds))
         self.media_sent = False
+        self.media_delivery_pending = False
 
     @classmethod
     def from_rpc_timeout_ms(
@@ -135,6 +150,9 @@ def budgeted_entry(timeout_ms: int, *, reserve: float = HOST_RETURN_MARGIN_SECON
                 if budget.media_sent:
                     message = "已确认媒体发送；后续处理超时已停止，请勿立即重复操作"
                     return (True, message, True) if command else (True, message)
+                if budget.media_delivery_pending:
+                    message = MediaDeliveryUncertain()
+                    return (False, message, True) if command else (False, message)
                 message = "时间预算耗尽，已停止等待；已提交的生成或发送状态可能不确定，请勿立即重复操作"
                 return (False, message, True) if command else (False, message)
             finally:

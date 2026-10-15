@@ -1,8 +1,14 @@
 # Gemini 绘图插件
 
-> **Version:** 1.15.2
+> **Version:** 1.15.3
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
+
+## v1.15.3 更新说明
+
+- 自拍与自拍视频的提示词润色最多尝试三次，失败后使用原始提示词；重试共享整体处理预算。
+- 视频发送回执丢失时保留“投递未确认”，不回退重发；同一会话 10 分钟内拦截重复视频工具调用，避免再次生成。保护期内主动的新视频请求也会被拦截，插件重载会清空保护。
+- SnowLuma 的大视频回执断连还需安装适配器对应修复；详见 [更新日志](CHANGELOG.md)。
 
 ## 主要特性
 
@@ -41,12 +47,12 @@ pip install -r requirements.txt
 ### 开发者发布版本
 
 1. 更新 `_manifest.json` 的 `version`、`config.py` 中的 `version` / `config_version` 默认值以及 README 顶部版本号，并在 `CHANGELOG.md` 添加对应的 `## vX.Y.Z` 更新说明。保持插件 ID `namchengwuqiu.gemini_drawer` 不变，按实际兼容情况声明 MaiBot 与 SDK 版本范围。
-2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如发布当前 `1.15.2`：
+2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如发布当前 `1.15.3`：
 
    ```shell
    git push origin main
-   git tag v1.15.2
-   git push origin v1.15.2
+   git tag v1.15.3
+   git push origin v1.15.3
    ```
 
 3. GitHub Actions 的 **Publish plugin release** 工作流会校验 Tag、插件 ID、manifest 版本及必需文件，从更新日志提取该版本说明，并创建正式 GitHub Release。使用 GitHub 自动生成的源码包即可，无需额外上传附件。
@@ -188,7 +194,7 @@ Key 错误；请求已发出但没等到成功响应时（读写超时、单端�
 - `enable_banana_prompts` (布尔值, 默认 `true`): 是否启用「大香蕉」只读扩展词库，供 `/+`、`/随机绘图` 使用。
 - `show_restricted` (布尔值, 默认 `false`): 是否显示大香蕉词库中标记为猎奇/限制级的提示词。
 - `banana_sync_on_load` (布尔值, 默认 `false`): 插件加载时是否自动同步大香蕉词库。关闭后仅在 `/渠道同步大香蕉` 时手动同步。
-- `media_cooldown_seconds` (整数, 默认 `90`): 自然语言媒体生成的防连发冷却秒数。媒体发出后对话循环不会暂停，下一轮 Planner 常常还在处理同一条用户消息而再发一张，因此需要硬性间隔。冷却只在媒体**真正发送成功**后起算（生成失败可立刻重试），按会话隔离，设为 `0` 关闭。只作用于 Tool 调用，`/绘图`、`/+` 等指令不受影响。
+- `media_cooldown_seconds` (整数, 默认 `90`): 自然语言媒体生成的防连发冷却秒数。媒体发出后对话循环不会暂停，下一轮 Planner 常常还在处理同一条用户消息而再发一张，因此需要硬性间隔。冷却只在媒体**真正发送成功**后起算（生成失败可立刻重试），按会话隔离，设为 `0` 关闭。只作用于 Tool 调用，`/绘图`、`/+` 等指令不受影响。视频投递未确认另有独立的 10 分钟保护，不受本项设为 `0` 的影响。
 - `media_host_allowlist` (字符串列表, 默认 `["q1.qlogo.cn"]`): 显式允许下载的媒体域名或 IP，不含协议、端口和路径。默认包含 QQ 头像域名以兼容 fake-IP；升级保留已有列表，包括空列表。
 - `allow_private_media_hosts` (布尔值, 默认 `false`): 全局允许内网媒体下载及通过代理下载任意媒体主机；仅需少数主机时使用 `media_host_allowlist`。
 
@@ -213,7 +219,7 @@ Key 错误；请求已发出但没等到成功响应时（读写超时、单端�
 
 ### NapCat HTTP 服务器配置 🆕
 
-视频发送功能需要通过 NapCat 的 HTTP API 来发送视频文件。请按以下步骤配置：
+视频默认通过宿主 SDK 和当前适配器发送，无需额外配置 NapCat HTTP。只有 SDK 发送能力不可用时才使用以下备用链路：
 
 1. **在 NapCat 网络配置中新建一个 HTTP 服务器**
 2. **配置参数**：
@@ -398,7 +404,7 @@ Host 与 TLS 名称。本地绘图渠道需要下载本地地址时，推荐在 
 生成接口的代理设置不受此媒体下载策略影响。
 
 等待提示、生成、下载和发送共用一个绝对期限。SDK 发送结果不确定时不会自动改走 NapCat 再发一次；
-只有 SDK 发送方法缺失，或明确返回未发送且没有消息 ID 时，才使用回退发送。
+只有 SDK 发送能力不可用时才使用备用发送；`False` 或没有消息 ID 的 `sent=False` 也可能是回执丢失，不能据此再次投递。
 
 **注意**: 你不需要手动创建 `data/data.json`，插件会自动管理。
 

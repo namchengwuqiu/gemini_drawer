@@ -97,3 +97,75 @@ def test_polish_falls_back_to_legacy_model_argument():
         assert "旧 SDK 润色结果" in result
 
     asyncio.run(run())
+
+
+def test_polish_retries_twice_then_uses_successful_result():
+    from unittest.mock import AsyncMock
+
+    async def run():
+        action = DummySelfie()
+        generate = AsyncMock(side_effect=[
+            RuntimeError("[E_TIMEOUT] 请求 cap.call 超时 (30000ms)"),
+            TimeoutError("second attempt timed out"),
+            {"success": True, "response": "阳台晒太阳，伸懒腰后比心"},
+        ])
+        action.ctx.llm.generate = generate
+        result = await action._polish_prompt("在阳台比心")
+        assert generate.await_count == 3
+        assert "阳台晒太阳，伸懒腰后比心" in result
+        assert DEFAULT_SELFIE_BASE_PROMPT in result
+        assert all(call.kwargs["task_name"] == "replyer" for call in generate.await_args_list)
+
+    asyncio.run(run())
+
+
+def test_polish_stops_after_three_failures():
+    from unittest.mock import AsyncMock
+
+    async def run():
+        action = DummySelfie()
+        generate = AsyncMock(side_effect=RuntimeError("[E_TIMEOUT] 请求超时"))
+        action.ctx.llm.generate = generate
+        assert await action._polish_prompt("原始提示词") == "原始提示词"
+        assert generate.await_count == 3
+
+    asyncio.run(run())
+
+
+def test_polish_retries_failed_or_blank_results():
+    from unittest.mock import AsyncMock
+
+    async def run():
+        action = DummySelfie()
+        generate = AsyncMock(side_effect=[
+            {"success": False, "response": ""},
+            {"success": True, "response": "   "},
+            {"success": True, "response": "向镜头挥手"},
+        ])
+        action.ctx.llm.generate = generate
+        assert "向镜头挥手" in await action._polish_prompt("挥手")
+        assert generate.await_count == 3
+
+    asyncio.run(run())
+
+
+def test_polish_outer_deadline_cancels_without_retrying():
+    async def run():
+        action = DummySelfie()
+        action.POLISH_TIMEOUT_SECONDS = 0.01
+        calls = []
+        cancelled = []
+
+        async def slow(**kwargs):
+            calls.append(1)
+            try:
+                await asyncio.sleep(10)
+            finally:
+                cancelled.append(1)
+
+        action.ctx.llm.generate = slow
+        result = await _SelfieActionBase._polish_with_budget(action, "原始提示词", None)
+        assert result == "原始提示词"
+        assert calls == [1] and cancelled == [1]
+
+    asyncio.run(run())

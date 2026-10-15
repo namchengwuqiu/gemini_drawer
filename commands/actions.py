@@ -13,6 +13,7 @@ from ..core.budget import (
     VIDEO_COMMAND_TIMEOUT_MS,
     VIDEO_HOST_RETURN_MARGIN_SECONDS,
     BudgetExpiredError,
+    MediaDeliveryUncertain,
     budgeted_entry,
     current_budget,
     TimeBudget,
@@ -306,7 +307,7 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
     rpc_timeout_ms: int = DRAW_COMMAND_TIMEOUT_MS
     budget_reserve_seconds: float = HOST_RETURN_MARGIN_SECONDS
     #: 提示词润色的时间上限（会被整体预算进一步收敛）
-    POLISH_TIMEOUT_SECONDS: float = 60.0
+    POLISH_TIMEOUT_SECONDS: float = 180.0
 
     async def _polish_with_budget(self, prompt: str, budget: Optional[TimeBudget]) -> str:
         """在整体预算内润色提示词；超时或预算耗尽时回退到原始提示词（F1）。"""
@@ -325,58 +326,62 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
         return str(configured or DEFAULT_SELFIE_BASE_PROMPT).strip()
 
     async def _polish_prompt(self, original_prompt: str) -> str:
-        """使用 LLM 模型润色提示词，失败时原样返回。"""
+        """润色最多尝试三次；全部失败后使用原始提示词。"""
         if not self.get_config("selfie.polish_enable", False):
             return original_prompt
+        if not getattr(self, "ctx", None):
+            logger.warning("当前上下文不支持模型调用，使用原始提示词")
+            return original_prompt
 
-        try:
-            if not getattr(self, 'ctx', None):
-                logger.warning("当前上下文不支持模型调用，使用原始提示词")
-                return original_prompt
-
-            model_name = self.get_config("selfie.polish_model", "replyer")
-            available_models = await self.ctx.llm.get_available_models()
-            if model_name not in available_models:
-                logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
-                return original_prompt
-
-            template = self.get_config(self.polish_template_key, "") or self.polish_template_default
-            logger.info(f"正在润色{self.feature_name}提示词: {original_prompt}")
-            generate_kwargs = {
-                "prompt": template.format(original_prompt=original_prompt),
-                "task_name": model_name,
-                "request_type": self.polish_request_type,
-                "temperature": 0.5,
-                "max_tokens": 512,
-            }
+        for attempt in range(1, 4):
             try:
-                # SDK 2.8+ 将 model 定义为具体模型名，任务配置名（如 replyer）
-                # 必须通过 task_name 传递；否则宿主会把 replyer 当成具体模型查找。
-                result = await self.ctx.llm.generate(**generate_kwargs)
-            except TypeError as exc:
-                # 兼容仍使用旧 SDK、且 generate() 不接受 task_name 的宿主：
-                # 旧版的 model 参数语义就是任务名。
-                if "task_name" not in str(exc):
-                    raise
-                legacy_kwargs = dict(generate_kwargs)
-                legacy_kwargs.pop("task_name", None)
-                legacy_kwargs["model"] = model_name
-                result = await self.ctx.llm.generate(**legacy_kwargs)
+                # 单次最多 60 秒；外层整体期限仍可提前取消，不吞掉取消异常。
+                async with asyncio.timeout(60.0):
+                    model_name = self.get_config("selfie.polish_model", "replyer")
+                    available_models = await self.ctx.llm.get_available_models()
+                    if model_name not in available_models:
+                        logger.warning(f"润色模型 '{model_name}' 不存在，使用原始提示词")
+                        return original_prompt
 
-            if result.get("success") and result.get("response"):
-                final_prompt = f"{self.polish_prefix}：{result['response'].strip()}"
-                identity_prompt = self._identity_prompt()
-                if identity_prompt and identity_prompt not in final_prompt:
-                    final_prompt = f"{final_prompt}\n\n身份与画风约束：{identity_prompt}"
-                logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
-                return final_prompt
+                    template = self.get_config(self.polish_template_key, "") or self.polish_template_default
+                    logger.info(f"正在润色{self.feature_name}提示词: {original_prompt}")
+                    generate_kwargs = {
+                        "prompt": template.format(original_prompt=original_prompt),
+                        "task_name": model_name,
+                        "request_type": self.polish_request_type,
+                        "temperature": 0.5,
+                        "max_tokens": 512,
+                    }
+                    try:
+                        # SDK 2.8+ 将 model 定义为具体模型名，任务配置名（如 replyer）
+                        # 必须通过 task_name 传递；否则宿主会把 replyer 当成具体模型查找。
+                        result = await self.ctx.llm.generate(**generate_kwargs)
+                    except TypeError as exc:
+                        # 兼容仍使用旧 SDK、且 generate() 不接受 task_name 的宿主：
+                        # 旧版的 model 参数语义就是任务名。
+                        if "task_name" not in str(exc):
+                            raise
+                        legacy_kwargs = dict(generate_kwargs)
+                        legacy_kwargs.pop("task_name", None)
+                        legacy_kwargs["model"] = model_name
+                        result = await self.ctx.llm.generate(**legacy_kwargs)
 
-            logger.warning("润色失败，使用原始提示词")
-            return original_prompt
+                    response = result.get("response")
+                    if result.get("success") and isinstance(response, str) and response.strip():
+                        final_prompt = f"{self.polish_prefix}：{response.strip()}"
+                        identity_prompt = self._identity_prompt()
+                        if identity_prompt and identity_prompt not in final_prompt:
+                            final_prompt = f"{final_prompt}\n\n身份与画风约束：{identity_prompt}"
+                        logger.debug(f"润色完成: {original_prompt} -> {final_prompt}")
+                        return final_prompt
+                    logger.warning(f"润色未返回有效结果（第 {attempt}/3 次）")
+            except Exception as exc:
+                logger.warning(f"润色提示词时出错（第 {attempt}/3 次）: {exc}")
+            if attempt < 3:
+                logger.info(f"准备重试{self.feature_name}提示词润色（第 {attempt + 1}/3 次）")
 
-        except Exception as e:
-            logger.error(f"润色提示词时出错: {e}")
-            return original_prompt
+        logger.warning("提示词润色三次均失败，使用原始提示词")
+        return original_prompt
 
     def _reference_image_path(self) -> Optional[Path]:
         """定位人设底图；不存在时返回 None。"""
@@ -585,6 +590,10 @@ class SelfieVideoAction(_SelfieActionBase):
                 logger=logger,
                 budget=budget,
             )
+
+            if isinstance(send_error, MediaDeliveryUncertain):
+                # 不再发送“失败”提示，避免诱发 Planner 重新生成。
+                return False, send_error
 
             if success:
                 await self._send_text("当当当！专门为你拍的视频来啦，快夸夸我！(≧▽≦)✨")

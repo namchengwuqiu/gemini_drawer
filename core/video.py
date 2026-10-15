@@ -14,7 +14,7 @@ Gemini Drawer 视频生成
 整体时间预算（core/budget.py）覆盖创建、轮询、下载与发送；期限耗尽后不再
 开始新的渠道，单个渠道的创建/轮询/成片下载另有独立的绝对截止控制（F1）。
 视频发送优先走 SDK 的 send.custom 能力（进入宿主发送链路，有历史记录），
-失败时回退 NapCat 正向 HTTP；每次真实发送与回退之前都会重新检查剩余预算。
+SDK 不可用时回退 NapCat 正向 HTTP；每次真实发送与回退之前都会重新检查剩余预算。
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ from .agnes_video import (
     matches_agnes_video_endpoint,
 )
 from ..utils.log import set_request_secrets, reset_request_secrets
-from .budget import BudgetExpiredError, TimeBudget
+from .budget import BudgetExpiredError, MediaDeliveryUncertain, TimeBudget
 from .channel_url import with_api_key
 from ..utils.http import request_capped, read_body_capped, iter_sse_lines
 from ..utils.net import same_origin, parse_http_url, DownloadNotAllowedError
@@ -732,7 +732,7 @@ async def send_video_media(
     logger,
     budget: Optional[TimeBudget] = None,
 ) -> Tuple[bool, str]:
-    """发送视频：优先走 SDK 发送能力，失败或不可用时回退 NapCat HTTP。
+    """发送视频：优先走 SDK；仅在 SDK 不可用时使用 NapCat HTTP。
 
     SDK 路径进入宿主发送链路（有历史记录、由适配器编码消息段），
     通过 ``return_details=True`` 读取平台返回的真实发送状态。
@@ -749,20 +749,23 @@ async def send_video_media(
     if callable(send) and stream_id and budget_allows("SDK 发送"):
         try:
             timeout = budget.stage_timeout(300.0) if budget else 300.0
+            if budget:
+                budget.media_delivery_pending = True
             result = await asyncio.wait_for(send(
                 "video", {"binary_data_base64": video_base64}, stream_id, return_details=True,
             ), timeout=timeout)
         except Exception as exc:
             logger.warning(f"[视频] SDK 发送确认异常: {type(exc).__name__}，不自动重复发送")
-            return False, "视频发送状态不确定，已停止等待，未自动重复发送"
+            return False, MediaDeliveryUncertain()
         if interpret_send_result(result):
             if budget:
                 budget.media_sent = True
+                budget.media_delivery_pending = False
             return True, ""
-        # 仅明确 sent=False 且无消息 ID 才证明未发送；未知返回结构停止回退。
-        if not (result is False or isinstance(result, dict)
-                and result.get("sent") is False and not result.get("message_id")):
-            return False, "视频发送状态不确定，未自动重复发送"
+        # 宿主会把“平台已经接收、回执查询失败”也压成 sent=False / 无消息 ID。
+        # 负返回值不能证明未投递；SDK 已调用后绝不再走第二条发送链路。
+        logger.warning("[视频] SDK 未确认投递结果，不回退发送，也不重新生成")
+        return False, MediaDeliveryUncertain()
 
     if not budget_allows("NapCat 回退发送"):
         return False, "时间预算耗尽，未再尝试发送（宿主 RPC 可能已超时）"
@@ -771,6 +774,8 @@ async def send_video_media(
     if budget is not None:
         napcat_timeout = budget.stage_timeout(300.0, minimum=5.0)
 
+    if budget:
+        budget.media_delivery_pending = True
     try:
         result = await asyncio.wait_for(send_video_via_napcat(
             video_base64=video_base64,
@@ -782,9 +787,11 @@ async def send_video_media(
             timeout=napcat_timeout,
         ), timeout=napcat_timeout)
     except TimeoutError:
-        return False, "视频发送状态不确定，已停止等待，未自动重复发送"
-    if result[0] and budget:
-        budget.media_sent = True
+        return False, MediaDeliveryUncertain()
+    if budget:
+        budget.media_delivery_pending = isinstance(result[1], MediaDeliveryUncertain)
+        if result[0]:
+            budget.media_sent = True
     return result
 
 
@@ -828,4 +835,4 @@ async def send_video_via_napcat(
                 return False, f"HTTP {response.status_code}"
     except Exception as e:
         logger.error(f"[视频] 发送确认失败: {type(e).__name__}")
-        return False, "视频发送状态不确定，未自动重复发送"
+        return False, MediaDeliveryUncertain()
