@@ -21,7 +21,23 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
-from ..utils import extract_all_image_data, extract_text_failure_reason, redact_url
+from ..core.errors import (UpstreamHTTPError, SubmissionUncertainError, GenerationRejectedError, safe_model_rejection)
+from ..utils.http import read_body_capped as _read_body_capped, iter_sse_lines
+from ..utils import (
+    MediaTooLargeError,
+    extract_all_image_data,
+    extract_http_error_reason,
+    extract_text_failure_reason,
+    redact_url,
+    sanitize_upstream_text,
+)
+from ..utils.limits import (
+    MAX_DEBUG_SSE_LINE_CHARS,
+    MAX_DEBUG_SSE_LINES,
+    MAX_ERROR_BODY_BYTES,
+    MAX_HTTP_RESPONSE_BYTES,
+    MAX_SSE_ACCUMULATED_CHARS,
+)
 
 
 @dataclass
@@ -125,6 +141,10 @@ class Provider(ABC):
     timeout: float = 120.0
     #: 流式请求的默认超时
     stream_timeout: float = 180.0
+    #: 异步任务型协议（建任务 + 轮询）整个生成阶段的绝对上限（秒）。
+    #: None 表示 ``call.timeout`` 就是该次 fetch 的绝对上限；任务型协议必须
+    #: 覆写此值，否则单次 HTTP timeout 会被误当成整个任务的上限（F8）。
+    task_timeout: Optional[float] = None
 
     @classmethod
     @abstractmethod
@@ -164,30 +184,44 @@ class Provider(ABC):
         logger: Any,
         debug_mode: bool,
     ) -> List[str]:
+        # 用流式读取代替 client.post：响应体在读取阶段就受字节上限约束，
+        # 不会把超大响应先完整载入内存再检查（F6）。
         if call.files is not None:
-            response = await client.post(
-                call.url, data=call.data, files=call.files, headers=call.headers
-            )
+            request_kwargs: Dict[str, Any] = {"data": call.data, "files": call.files}
         else:
-            response = await client.post(call.url, json=call.json, headers=call.headers)
+            request_kwargs = {"json": call.json}
+        async with client.stream(
+            "POST", call.url, headers=call.headers, **request_kwargs
+        ) as response:
+            if response.status_code != 200:
+                body = await _read_body_capped(response, MAX_ERROR_BODY_BYTES)
+                # 结构化错误：状态码、阶段与简短原因分开保存，原始响应体只进日志。
+                raise UpstreamHTTPError(
+                    response.status_code,
+                    stage="fetch",
+                    body=body.decode("utf-8", "ignore"),
+                    reason=extract_http_error_reason(body),
+                )
+            body = await _read_body_capped(response, MAX_HTTP_RESPONSE_BYTES, enforce=True)
 
-        if response.status_code != 200:
-            raise RuntimeError(
-                f"API请求失败, 状态码: {response.status_code} - {response.text}"
-            )
+        try:
+            data = json.loads(body)
+        except ValueError as exc:
+            raise SubmissionUncertainError("API 响应解析失败，生成结果不确定") from exc
 
-        data = response.json()
         img_data = await extract_all_image_data(data)
         if img_data:
             return img_data
 
         if debug_mode:
             logger.warning("[调试模式] 非流式响应未提取到图片，原始响应:")
-            logger.warning(f"[调试模式] {json.dumps(data, ensure_ascii=False)[:2000]}")
+            logger.warning("[调试模式] 已省略上游原文，避免暴露凭据或参考图")
         else:
             logger.warning("API 响应成功但未提取到图片。")
-        reason = extract_text_failure_reason(data)
-        raise RuntimeError(f"API未返回图片, 原因: {reason or '响应中没有可提取的图片数据'}")
+        reason = safe_model_rejection(data)
+        if reason:
+            raise GenerationRejectedError(f"API未返回图片：{reason}")
+        raise SubmissionUncertainError("API响应未包含可提取的图片，生成结果不确定")
 
     async def _fetch_stream(
         self,
@@ -208,13 +242,15 @@ class Provider(ABC):
             "POST", call.url, json=call.json, headers=call.headers
         ) as response:
             if response.status_code != 200:
-                raw_body = await response.aread()
-                raise RuntimeError(
-                    f"API请求失败, 状态码: {response.status_code} - "
-                    f"{raw_body.decode('utf-8', 'ignore')}"
+                raw_body = await _read_body_capped(response, MAX_ERROR_BODY_BYTES)
+                raise UpstreamHTTPError(
+                    response.status_code,
+                    stage="fetch",
+                    body=raw_body.decode("utf-8", "ignore"),
+                    reason=extract_http_error_reason(raw_body),
                 )
 
-            async for line in response.aiter_lines():
+            async for line in iter_sse_lines(response):
                 line = line.strip()
                 if not line or line.startswith(":"):
                     continue
@@ -225,8 +261,8 @@ class Provider(ABC):
                 if data_str in ("DONE", "[DONE]"):
                     break
 
-                if debug_sse_lines is not None:
-                    debug_sse_lines.append(data_str)
+                if debug_sse_lines is not None and len(debug_sse_lines) < MAX_DEBUG_SSE_LINES:
+                    debug_sse_lines.append(data_str[:MAX_DEBUG_SSE_LINE_CHARS])
 
                 try:
                     chunk = json.loads(data_str)
@@ -244,6 +280,11 @@ class Provider(ABC):
                         chunk_content = message.get("content", "")
                 if chunk_content:
                     accumulated_content += chunk_content
+                    if len(accumulated_content) > MAX_SSE_ACCUMULATED_CHARS:
+                        # 本地资源上限：统一用 MediaTooLargeError，调用方不得换端点重试（F6）。
+                        raise MediaTooLargeError(
+                            f"流式响应累积内容超过上限（{MAX_SSE_ACCUMULATED_CHARS} 字符），已中止"
+                        )
 
         if accumulated_content:
             logger.info(
@@ -265,8 +306,6 @@ class Provider(ABC):
                 f"[调试模式] SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:"
             )
             for idx, dl in enumerate(debug_sse_lines):
-                logger.warning(f"[调试模式] SSE[{idx}]: {dl[:500]}")
+                logger.warning(f"[调试模式] SSE[{idx}]: 已省略原文（{len(dl)} 字符）")
 
-        raise RuntimeError(
-            f"API未返回图片, 原因: {reason or '响应中没有可提取的图片数据'}"
-        )
+        raise SubmissionUncertainError("API流式响应未包含可提取的图片，生成结果不确定")

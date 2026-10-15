@@ -10,12 +10,15 @@ from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
 from maibot_sdk.context import PluginContext
 
 from .config import GeminiDrawerConfig
+from .core.budget import DRAW_COMMAND_TIMEOUT_MS, VIDEO_COMMAND_TIMEOUT_MS
 from .core.managers import data_manager, key_manager
 from .core.webui import DrawerWebUI
+from .utils import configure_policy
 from .utils.version import get_plugin_version
 
 from .commands.help_command import HelpCommand
 from .commands.draw_commands import (
+    DRAW_COMMAND_PREFIXES,
     CustomDrawCommand, TextToImageCommand, UniversalPromptCommand,
     MultiImageDrawCommand, RandomPromptDrawCommand, VideoGenerateCommand,
     TextToVideoCommand
@@ -32,9 +35,14 @@ from .commands.admin_commands import (
 from .commands.actions import ImageGenerateAction, SelfieGenerateAction, SelfieVideoAction
 
 
-DRAW_COMMAND_TIMEOUT_MS = 300_000
-VIDEO_COMMAND_TIMEOUT_MS = 600_000
+# 组件 RPC 超时（DRAW_COMMAND_TIMEOUT_MS / VIDEO_COMMAND_TIMEOUT_MS）统一定义在
+# core/budget.py，命令层用同一份常量建立整体时间预算，避免两边漂移。
 BANANA_PROMPTS_URL = "https://raw.githubusercontent.com/unknowlei/nanobanana-website/main/public/data.json"
+
+#: 工具描述里的命令排除提示；与 Action 的排除集合共用同一份定义（P2-9）
+_COMMAND_HINT = "、".join(DRAW_COMMAND_PREFIXES)
+#: 媒体冷却表的条目上限，防止长期按会话数增长（P1-6）
+_MEDIA_COOLDOWN_MAX_ENTRIES = 2048
 
 
 # ── Compatibility wrapper classes ──
@@ -57,9 +65,12 @@ class CompatMessageInfo:
         self.additional_config = additional_config or {}
 
 class CompatMessageSegment:
-    def __init__(self, seg_type: str, data: Any):
+    def __init__(self, seg_type: str, data: Any, *, binary_hash: Optional[str] = None,
+                 binary_data_base64: Optional[str] = None):
         self.type = seg_type
         self.data = data
+        self.hash = binary_hash
+        self.binary_data_base64 = binary_data_base64
 
 class CompatChatStream:
     def __init__(self, stream_id: str, platform: str, user_info=None, group_info=None):
@@ -195,12 +206,18 @@ class CompatMessage:
                 if base64_val and (not s_data or (isinstance(s_data, dict) and not s_data.get("url"))):
                     s_data = base64_val
 
-                compat_segments.append(CompatMessageSegment(s_type, s_data))
+                compat_segments.append(CompatMessageSegment(
+                    s_type, s_data, binary_hash=seg.get("hash"), binary_data_base64=base64_val
+                ))
 
         if not compat_segments and self.processed_plain_text:
             compat_segments.append(CompatMessageSegment("text", self.processed_plain_text))
 
-        self.raw_message = CompatMessageString(self.processed_plain_text or "")
+        # processed_plain_text 包含宿主生成的图片/表情描述，不能作为指令原文。
+        # 只拼接文字段，保留用户自己的括号和换行；媒体数据仍由消息段取图。
+        self.raw_message = CompatMessageString("".join(
+            seg.data for seg in compat_segments if seg.type == "text" and isinstance(seg.data, str)
+        ))
 
         if len(compat_segments) == 1:
             self.message_segment = compat_segments[0]
@@ -271,6 +288,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         self._webui = DrawerWebUI(data_manager, key_manager)
         self._banana_update_task: Optional[asyncio.Task] = None
         self._banana_update_state: dict[str, Any] = {"job_id": "", "status": "idle", "message": ""}
+        #: 插件持有的后台任务（如失败消息的延迟撤回）；卸载时统一取消（P1-5）
+        self._background_tasks: set[asyncio.Task] = set()
 
     async def _webui_call(self, method, **kwargs: Any) -> dict[str, Any]:
         # 文件解析与写入在工作线程执行，不占用插件的消息处理循环。
@@ -369,8 +388,71 @@ class GeminiDrawerPlugin(MaiBotPlugin):
 
     def _mark_media_sent(self, stream_id: str) -> None:
         key = str(stream_id or "").strip()
-        if key:
-            self._media_last_sent_at[key] = time.monotonic()
+        if not key:
+            return
+        cooldown = self._media_cooldown_seconds()
+        if cooldown <= 0:
+            # 冷却关闭时无需保留历史时间戳
+            self._media_last_sent_at.clear()
+            return
+        now = time.monotonic()
+        self._prune_media_cooldown(now, cooldown)
+        self._media_last_sent_at[key] = now
+
+    def _prune_media_cooldown(self, now: float, cooldown: float) -> None:
+        """按冷却期限回收过期条目，并限制表大小，避免长期按会话数增长（P1-6）。"""
+        for stale in [k for k, ts in self._media_last_sent_at.items() if now - ts >= cooldown]:
+            self._media_last_sent_at.pop(stale, None)
+        overflow = len(self._media_last_sent_at) - _MEDIA_COOLDOWN_MAX_ENTRIES
+        if overflow > 0:
+            oldest = sorted(self._media_last_sent_at.items(), key=lambda item: item[1])[:overflow]
+            for stale, _ in oldest:
+                self._media_last_sent_at.pop(stale, None)
+
+    def track_background_task(self, task: Any) -> asyncio.Task:
+        """登记插件后台任务；完成时自动移除，卸载时统一取消（P1-5）。
+
+        接受 Task 或协程：协程会先包装成 Task，避免调用方漏掉 create_task。
+        """
+        if not isinstance(task, asyncio.Task):
+            task = asyncio.create_task(task)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._on_background_task_done)
+        return task
+
+    def _on_background_task_done(self, task: asyncio.Task) -> None:
+        self._background_tasks.discard(task)
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            self._get_logger().warning(
+                f"[GeminiDrawer] 后台任务异常: {type(exc).__name__}: {exc}"
+            )
+
+    async def _cancel_background_tasks(self) -> None:
+        """取消并等待所有在途后台任务，确保卸载后不再发起查询/撤回。"""
+        pending = [task for task in self._background_tasks if not task.done()]
+        for task in pending:
+            task.cancel()
+        for task in pending:
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                self._get_logger().warning(f"[GeminiDrawer] 后台任务结束时出错: {exc}")
+
+    def _apply_download_policy(self) -> None:
+        """把配置里的下载地址策略应用到 utils.net（P1-7）。"""
+        try:
+            behavior = getattr(self.config, "behavior", None)
+            configure_policy(
+                allow_private_hosts=bool(getattr(behavior, "allow_private_media_hosts", False)),
+                host_allowlist=getattr(behavior, "media_host_allowlist", None) or (),
+            )
+        except Exception as exc:
+            self.ctx.logger.warning(f"[GeminiDrawer] 应用下载地址策略失败，沿用默认策略: {exc}")
 
     def get_components(self) -> list[dict[str, Any]]:
         components = super().get_components()
@@ -422,15 +504,10 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         else:
             self.ctx.logger.info("[GeminiDrawer] 已跳过大香蕉扩展词库自动同步，可使用 /渠道同步大香蕉 手动同步")
 
-        # 同步配置缓存到兼容层 config_api
-        try:
-            from maibot_sdk.compat.apis import config_api
-            config_api.set_config_cache(
-                global_cfg={},
-                plugin_cfg=self.get_plugin_config_data()
-            )
-        except Exception:
-            pass
+        # 下载地址策略：默认拒绝内网/回环目标，管理员可在配置中显式放行（P1-7）。
+        # 兼容层 config_api 的缓存不再由本插件写入：插件自身配置读取全部走实例
+        # 配置，写入 global_cfg={} 反而会清掉同 runner 其他旧插件的共享缓存（P2-2）。
+        self._apply_download_policy()
 
         # 版本号以 _manifest.json 为准；config 里的 plugin.version 只是宿主
         # 持久化副本，发版时容易落后（读不到清单时再退回它）
@@ -562,20 +639,15 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 await self._banana_update_task
             except asyncio.CancelledError:
                 pass
+        await self._cancel_background_tasks()
         self._media_pending.clear()
         self._media_last_sent_at.clear()
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
         self.ctx.logger.info("Gemini Drawer 配置热更新: scope=%s version=%s", scope, version)
-        try:
-            from maibot_sdk.compat.apis import config_api
-            config_api.set_config_cache(
-                global_cfg={},
-                plugin_cfg=self.get_plugin_config_data()
-            )
-        except Exception:
-            pass
+        # 热更新后重新应用下载地址策略（P1-7）
+        self._apply_download_policy()
 
     @staticmethod
     def _item_tool_name(item: Any) -> str:
@@ -957,7 +1029,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             "根据用户的明确要求生成并自行发送图片。适用于'画一张''生成图片''帮我画'等视觉请求，"
             "不适用于文字人设、故事或仅讨论图片。用户说'生成人设''写个人设'通常指文字角色设定而非图片，"
             "除非明确提到'画'或'图'；用户让别人或其他 AI 去做某事属于讨论，不是对你的绘图指令。"
-            "遇到 /绘图、/bnn、/多图、/+ 等命令时不要调用。"
+            f"遇到 {_COMMAND_HINT} 等命令时不要调用。"
             "工具会先发送等待提示，然后一直等待到图片真正发送成功或明确失败才返回；调用本工具时不要在同一轮"
             "同时调用 reply，也不要在工具成功返回前声称图片已经发送或让用户查收。"
             "不要连续触发：如果刚刚已经发送过图片或正在生成中，即使话题还在继续也不要再次调用，"

@@ -3,6 +3,7 @@
 覆盖的是重构最容易出错的部分——多端点失败转移、Key 健康度记账、
 SSE 累积解析、以及 lmarena 的特例（不记账、不走代理）。
 """
+import asyncio
 import base64
 import json
 
@@ -10,7 +11,8 @@ import httpx
 import pytest
 
 from gemini_drawer.core import pipeline
-from gemini_drawer.providers import DrawRequest
+from gemini_drawer.core.budget import TimeBudget
+from gemini_drawer.providers import DrawRequest, HttpCall
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 32
 IMG_B64 = base64.b64encode(b"generated-image-bytes" * 80).decode()
@@ -47,6 +49,7 @@ def mock_http(monkeypatch):
     def factory(**kwargs):
         state["client_kwargs"].append(dict(kwargs))  # 先留档，下面会改动 kwargs
         kwargs.pop("proxy", None)
+        kwargs.pop("transport", None)
         return real_client(transport=httpx.MockTransport(_dispatch), **kwargs)
 
     def _dispatch(request: httpx.Request) -> httpx.Response:
@@ -69,6 +72,10 @@ def endpoint(type_="custom_g", url=GEMINI_URL, key="k1", model=None, stream=Fals
     return {"type": type_, "url": url, "key": key, "model": model, "stream": stream}
 
 
+def second_endpoint(key="k2"):
+    return endpoint(type_="custom_o", url=OPENAI_URL, key=key, model="m")
+
+
 @pytest.mark.asyncio
 async def test_first_endpoint_success_records_key(mock_http, fake_keys):
     mock_http["handler"] = lambda r: httpx.Response(200, json=gemini_image_response())
@@ -84,9 +91,10 @@ async def test_first_endpoint_success_records_key(mock_http, fake_keys):
 
 @pytest.mark.asyncio
 async def test_falls_over_to_second_endpoint(mock_http, fake_keys):
+    """明确被拒绝的失败（4xx）才换端点；5xx 按提交不确定处理（见 test_budget_pipeline）。"""
     def handler(request):
         if "bad.example" in str(request.url):
-            return httpx.Response(500, text="upstream boom")
+            return httpx.Response(403, text="upstream rejected")
         return httpx.Response(200, json=openai_image_response())
 
     mock_http["handler"] = handler
@@ -150,14 +158,14 @@ async def test_429_force_disables_key(mock_http, fake_keys):
 
 @pytest.mark.asyncio
 async def test_all_endpoints_fail_returns_last_error(mock_http, fake_keys):
-    mock_http["handler"] = lambda r: httpx.Response(503, text="down")
+    mock_http["handler"] = lambda r: httpx.Response(400, text="bad request")
 
     img, err = await pipeline.run_drawing(
         DrawRequest(prompt="p"), [endpoint(key="a"), endpoint(key="b")], None, _logger()
     )
 
     assert img == []
-    assert "503" in err
+    assert "400" in err
     assert [c["key"] for c in fake_keys.calls] == ["a", "b"]
 
 
@@ -280,6 +288,90 @@ async def test_doubao_url_response_is_returned_as_url(mock_http, fake_keys):
     )
 
     assert img == ["https://cdn.example/out.png"]
+
+
+TSAI_URL = "https://api.tavr.top/?endpoint=image"
+
+
+@pytest.mark.asyncio
+async def test_tsai_completed_without_url_never_resubmits(mock_http, fake_keys, monkeypatch):
+    """任务已完成但地址暂不可用：只查询同一任务，绝不换端点重新生成（F7）。"""
+    from gemini_drawer.providers import tsai
+
+    monkeypatch.setattr(tsai, "POLL_INTERVAL", 0.0)
+    monkeypatch.setattr(tsai, "POLL_ATTEMPTS", 2)
+
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(200, json={"data": {"id": "t1"}})
+        return httpx.Response(200, json={"data": {"status": "completed", "result": {}}})
+
+    mock_http["handler"] = handler
+
+    img, err = await pipeline.run_drawing(
+        DrawRequest(prompt="p"),
+        [endpoint(type_="custom_tsai", url=TSAI_URL, key="k1"), second_endpoint()],
+        None,
+        _logger(),
+    )
+
+    assert img == []
+    assert "未自动切换其他端点" in err
+    assert sum(r.method == "POST" for r in mock_http["requests"]) == 1
+    assert fake_keys.calls == []   # 在途任务不记 Key 失效
+
+
+@pytest.mark.asyncio
+async def test_async_task_provider_uses_whole_task_timeout(mock_http, fake_keys, monkeypatch):
+    """单次 HTTP timeout 不能当作整个任务的上限（F8）：fetch 比 call.timeout 慢仍应完成。"""
+    class SlowTaskProvider:
+        task_timeout = 5.0
+
+        def build(self, endpoint, request):
+            return HttpCall(url="https://task.example/api?endpoint=image", timeout=0.01)
+
+        async def fetch(self, call, client, logger, debug_mode=False):
+            await asyncio.sleep(0.05)
+            return [IMG_B64]
+
+    monkeypatch.setattr(pipeline, "resolve_provider", lambda ep: SlowTaskProvider())
+    monkeypatch.setattr(pipeline, "describe_protocol", lambda ep: ("tsai", False))
+
+    img, err = await pipeline.run_drawing(
+        DrawRequest(prompt="p"), [endpoint()], None, _logger(),
+        budget=TimeBudget(100.0, reserve_seconds=0.0),
+    )
+
+    assert img == [IMG_B64]
+    assert err == ""
+
+
+@pytest.mark.asyncio
+async def test_one_shot_provider_timeout_stops_without_failover(mock_http, fake_keys, monkeypatch):
+    """一次性 provider 的 fetch 超过 call.timeout：停止等待且不换端点（提交不确定）。"""
+    class SlowOnceProvider:
+        task_timeout = None
+
+        def build(self, endpoint, request):
+            return HttpCall(url="https://task.example/api", timeout=0.01)
+
+        async def fetch(self, call, client, logger, debug_mode=False):
+            # 单次请求 0.01 秒的绝对期限不能被抬高；验证超时后不换端点。
+            await asyncio.sleep(0.05)
+            return [IMG_B64]
+
+    monkeypatch.setattr(pipeline, "resolve_provider", lambda ep: SlowOnceProvider())
+    monkeypatch.setattr(pipeline, "describe_protocol", lambda ep: ("openai_chat", False))
+
+    img, err = await pipeline.run_drawing(
+        DrawRequest(prompt="p"), [endpoint(key="k1"), second_endpoint()], None, _logger(),
+        budget=TimeBudget(100.0, reserve_seconds=0.0),
+    )
+
+    assert img == []
+    assert "未自动切换其他端点" in err
+    assert fake_keys.calls == []
+    assert mock_http["requests"] == []
 
 
 def _logger():

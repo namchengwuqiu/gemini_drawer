@@ -28,6 +28,7 @@ DataManager (配置数据管理器):
     - data_manager: DataManager 的单例实例
 """
 import json
+from datetime import datetime
 from functools import wraps
 from pathlib import Path
 from threading import RLock
@@ -118,6 +119,65 @@ def _file_stamp(path: Path) -> Optional[Tuple[float, int]]:
         return None
 
 
+class ConfigFileCorruptedError(RuntimeError):
+    """数据文件损坏，拒绝在未恢复的状态下覆盖写入。"""
+
+
+def _backup_corrupt_file(path: Path) -> Optional[Path]:
+    """把损坏文件复制一份带时间戳的备份；原文件保留，便于人工恢复。"""
+    try:
+        import shutil
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup = path.with_name(f"{path.name}.corrupt-{stamp}")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+            logger.warning(f"已备份损坏的数据文件: {path.name} -> {backup.name}")
+        return backup
+    except Exception as e:
+        logger.error(f"备份损坏文件 {path.name} 失败: {e}")
+        return None
+
+
+def _normalize_keys_config(raw: Any) -> Dict[str, Any]:
+    """校验并补全 keys.json 结构；结构非法时抛 ValueError。
+
+    缺字段的合法旧格式在这里补默认值（明确的迁移规则）：
+    status / error_count / max_errors / last_used 缺失时补默认，未知字段原样保留。
+    """
+    if not isinstance(raw, dict):
+        raise ValueError("顶层必须是 JSON 对象")
+    keys = raw.get("keys", [])
+    if not isinstance(keys, list):
+        raise ValueError("keys 字段必须是数组")
+    normalized: List[Dict[str, Any]] = []
+    for index, entry in enumerate(keys):
+        if not isinstance(entry, dict):
+            raise ValueError(f"第 {index + 1} 个 Key 记录不是对象")
+        value = entry.get("value")
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"第 {index + 1} 个 Key 记录缺少有效的 value")
+        entry.setdefault("status", "active")
+        entry.setdefault("error_count", 0)
+        entry.setdefault("max_errors", 5)
+        entry.setdefault("last_used", None)
+        normalized.append(entry)
+    raw["keys"] = normalized
+    raw.setdefault("current_index", 0)
+    return raw
+
+
+def _normalize_data_config(raw: Any) -> Dict[str, Any]:
+    """校验 data.json 顶层结构；结构非法时抛 ValueError。"""
+    if not isinstance(raw, dict):
+        raise ValueError("顶层必须是 JSON 对象")
+    for field in ("prompts", "channels"):
+        value = raw.get(field, {})
+        if not isinstance(value, dict):
+            raise ValueError(f"{field} 字段必须是对象")
+        raw[field] = value
+    return raw
+
+
 class KeyManager:
     def __init__(self, keys_file_path: Path = None):
         self.lock = RLock()
@@ -132,6 +192,8 @@ class KeyManager:
             self.keys_file = keys_file_path
             self.plugin_dir = self.keys_file.parent.parent
 
+        #: 最近一次读取失败的原因；非 None 时拒绝覆盖写入，直到文件恢复
+        self._load_error: Optional[str] = None
         self.config = self._load_config()
         self._migrated = False
 
@@ -153,10 +215,14 @@ class KeyManager:
             try:
                 with open(old_keys_file, 'r', encoding='utf-8') as f:
                     old_data = json.load(f)
-                    old_keys = old_data.get('keys', [])
+                    old_keys = old_data.get('keys', []) if isinstance(old_data, dict) else []
+                    if not isinstance(old_keys, list):
+                        old_keys = []
                     if old_keys:
                         current_keys = {k['value'] for k in self.config.get('keys', [])}
                         for k in old_keys:
+                            if not isinstance(k, dict) or not isinstance(k.get('value'), str) or not k['value']:
+                                continue
                             if k['value'] not in current_keys:
                                 if 'type' not in k:
                                     k['type'] = 'bailili' if k['value'].startswith('sk-') else 'google'
@@ -219,19 +285,39 @@ class KeyManager:
             self.save_config(self.config)
 
     def _load_config(self) -> Dict[str, Any]:
-        try:
-            if not self.keys_file.exists():
-                # 不在这里落盘：首次写 Key 时 save_config 会创建文件
-                return {"keys": [], "current_index": 0}
-            with open(self.keys_file, 'r', encoding='utf-8') as f:
-                return json.load(f)
-        except (IOError, json.JSONDecodeError) as e:
-            logger.error(f"读取密钥配置失败: {e}")
+        if not self.keys_file.exists():
+            # 不在这里落盘：首次写 Key 时 save_config 会创建文件
+            self._load_error = None
             return {"keys": [], "current_index": 0}
+        try:
+            with open(self.keys_file, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+            config = _normalize_keys_config(raw)
+        except (IOError, json.JSONDecodeError, ValueError) as e:
+            # 读取失败时保留并备份原文件，阻止在未恢复状态下覆盖；
+            # 不能用空默认值掩盖损坏（P1-3）。
+            logger.error(f"读取密钥配置失败: {e}")
+            self._load_error = str(e)
+            _backup_corrupt_file(self.keys_file)
+            return {"keys": [], "current_index": 0}
+        self._load_error = None
+        return config
 
     @_serialized()
     def save_config(self, config_data: Dict[str, Any]):
-        """原子写入：并发绘图时多个 record_key_usage 同时落盘不会写出半截文件。"""
+        """原子写入：并发绘图时多个 record_key_usage 同时落盘不会写出半截文件。
+
+        Raises:
+            ConfigFileCorruptedError: keys.json 损坏且未恢复时拒绝覆盖写入。
+        """
+        if self._load_error is not None:
+            # 文件可能已被人工修复；重新读取一次以自动解除保护
+            self._load_config()
+        if self._load_error is not None:
+            raise ConfigFileCorruptedError(
+                f"keys.json 当前无法解析（{self._load_error}），已拒绝覆盖写入；"
+                "请先修复或恢复该文件后重试。"
+            )
         try:
             self.keys_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_file = self.keys_file.with_suffix(self.keys_file.suffix + ".tmp")
@@ -279,6 +365,8 @@ class KeyManager:
                             key_obj['status'] = 'disabled'
                             reason = "配额耗尽" if force_disable else "错误次数过多"
                             logger.warning(f"API Key {key_value[:8]}... 已因“{reason}”被自动禁用。")
+                # 记账同时更新最后使用时间（此前该字段从不更新，页面展示会误导）
+                key_obj['last_used'] = datetime.now().isoformat(timespec="seconds")
                 self.save_config(self.config)
                 return
 
@@ -361,6 +449,10 @@ class DataManager:
         self._data_stamp: Optional[Tuple[float, int]] = None
         self._banana_cache: Optional[Dict[str, Any]] = None
         self._banana_stamp: Optional[Tuple[float, int]] = None
+        #: 大香蕉词条计数的缓存（按文件指纹与过滤开关失效，P2-13）
+        self._banana_count_cache: Optional[int] = None
+        self._banana_count_stamp: Optional[Tuple[float, int]] = None
+        self._banana_count_flag: Optional[bool] = None
 
         if data_file_path is None:
             self.plugin_dir = Path(__file__).parent.parent
@@ -375,6 +467,8 @@ class DataManager:
             self.banana_file = self.data_file.parent / "banana_prompts.json"
             self.plugin_dir = self.data_file.parent.parent
             
+        #: 最近一次读取失败的原因；非 None 时拒绝覆盖写入，直到文件恢复
+        self._load_error: Optional[str] = None
         self.data = self._load_data()
         self._migrated = False
 
@@ -453,17 +547,33 @@ class DataManager:
 
         try:
             with open(self.data_file, 'r', encoding='utf-8') as f:
-                data = json.load(f)
+                data = _normalize_data_config(json.load(f))
             self._data_cache = data
             self._data_stamp = stamp
+            self._load_error = None
             return data
         except Exception as e:
+            # 读取失败时保留并备份原文件，阻止在未恢复状态下覆盖（P1-3 同类保护）
             logger.error(f"Failed to load data.json: {e}")
+            self._load_error = str(e)
+            _backup_corrupt_file(self.data_file)
             return {"prompts": {}, "channels": {}}
 
     @_serialized()
     def save_data(self):
-        """原子写入，避免并发或中断时留下半截 data.json。"""
+        """原子写入，避免并发或中断时留下半截 data.json。
+
+        Raises:
+            ConfigFileCorruptedError: data.json 损坏且未恢复时拒绝覆盖写入。
+        """
+        if self._load_error is not None:
+            # 文件可能已被人工修复；重新校验一次以自动解除保护（不改写 self.data）
+            self._load_data()
+        if self._load_error is not None:
+            raise ConfigFileCorruptedError(
+                f"data.json 当前无法解析（{self._load_error}），已拒绝覆盖写入；"
+                "请先修复或恢复该文件后重试。"
+            )
         try:
             self.data_file.parent.mkdir(parents=True, exist_ok=True)
             tmp_file = self.data_file.with_suffix(self.data_file.suffix + ".tmp")
@@ -518,9 +628,27 @@ class DataManager:
             tmp_file.replace(self.banana_file)
             self._banana_cache = banana_data
             self._banana_stamp = _file_stamp(self.banana_file)
+            self._banana_count_cache = None
         except Exception as e:
             logger.error(f"保存 banana_prompts.json 失败: {e}")
             raise
+
+    @_serialized()
+    def count_banana_entries(self, show_restricted: bool = False) -> int:
+        """统计大香蕉词条数量；按文件指纹与过滤开关缓存，避免分页时重复遍历（P2-13）。"""
+        flag = bool(show_restricted)
+        stamp = _file_stamp(self.banana_file)
+        if (
+            self._banana_count_cache is not None
+            and self._banana_count_stamp == stamp
+            and self._banana_count_flag == flag
+        ):
+            return self._banana_count_cache
+        count = len(self.get_banana_prompt_entries(show_restricted=flag))
+        self._banana_count_cache = count
+        self._banana_count_stamp = stamp
+        self._banana_count_flag = flag
+        return count
 
     def get_banana_prompt_entries(self, show_restricted: bool = False) -> Dict[str, Dict[str, Any]]:
         """返回过滤后的大香蕉提示词条目，保留元数据用于搜索展示。"""

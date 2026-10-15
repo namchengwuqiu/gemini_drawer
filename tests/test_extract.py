@@ -282,3 +282,45 @@ def test_safe_json_dumps_keeps_short_strings_and_scalars():
 def test_safe_json_dumps_truncates_top_level_string():
     out = safe_json_dumps("C" * 4000)
     assert "truncated" in out and len(out) < 500
+
+
+# ── 上游错误文本脱敏（F5） ──
+
+
+def test_sanitize_upstream_text_hides_credentials_and_urls():
+    from gemini_drawer.utils.log import sanitize_upstream_text
+
+    text = sanitize_upstream_text(
+        "invalid key DUMMY-SECRET-CREDENTIAL at http://internal.local/api"
+    )
+    assert "DUMMY-SECRET-CREDENTIAL" not in text
+    assert "internal.local" not in text
+    assert "***" in text
+    assert "[地址已隐藏]" in text
+
+
+def test_sanitize_upstream_text_hides_bearer_and_common_key_prefixes():
+    from gemini_drawer.utils.log import sanitize_upstream_text
+
+    text = sanitize_upstream_text(
+        "auth failed: Bearer abc123def456; api_key=sk-abcdef1234567890; AIzaSyA1234567890abc"
+    )
+    assert "abc123def456" not in text
+    assert "sk-abcdef1234567890" not in text
+    assert "AIzaSyA1234567890abc" not in text
+    assert "Bearer ***" in text
+
+
+def test_sanitize_upstream_text_keeps_ordinary_reasons():
+    from gemini_drawer.utils.log import sanitize_upstream_text
+
+    assert sanitize_upstream_text("insufficient balance") == "insufficient balance"
+    assert sanitize_upstream_text("task 429-abc not found") == "task 429-abc not found"
+    assert sanitize_upstream_text("请求被模型拦截: 安全策略拦截 (SAFETY)").startswith("请求被模型拦截")
+    assert sanitize_upstream_text("") == ""
+
+
+def test_sanitize_upstream_text_truncates_long_text():
+    from gemini_drawer.utils.log import sanitize_upstream_text
+
+    assert len(sanitize_upstream_text("x" * 5000)) <= 320

@@ -30,7 +30,20 @@ from typing import Any, Tuple, Optional
 from pathlib import Path
 from maibot_sdk.compat.base import ReplyContentType
 from .base_commands import BaseAdminCommand
+from ..config import PLUGIN_DISPLAY_NAME
 from ..core.agnes_video import matches_agnes_video_endpoint
+from ..core.channel_url import (
+    KIND_AGNES_VIDEO,
+    KIND_GEMINI,
+    KIND_IMAGES,
+    KIND_OPENAI_CHAT,
+    KIND_SEEDANCE_VIDEO,
+    KIND_TSAI,
+    KIND_UNKNOWN,
+    classify_channel_url,
+    is_gemini_suffix,
+    split_url_and_model,
+)
 from ..core.managers import key_manager, data_manager
 from ..core.protocols import (
     IMAGE_PROTOCOLS, PROTOCOL_AUTO_WORDS, VIDEO_PROTOCOLS,
@@ -51,7 +64,7 @@ class ChannelAddKeyCommand(BaseAdminCommand):
         parts = [p for p in parts if p.strip()]
 
         if len(parts) < 2:
-            await self.send_text("❌ 参数错误！\n格式：`/渠道添加key <渠道名称> <key1> [key2] ...`")
+            await self._send_text("❌ 参数错误！\n格式：`/渠道添加key <渠道名称> <key1> [key2] ...`")
             return True, "参数不足", True
 
         channel_name = parts[0]
@@ -62,7 +75,7 @@ class ChannelAddKeyCommand(BaseAdminCommand):
 
         if channel_name not in valid_channels:
              available = ", ".join(valid_channels) if valid_channels else "暂无"
-             await self.send_text(
+             await self._send_text(
                  f"❌ 未知的渠道名称：`{channel_name}`\n"
                  f"可用渠道：{available}\n"
                  "请先使用 `/添加渠道 <名称>:<URL>[:模型名]` 添加渠道。"
@@ -73,7 +86,7 @@ class ChannelAddKeyCommand(BaseAdminCommand):
         msg = f"✅ 操作完成 (渠道: {channel_name})：\n- 成功添加: {added} 个\n"
         if duplicates > 0:
             msg += f"- 重复忽略: {duplicates} 个"
-        await self.send_text(msg)
+        await self._send_text(msg)
         return True, "添加成功", True
 
 class ChannelListKeysCommand(BaseAdminCommand):
@@ -84,7 +97,7 @@ class ChannelListKeysCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         all_keys = key_manager.get_all_keys()
         if not all_keys:
-            await self.send_text("ℹ️ 当前未配置任何 API Key。")
+            await self._send_text("ℹ️ 当前未配置任何 API Key。")
             return True, "无Key", True
 
         grouped_keys = {}
@@ -94,7 +107,7 @@ class ChannelListKeysCommand(BaseAdminCommand):
                 grouped_keys[ctype] = []
             grouped_keys[ctype].append(k)
 
-        bot_name = "Gemini Drawer"
+        bot_name = PLUGIN_DISPLAY_NAME
         header_text = "📋 **渠道 Key 状态列表**\n--------------------"
         header_content = [(ReplyContentType.TEXT, header_text)]
         nodes_to_send = [("1", bot_name, header_content)]
@@ -127,7 +140,7 @@ class ChannelResetKeyCommand(BaseAdminCommand):
         
         if not parts:
             count = key_manager.manual_reset_keys(None)
-            await self.send_text(f"✅ 已成功重置所有渠道的 {count} 个失效 Key。")
+            await self._send_text(f"✅ 已成功重置所有渠道的 {count} 个失效 Key。")
             return True, "重置所有成功", True
             
         channel_name = parts[0]
@@ -135,14 +148,14 @@ class ChannelResetKeyCommand(BaseAdminCommand):
             try:
                 index = int(parts[1])
                 if key_manager.reset_specific_key(channel_name, index):
-                    await self.send_text(f"✅ 已成功重置渠道 `{channel_name}` 的第 {index} 个 Key。")
+                    await self._send_text(f"✅ 已成功重置渠道 `{channel_name}` 的第 {index} 个 Key。")
                 else:
-                    await self.send_text(f"❌ 重置失败：渠道 `{channel_name}` 不存在第 {index} 个 Key。")
+                    await self._send_text(f"❌ 重置失败：渠道 `{channel_name}` 不存在第 {index} 个 Key。")
             except ValueError:
-                await self.send_text("❌ 序号必须是数字！")
+                await self._send_text("❌ 序号必须是数字！")
         else:
             count = key_manager.manual_reset_keys(channel_name)
-            await self.send_text(f"✅ 已成功重置渠道 `{channel_name}` 的 {count} 个失效 Key。")
+            await self._send_text(f"✅ 已成功重置渠道 `{channel_name}` 的 {count} 个失效 Key。")
         return True, "操作完成", True
 
 class ChannelDeleteKeyCommand(BaseAdminCommand):
@@ -156,20 +169,20 @@ class ChannelDeleteKeyCommand(BaseAdminCommand):
         parts = content.split()
         
         if len(parts) < 2:
-            await self.send_text("❌ 参数错误！\n格式：`/渠道删除key <渠道名称> <序号>`\n\n使用 `/渠道key列表` 查看所有 Key 及其序号。")
+            await self._send_text("❌ 参数错误！\n格式：`/渠道删除key <渠道名称> <序号>`\n\n使用 `/渠道key列表` 查看所有 Key 及其序号。")
             return True, "参数不足", True
         
         channel_name = parts[0]
         try:
             index = int(parts[1])
         except ValueError:
-            await self.send_text("❌ 序号必须是数字！")
+            await self._send_text("❌ 序号必须是数字！")
             return True, "参数类型错误", True
         
         if key_manager.delete_key(channel_name, index):
-            await self.send_text(f"✅ 已成功删除渠道 `{channel_name}` 的第 {index} 个 Key。")
+            await self._send_text(f"✅ 已成功删除渠道 `{channel_name}` 的第 {index} 个 Key。")
         else:
-            await self.send_text(f"❌ 删除失败：渠道 `{channel_name}` 不存在第 {index} 个 Key。")
+            await self._send_text(f"❌ 删除失败：渠道 `{channel_name}` 不存在第 {index} 个 Key。")
         return True, "操作完成", True
 
 class ChannelSetKeyErrorLimitCommand(BaseAdminCommand):
@@ -183,7 +196,7 @@ class ChannelSetKeyErrorLimitCommand(BaseAdminCommand):
         parts = content.split()
         
         if len(parts) != 3:
-            await self.send_text("❌ 参数错误！\n格式：`/渠道设置错误上限 <渠道名称> <序号> <次数>`")
+            await self._send_text("❌ 参数错误！\n格式：`/渠道设置错误上限 <渠道名称> <序号> <次数>`")
             return True, "参数不足", True
 
         channel_name, index_str, limit_str = parts
@@ -191,15 +204,15 @@ class ChannelSetKeyErrorLimitCommand(BaseAdminCommand):
             index = int(index_str)
             limit = int(limit_str)
         except ValueError:
-            await self.send_text("❌ 序号和次数必须是数字！")
+            await self._send_text("❌ 序号和次数必须是数字！")
             return True, "参数类型错误", True
 
         if not key_manager.set_key_error_limit(channel_name, index, limit):
-            await self.send_text(f"❌ 渠道 `{channel_name}` 不存在第 `{index}` 个 Key。")
+            await self._send_text(f"❌ 渠道 `{channel_name}` 不存在第 `{index}` 个 Key。")
             return True, "序号无效", True
         
         limit_text = "永不禁用" if limit == -1 else f"{limit}次"
-        await self.send_text(f"✅ 设置成功！\n渠道 `{channel_name}` Key {index} 错误上限: **{limit_text}**。")
+        await self._send_text(f"✅ 设置成功！\n渠道 `{channel_name}` Key {index} 错误上限: **{limit_text}**。")
         return True, "设置成功", True
 
 class AddPromptCommand(BaseAdminCommand):
@@ -211,22 +224,22 @@ class AddPromptCommand(BaseAdminCommand):
         command_prefix = "/添加提示词"
         content = self.message.raw_message.replace(command_prefix, "", 1).strip()
         if ":" not in content and "：" not in content:
-            await self.send_text("❌ 格式错误！\n正确格式：`/添加提示词 功能名称:具体提示词`")
+            await self._send_text("❌ 格式错误！\n正确格式：`/添加提示词 功能名称:具体提示词`")
             return True, "格式错误", True
 
         parts = re.split(r"[:：]", content, 1)
         name, prompt = parts[0].strip(), parts[1].strip()
 
         if not name or not prompt:
-            await self.send_text("❌ 内容不能为空！")
+            await self._send_text("❌ 内容不能为空！")
             return True, "参数不全", True
 
         if name in data_manager.get_prompts():
-            await self.send_text(f"❌ 名称 `{name}` 已存在。")
+            await self._send_text(f"❌ 名称 `{name}` 已存在。")
             return True, "名称重复", True
 
         data_manager.add_prompt(name, prompt)
-        await self.send_text(f"✅ 提示词 `{name}` 添加成功！")
+        await self._send_text(f"✅ 提示词 `{name}` 添加成功！")
         return True, "添加成功", True
 
 class DeletePromptCommand(BaseAdminCommand):
@@ -237,13 +250,13 @@ class DeletePromptCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         name = self.message.raw_message.replace("/删除提示词", "", 1).strip()
         if not name:
-            await self.send_text("❌ 请提供名称！")
+            await self._send_text("❌ 请提供名称！")
             return True, "缺少参数", True
 
         if data_manager.delete_prompt(name):
-            await self.send_text(f"✅ 提示词 `{name}` 删除成功！")
+            await self._send_text(f"✅ 提示词 `{name}` 删除成功！")
         else:
-            await self.send_text(f"❌ 未找到提示词 `{name}`。")
+            await self._send_text(f"❌ 未找到提示词 `{name}`。")
         return True, "删除操作", True
 
 class ViewPromptCommand(BaseAdminCommand):
@@ -254,19 +267,19 @@ class ViewPromptCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         name = self.message.raw_message.replace("/查看提示词", "", 1).strip()
         if not name:
-            await self.send_text("❌ 请提供名称！")
+            await self._send_text("❌ 请提供名称！")
             return True, "缺少参数", True
 
         prompts = data_manager.get_prompts()
         if name in prompts:
-            bot_name = self.get_config("general.bot_name", "Gemini绘图助手")
+            bot_name = PLUGIN_DISPLAY_NAME
             nodes_to_send = [
                 ("1", bot_name, [(ReplyContentType.TEXT, f"📝 提示词: {name}")]),
                 ("1", bot_name, [(ReplyContentType.TEXT, prompts[name])])
             ]
             await self._send_forward_via_ctx(nodes_to_send)
         else:
-            await self.send_text(f"❌ 未找到提示词 `{name}`。")
+            await self._send_text(f"❌ 未找到提示词 `{name}`。")
         return True, "查看成功", True
 
 class ModifyPromptCommand(BaseAdminCommand):
@@ -278,22 +291,22 @@ class ModifyPromptCommand(BaseAdminCommand):
         command_prefix = "/修改提示词"
         content = self.message.raw_message.replace(command_prefix, "", 1).strip()
         if ":" not in content and "：" not in content:
-            await self.send_text("❌ 格式错误！\n正确格式：`/修改提示词 功能名称:新提示词`")
+            await self._send_text("❌ 格式错误！\n正确格式：`/修改提示词 功能名称:新提示词`")
             return True, "格式错误", True
 
         parts = re.split(r"[:：]", content, 1)
         name, prompt = parts[0].strip(), parts[1].strip()
 
         if not name or not prompt:
-            await self.send_text("❌ 内容不能为空！")
+            await self._send_text("❌ 内容不能为空！")
             return True, "参数不全", True
 
         if name not in data_manager.get_prompts():
-            await self.send_text(f"❌ 未找到提示词 `{name}`。\n如需添加新提示词，请使用 `/添加提示词` 命令。")
+            await self._send_text(f"❌ 未找到提示词 `{name}`。\n如需添加新提示词，请使用 `/添加提示词` 命令。")
             return True, "提示词不存在", True
 
         data_manager.update_prompt(name, prompt)
-        await self.send_text(f"✅ 提示词 `{name}` 修改成功！")
+        await self._send_text(f"✅ 提示词 `{name}` 修改成功！")
         return True, "修改成功", True
 
 class AddChannelCommand(BaseAdminCommand):
@@ -317,119 +330,100 @@ class AddChannelCommand(BaseAdminCommand):
 /添加渠道 agnes视频:https://apihub.agnes-ai.com/v1/videos:agnes-video-2.5-flash
 
 添加渠道后再使用 `/渠道添加key <渠道名称> <key>` 添加密钥。"""
-        
+
         if not rest or ":" not in rest:
-            await self.send_text(help_msg)
+            await self._send_text(help_msg)
             return True, "格式错误", True
 
         try:
             name, rest_part = rest.split(':', 1)
             name = name.strip()
-            url = ""
-            model = None
-            last_colon_index = rest_part.rfind(':')
-            is_openai = "/chat/completions" in rest_part
-            is_gemini = "generateContent" in rest_part
-            is_doubao_image = "/images/generations" in rest_part
-            is_doubao_video = "/contents/generations/tasks" in rest_part
-            is_doubao = is_doubao_image or is_doubao_video
-            is_agnes_video = "/v1/videos" in rest_part
-            is_tsai_video = "endpoint=video" in rest_part
-            is_tsai = "tsart.lat" in rest_part or "tavr.top" in rest_part or "endpoint=" in rest_part or "linux.tsart.lat" in rest_part
-            
-            if not is_openai and not is_gemini and not is_doubao and not is_tsai and not is_agnes_video:
-                await self.send_text("❌ URL 格式不正确！\n支持的格式：\n- OpenAI: 包含 /chat/completions\n- Gemini: 包含 generateContent\n- 图片 API（豆包/Agnes）: 包含 /images/generations\n- 豆包视频: 包含 /contents/generations/tasks\n- Agnes 视频: /v1/videos，使用 agnes-video- 系列模型\n- TS-AI: 包含 tsart.lat 或 tavr.top 或 endpoint=")
+            if not name:
+                await self._send_text(help_msg)
+                return True, "格式错误", True
+
+            # URL / 模型拆分与协议分类统一走 core/channel_url.py，与 WebUI 校验一致：
+            # 端口号不会被误当作模型名，Gemini 后缀约束也不会被子串匹配绕过（P1-10）。
+            url, model = split_url_and_model(rest_part)
+            kind = classify_channel_url(url)
+
+            if kind == KIND_UNKNOWN:
+                await self._send_text(
+                    "❌ URL 格式不正确！\n支持的格式：\n"
+                    "- OpenAI: 包含 /chat/completions\n"
+                    "- Gemini: 以 :generateContent 结尾\n"
+                    "- 图片 API（豆包/Agnes）: 包含 /images/generations\n"
+                    "- 豆包视频: 包含 /contents/generations/tasks\n"
+                    "- Agnes 视频: /v1/videos，使用 agnes-video- 系列模型\n"
+                    "- TS-AI: 包含 tsart.lat 或 tavr.top 或 endpoint="
+                )
                 return True, "URL格式错误", True
 
-            if is_openai:
-                if rest_part.strip().endswith("/chat/completions"):
-                     await self.send_text("❌ OpenAI 格式必须指定模型名称！")
-                     return True, "缺少模型", True
-                if last_colon_index != -1:
-                    possible_model = rest_part[last_colon_index+1:].strip()
-                    possible_url = rest_part[:last_colon_index].strip()
-                    if possible_url.endswith("/chat/completions"):
-                        url = possible_url
-                        model = possible_model
-                    else:
-                        await self.send_text("❌ 无法解析模型名称")
-                        return True, "解析失败", True
-                else:
-                     await self.send_text("❌ OpenAI 格式必须指定模型名称！")
-                     return True, "缺少模型", True
+            is_video_channel = False
+            if kind == KIND_OPENAI_CHAT:
+                if not model:
+                    await self._send_text("❌ OpenAI 格式必须指定模型名称！")
+                    return True, "缺少模型", True
 
-            elif is_agnes_video:
-                if rest_part.strip().rstrip("/").endswith("/v1/videos"):
-                    await self.send_text("❌ Agnes 视频格式必须指定模型名称，例如 agnes-video-2.5-flash！")
+            elif kind == KIND_AGNES_VIDEO:
+                if not model:
+                    await self._send_text("❌ Agnes 视频格式必须指定模型名称，例如 agnes-video-2.5-flash！")
                     return True, "缺少模型", True
-                possible_url = rest_part[:last_colon_index].strip()
-                possible_model = rest_part[last_colon_index + 1:].strip()
-                if not possible_model:
-                    await self.send_text("❌ Agnes 视频格式必须指定模型名称！")
-                    return True, "缺少模型", True
-                if not matches_agnes_video_endpoint({"url": possible_url, "model": possible_model}):
-                    await self.send_text("❌ Agnes 视频 URL 应以 /v1/videos 结尾，模型应为 agnes-video- 系列。")
+                if not matches_agnes_video_endpoint({"url": url, "model": model}):
+                    await self._send_text("❌ Agnes 视频 URL 应以 /v1/videos 结尾，模型应为 agnes-video- 系列。")
                     return True, "URL或模型格式错误", True
-                url, model = possible_url, possible_model
+                is_video_channel = True
 
-            elif is_doubao:
-                # 图片 API（豆包/Agnes）或豆包视频：URL:模型名
-                url_pattern = "/contents/generations/tasks" if is_doubao_video else "/images/generations"
-                if rest_part.strip().endswith(url_pattern):
-                     example = "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks:doubao-seedance-1-5-pro-251215" if is_doubao_video else "https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128"
-                     await self.send_text(f"❌ 图片/豆包视频格式必须指定模型名称！\n例如: {example}")
-                     return True, "缺少模型", True
-                if last_colon_index != -1:
-                    possible_model = rest_part[last_colon_index+1:].strip()
-                    possible_url = rest_part[:last_colon_index].strip()
-                    if url_pattern in possible_url:
-                        url = possible_url
-                        model = possible_model
-                    else:
-                        await self.send_text("❌ 无法解析图片/豆包视频模型名称")
-                        return True, "解析失败", True
-                else:
-                     await self.send_text("❌ 豆包格式必须指定模型名称！")
-                     return True, "缺少模型", True
+            elif kind in (KIND_IMAGES, KIND_SEEDANCE_VIDEO):
+                if not model:
+                    example = (
+                        "https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks:doubao-seedance-1-5-pro-251215"
+                        if kind == KIND_SEEDANCE_VIDEO
+                        else "https://ark.cn-beijing.volces.com/api/v3/images/generations:doubao-seedream-4-5-251128"
+                    )
+                    await self._send_text(f"❌ 图片/豆包视频格式必须指定模型名称！\n例如: {example}")
+                    return True, "缺少模型", True
+                if kind == KIND_SEEDANCE_VIDEO:
+                    is_video_channel = True
 
-            elif is_tsai:
-                if last_colon_index != -1 and rest_part[:last_colon_index].strip().startswith("http"):
-                    possible_url = rest_part[:last_colon_index].strip()
-                    url = possible_url
-                    model = rest_part[last_colon_index+1:].strip()
-                else:
-                    url = rest_part.strip()
-            
-            elif is_gemini:
-                url = rest_part.strip()
-                if not url.endswith(":generateContent") and "generateContent" not in url:
-                     await self.send_text("❌ Gemini 格式 URL 应以 `:generateContent` 结尾！")
-                     return True, "URL格式错误", True
+            elif kind == KIND_GEMINI:
+                if model or not is_gemini_suffix(url):
+                    await self._send_text("❌ Gemini 格式 URL 应以 `:generateContent` 结尾，且不要附加模型名！")
+                    return True, "URL格式错误", True
+
+            elif kind == KIND_TSAI:
+                if "endpoint=video" in url.lower():
+                    is_video_channel = True
 
             channel_info = {"url": url, "enabled": True, "stream": False}
-            if model: channel_info["model"] = model
+            if model:
+                channel_info["model"] = model
             # 自动标记视频渠道
-            if is_doubao_video or is_tsai_video or is_agnes_video:
+            if is_video_channel:
                 channel_info["is_video"] = True
             data_manager.add_channel(name, channel_info)
 
-            if is_agnes_video:
+            if kind == KIND_AGNES_VIDEO:
                 api_type = "Agnes 视频"
-            elif is_doubao_video:
+            elif kind == KIND_SEEDANCE_VIDEO:
                 api_type = "豆包视频"
-            elif is_doubao_image:
+            elif kind == KIND_IMAGES:
                 is_agnes_image = AgnesImageProvider.matches(Endpoint(type="", url=url, model=model))
                 api_type = "Agnes 图片" if is_agnes_image else "豆包图片"
+            elif kind == KIND_OPENAI_CHAT:
+                api_type = "OpenAI"
+            elif kind == KIND_GEMINI:
+                api_type = "Gemini"
             else:
-                api_type = "OpenAI" if is_openai else ("Gemini" if is_gemini else "TS-AI")
+                api_type = "TS-AI"
             msg = f"✅ 自定义渠道 `{name}` 添加成功！\n类型: {api_type}\n请使用 `/渠道添加key {name} <your-api-key>` 添加密钥。"
-            if is_doubao_video or is_tsai_video or is_agnes_video:
+            if is_video_channel:
                 msg += "\n已自动标记为视频渠道。"
-            await self.send_text(msg)
+            await self._send_text(msg)
             return True, "添加成功", True
 
         except Exception as e:
-            await self.send_text(f"❌ 添加失败：{e}")
+            await self._send_text(f"❌ 添加失败：{e}")
             return False, str(e), True
 
 class ChannelUpdateModelCommand(BaseAdminCommand):
@@ -441,13 +435,13 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
         content = self.message.raw_message.replace("/渠道修改模型", "", 1).strip()
         parts = content.split()
         if len(parts) < 2:
-            await self.send_text("❌ 参数错误！")
+            await self._send_text("❌ 参数错误！")
             return True, "参数不足", True
 
         channel_name, new_model = parts[0], parts[1]
         channels = data_manager.get_channels()
         if channel_name not in channels:
-            await self.send_text(f"❌ 未找到渠道 `{channel_name}`！")
+            await self._send_text(f"❌ 未找到渠道 `{channel_name}`！")
             return True, "渠道不存在", True
         
         channel_info = channels[channel_name]
@@ -461,7 +455,7 @@ class ChannelUpdateModelCommand(BaseAdminCommand):
                 if new_url != url: channel_info["url"] = new_url
 
         data_manager.update_channel(channel_name, channel_info)
-        await self.send_text(f"✅ 渠道 `{channel_name}` 模型已更新！请重启Bot。")
+        await self._send_text(f"✅ 渠道 `{channel_name}` 模型已更新！请重启Bot。")
         return True, "更新成功", True
 
 class DeleteChannelCommand(BaseAdminCommand):
@@ -472,16 +466,16 @@ class DeleteChannelCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         name = self.message.raw_message.replace("/删除渠道", "", 1).strip()
         if not name:
-            await self.send_text("❌ 请提供名称！")
+            await self._send_text("❌ 请提供名称！")
             return True, "缺少参数", True
         if data_manager.delete_channel(name):
             deleted_keys_count = key_manager.delete_keys_by_type(name)
             if deleted_keys_count > 0:
-                await self.send_text(f"✅ 渠道 `{name}` 删除成功！\n已同时清理该渠道下的 {deleted_keys_count} 个 Key。")
+                await self._send_text(f"✅ 渠道 `{name}` 删除成功！\n已同时清理该渠道下的 {deleted_keys_count} 个 Key。")
             else:
-                await self.send_text(f"✅ 渠道 `{name}` 删除成功！")
+                await self._send_text(f"✅ 渠道 `{name}` 删除成功！")
         else:
-            await self.send_text(f"❌ 未找到渠道 `{name}`。")
+            await self._send_text(f"❌ 未找到渠道 `{name}`。")
         return True, "删除操作", True
 
 class ToggleChannelCommand(BaseAdminCommand):
@@ -495,7 +489,7 @@ class ToggleChannelCommand(BaseAdminCommand):
         name = msg.replace("/启用渠道" if is_enable else "/禁用渠道", "", 1).strip()
 
         if not name:
-            await self.send_text("❌ 请指定渠道名称！")
+            await self._send_text("❌ 请指定渠道名称！")
             return True, "缺少参数", True
 
         channels = data_manager.get_channels()
@@ -510,11 +504,11 @@ class ToggleChannelCommand(BaseAdminCommand):
             data_manager.update_channel(name, channel_info)
             target_found = True
         else:
-            await self.send_text(f"❌ 未找到渠道 `{name}`。")
+            await self._send_text(f"❌ 未找到渠道 `{name}`。")
             return True, "渠道不存在", True
 
         action = "启用" if is_enable else "禁用"
-        await self.send_text(f"✅ 渠道 `{name}` 已{action}！")
+        await self._send_text(f"✅ 渠道 `{name}` 已{action}！")
         return True, "操作成功", True
 
 def channel_protocol_summary(info: Any) -> str:
@@ -544,7 +538,7 @@ class ListChannelsCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         channels_config = data_manager.get_channels()
         
-        bot_name = "Gemini Drawer"
+        bot_name = PLUGIN_DISPLAY_NAME
         header_text = "📋 **当前渠道状态列表**\n--------------------"
         header_content = [(ReplyContentType.TEXT, header_text)]
         nodes_to_send = [("1", bot_name, header_content)]
@@ -582,7 +576,7 @@ class ChannelSetStreamCommand(BaseAdminCommand):
         content = self.message.raw_message.replace("/渠道设置流式", "", 1).strip()
         parts = content.split()
         if len(parts) != 2:
-            await self.send_text("❌ 参数错误！格式：`/渠道设置流式 <渠道> <true|false>`")
+            await self._send_text("❌ 参数错误！格式：`/渠道设置流式 <渠道> <true|false>`")
             return True, "参数不足", True
 
         channel_name, stream_str = parts
@@ -590,7 +584,7 @@ class ChannelSetStreamCommand(BaseAdminCommand):
         
         channels = data_manager.get_channels()
         if channel_name not in channels:
-            await self.send_text(f"❌ 未找到渠道 `{channel_name}`。")
+            await self._send_text(f"❌ 未找到渠道 `{channel_name}`。")
             return True, "渠道不存在", True
         
         channel_info = channels[channel_name]
@@ -600,7 +594,7 @@ class ChannelSetStreamCommand(BaseAdminCommand):
         
         channel_info["stream"] = stream_value
         data_manager.update_channel(channel_name, channel_info)
-        await self.send_text(f"✅ 渠道 `{channel_name}` 流式请求已{'启用' if stream_value else '禁用'}！")
+        await self._send_text(f"✅ 渠道 `{channel_name}` 流式请求已{'启用' if stream_value else '禁用'}！")
         return True, "设置成功", True
 
 class ChannelSetVideoCommand(BaseAdminCommand):
@@ -612,7 +606,7 @@ class ChannelSetVideoCommand(BaseAdminCommand):
         content = self.message.raw_message.replace("/渠道设置视频", "", 1).strip()
         parts = content.split()
         if len(parts) != 2:
-            await self.send_text("❌ 参数错误！格式：`/渠道设置视频 <渠道> <true|false>`")
+            await self._send_text("❌ 参数错误！格式：`/渠道设置视频 <渠道> <true|false>`")
             return True, "参数不足", True
 
         channel_name, video_str = parts
@@ -620,7 +614,7 @@ class ChannelSetVideoCommand(BaseAdminCommand):
         
         channels = data_manager.get_channels()
         if channel_name not in channels:
-            await self.send_text(f"❌ 未找到渠道 `{channel_name}`。")
+            await self._send_text(f"❌ 未找到渠道 `{channel_name}`。")
             return True, "渠道不存在", True
         
         channel_info = channels[channel_name]
@@ -630,7 +624,7 @@ class ChannelSetVideoCommand(BaseAdminCommand):
         
         channel_info["is_video"] = video_value
         data_manager.update_channel(channel_name, channel_info)
-        await self.send_text(f"✅ 渠道 `{channel_name}` 视频模式已{'启用' if video_value else '禁用'}！")
+        await self._send_text(f"✅ 渠道 `{channel_name}` 视频模式已{'启用' if video_value else '禁用'}！")
         return True, "设置成功", True
 
 
@@ -647,7 +641,7 @@ class ChannelSetProtocolCommand(BaseAdminCommand):
         content = self.message.raw_message.replace("/渠道设置协议", "", 1).strip()
         parts = content.split()
         if len(parts) != 2:
-            await self.send_text(
+            await self._send_text(
                 "❌ 参数错误！格式：`/渠道设置协议 <渠道> <协议|自动>`\n\n"
                 f"绘图协议：\n{protocol_choices_text(video=False)}\n\n"
                 f"视频协议：\n{protocol_choices_text(video=True)}\n\n"
@@ -658,7 +652,7 @@ class ChannelSetProtocolCommand(BaseAdminCommand):
         channel_name, protocol_str = parts
         channels = data_manager.get_channels()
         if channel_name not in channels:
-            await self.send_text(f"❌ 未找到渠道 `{channel_name}`。")
+            await self._send_text(f"❌ 未找到渠道 `{channel_name}`。")
             return True, "渠道不存在", True
 
         channel_info = channels[channel_name]
@@ -669,14 +663,14 @@ class ChannelSetProtocolCommand(BaseAdminCommand):
         if protocol_str.strip().lower() in PROTOCOL_AUTO_WORDS:
             channel_info.pop("protocol", None)
             data_manager.update_channel(channel_name, channel_info)
-            await self.send_text(
+            await self._send_text(
                 f"✅ 渠道 `{channel_name}` 已改回自动识别。当前 {channel_protocol_summary(channel_info)}"
             )
             return True, "设置成功", True
 
         protocol = normalize_protocol(protocol_str)
         if protocol is None:
-            await self.send_text(
+            await self._send_text(
                 f"❌ 不支持的协议 `{protocol_str}`。\n绘图可选：{' / '.join(IMAGE_PROTOCOLS)}\n"
                 f"视频可选：{' / '.join(VIDEO_PROTOCOLS)}"
             )
@@ -686,7 +680,7 @@ class ChannelSetProtocolCommand(BaseAdminCommand):
         allowed = VIDEO_PROTOCOLS if is_video else IMAGE_PROTOCOLS
         if protocol not in allowed:
             kind = "视频" if is_video else "绘图"
-            await self.send_text(
+            await self._send_text(
                 f"❌ `{protocol}` 不是{kind}协议，渠道 `{channel_name}` 是{kind}渠道。\n"
                 f"{kind}可选：{' / '.join(allowed)}。如需切换渠道类型请先用 /渠道设置视频。"
             )
@@ -694,7 +688,7 @@ class ChannelSetProtocolCommand(BaseAdminCommand):
 
         channel_info["protocol"] = protocol
         data_manager.update_channel(channel_name, channel_info)
-        await self.send_text(
+        await self._send_text(
             f"✅ 渠道 `{channel_name}` 协议已设置为 `{protocol}`：{allowed[protocol]}"
         )
         return True, "设置成功", True
@@ -721,7 +715,7 @@ class ChannelSetResponseFormatCommand(BaseAdminCommand):
         content = self.message.raw_message.replace("/渠道设置输出格式", "", 1).strip()
         parts = content.split()
         if len(parts) != 2:
-            await self.send_text(
+            await self._send_text(
                 "❌ 参数错误！格式：`/渠道设置输出格式 <渠道> <url|b64_json|默认>`\n"
                 "仅对 /images/generations 形态的图片渠道生效；填 `默认` 可清除覆盖。"
             )
@@ -732,7 +726,7 @@ class ChannelSetResponseFormatCommand(BaseAdminCommand):
 
         channels = data_manager.get_channels()
         if channel_name not in channels:
-            await self.send_text(f"❌ 未找到渠道 `{channel_name}`。")
+            await self._send_text(f"❌ 未找到渠道 `{channel_name}`。")
             return True, "渠道不存在", True
 
         channel_info = channels[channel_name]
@@ -743,18 +737,18 @@ class ChannelSetResponseFormatCommand(BaseAdminCommand):
         if format_value in RESPONSE_FORMAT_RESET_WORDS:
             channel_info.pop("response_format", None)
             data_manager.update_channel(channel_name, channel_info)
-            await self.send_text(f"✅ 渠道 `{channel_name}` 输出格式已恢复为协议默认值。")
+            await self._send_text(f"✅ 渠道 `{channel_name}` 输出格式已恢复为协议默认值。")
             return True, "设置成功", True
 
         if format_value not in RESPONSE_FORMAT_CHOICES:
-            await self.send_text(
+            await self._send_text(
                 f"❌ 不支持的输出格式 `{format_str}`，可选：{' / '.join(RESPONSE_FORMAT_CHOICES)}，或 `默认`。"
             )
             return True, "格式不支持", True
 
         channel_info["response_format"] = format_value
         data_manager.update_channel(channel_name, channel_info)
-        await self.send_text(f"✅ 渠道 `{channel_name}` 输出格式已设置为 `{format_value}`。")
+        await self._send_text(f"✅ 渠道 `{channel_name}` 输出格式已设置为 `{format_value}`。")
         return True, "设置成功", True
 
 
@@ -766,12 +760,12 @@ class SyncBananaPromptsCommand(BaseAdminCommand):
     async def handle_admin_command(self) -> Tuple[bool, Optional[str], bool]:
         plugin = getattr(self, "plugin", None)
         if plugin is None or not hasattr(plugin, "sync_banana_website_prompts"):
-            await self.send_text("❌ 同步失败：无法访问插件同步服务。")
+            await self._send_text("❌ 同步失败：无法访问插件同步服务。")
             return False, "插件同步服务不可用", True
 
-        await self.send_text("🍌 正在同步大香蕉扩展词库，请稍候...")
+        await self._send_text("🍌 正在同步大香蕉扩展词库，请稍候...")
         success, message = await plugin.sync_banana_website_prompts()
-        await self.send_text(("✅ " if success else "❌ ") + message)
+        await self._send_text(("✅ " if success else "❌ ") + message)
         return success, message, True
 
 
@@ -813,19 +807,14 @@ class ToggleBananaRestrictedCommand(BaseAdminCommand):
                         plugin.set_plugin_config(config_data)
                     else:
                         plugin.config.behavior.show_restricted = enabled
-                    from maibot_sdk.compat.apis import config_api
-                    config_api.set_config_cache(
-                        global_cfg={},
-                        plugin_cfg=plugin.get_plugin_config_data()
-                    )
                 except Exception as e:
                     logger.warning(f"刷新 show_restricted 配置缓存失败: {e}")
 
             status = "显示" if enabled else "隐藏"
-            await self.send_text(f"✅ 大香蕉限制级提示词已设置为：{status}。\n该设置只影响读取过滤，不会重写 data.json 或 banana_prompts.json。")
+            await self._send_text(f"✅ 大香蕉限制级提示词已设置为：{status}。\n该设置只影响读取过滤，不会重写 data.json 或 banana_prompts.json。")
             return True, "设置成功", True
         except Exception as e:
-            await self.send_text(f"❌ 设置失败：{e}")
+            await self._send_text(f"❌ 设置失败：{e}")
             return False, str(e), True
 
 
@@ -843,7 +832,7 @@ class BananaPromptSearchCommand(BaseAdminCommand):
             keyword = self.message.raw_message.replace("/大香蕉提示词", "", 1).strip()
 
         if not keyword:
-            await self.send_text("❌ 请输入搜索关键词，例如：`/大香蕉提示词 猫娘`")
+            await self._send_text("❌ 请输入搜索关键词，例如：`/大香蕉提示词 猫娘`")
             return True, "缺少关键词", True
 
         show_restricted = bool(self.get_config("behavior.show_restricted", False))
@@ -860,7 +849,7 @@ class BananaPromptSearchCommand(BaseAdminCommand):
                 matches.append((key, section, title, bool(entry.get("restricted", False))))
 
         if not matches:
-            await self.send_text(f"❌ 未找到包含 `{keyword}` 的大香蕉提示词。")
+            await self._send_text(f"❌ 未找到包含 `{keyword}` 的大香蕉提示词。")
             return True, "无搜索结果", True
 
         limit = 20
@@ -872,5 +861,5 @@ class BananaPromptSearchCommand(BaseAdminCommand):
         if len(matches) > limit:
             lines.append(f"\n还有 {len(matches) - limit} 条未显示，请换更精确的关键词。")
 
-        await self.send_text("\n".join(lines))
+        await self._send_text("\n".join(lines))
         return True, "搜索完成", True

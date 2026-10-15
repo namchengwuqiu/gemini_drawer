@@ -2,6 +2,10 @@ from typing import Any, List
 from maibot_sdk import Field, PluginConfigBase
 
 
+#: 插件展示名（帮助文案、转发节点昵称等统一使用这一处，避免各处硬编码漂移）
+PLUGIN_DISPLAY_NAME = "Gemini Drawer"
+
+
 DEFAULT_SELFIE_BASE_PROMPT = (
     "以输入的人设底图作为唯一角色身份与画风参考。必须保持同一人物：严格保留脸型、五官比例、眼睛颜色、"
     "发色、发型、刘海、肤色、年龄感、体型特征和原始画风；只改变用户要求的动作、姿势、服装、表情、"
@@ -31,8 +35,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.14.1", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.14.1", description="配置版本",
+    version: str = Field(default="1.15.2", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.15.2", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -249,6 +253,26 @@ class BehaviorConfig(PluginConfigBase):
             "媒体发出后对话循环不会暂停，下一轮 Planner 常常还在处理同一条用户消息而再发一张。"
             "冷却期内的自然语言调用会被拒绝并提示改用文字回应。设为 0 关闭该保护。"
             "只影响 Tool 调用，不影响 /绘图 等指令。",
+        ),
+    )
+    allow_private_media_hosts: bool = Field(
+        default=False,
+        description="是否允许下载内网/回环地址的媒体（本地绘图渠道需要时开启）",
+        json_schema_extra=ui(
+            "允许内网媒体下载",
+            "关闭时，图片/视频下载会拒绝解析到内网或回环地址的 URL（防 SSRF）。"
+            "本地绘图渠道可开启全局放行；仅需特定主机时，建议使用下面的允许列表。"
+            "开启也会允许通过代理下载任意主机的媒体。",
+        ),
+    )
+    media_host_allowlist: List[str] = Field(
+        default_factory=lambda: ["q1.qlogo.cn"],
+        description="额外允许下载的主机名或 IP 列表（不受内网限制约束）",
+        json_schema_extra=ui(
+            "媒体主机允许列表",
+            "默认包含 QQ 头像域名 q1.qlogo.cn，兼容代理 fake-IP 环境下的头像下载。"
+            "填写主机名或 IP，例如 host.docker.internal 或 192.168.1.10，不包含协议和路径。"
+            "通过代理下载媒体时默认必须列出可信媒体主机；重定向后的主机也需列入。",
         ),
     )
 

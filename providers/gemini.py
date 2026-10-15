@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from .base import DrawRequest, Endpoint, HttpCall, Provider
+from ..core.channel_url import with_api_key, is_gemini_suffix
 
 
 class GeminiProvider(Provider):
@@ -13,7 +14,7 @@ class GeminiProvider(Provider):
 
     @classmethod
     def matches(cls, endpoint: Endpoint) -> bool:
-        return "generateContent" in endpoint.url
+        return is_gemini_suffix(endpoint.url)
 
     def build(self, endpoint: Endpoint, request: DrawRequest) -> HttpCall:
         parts: List[Dict[str, Any]] = []
@@ -46,7 +47,7 @@ class GeminiProvider(Provider):
 
         stream = self.wants_stream(endpoint)
         return HttpCall(
-            url=f"{endpoint.url}?key={endpoint.key}",
+            url=with_api_key(endpoint.url, endpoint.key),
             headers={"Content-Type": "application/json"},
             json=payload,
             stream=stream,

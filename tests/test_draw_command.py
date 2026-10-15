@@ -149,6 +149,7 @@ def wire(monkeypatch):
 
     def factory(**kwargs):
         kwargs.pop("proxy", None)
+        kwargs.pop("transport", None)
         def dispatch(request):
             state["requests"].append(request)
             return state["handler"](request)
@@ -308,3 +309,124 @@ async def test_multi_image_succeeds_and_uses_hybrid_send(wire):
     import json
     parts = json.loads(wire["requests"][0].content)["contents"][0]["parts"]
     assert [p.get("text") for p in parts if "text" in p] == ["Image 1:", "Image 2:", "Prompt: 融合"]
+
+
+async def test_real_multi_command_sends_only_typed_prompt_and_both_images(wire, monkeypatch):
+    """使用真实 /多图 解析器，检查实际 chat 请求中的提示词与两张参考图。"""
+    import json
+    from unittest.mock import AsyncMock
+    from gemini_drawer.commands.draw_commands import MultiImageDrawCommand
+    from gemini_drawer.core import host_bridge
+    from gemini_drawer.plugin import CompatMessage
+
+    jpeg = b'\xff\xd8' + b'j' * 300
+    command = make_cmd(MultiImageDrawCommand)
+    command.message = CompatMessage({
+        'message_id': 'current-command', 'session_id': 'stream-1', 'user_id': '456',
+        'processed_plain_text': '/多图两个人贴贴\n [图片：蓝发角色的自动描述] [图片：黑白发角色的自动描述]',
+        'raw_message': [
+            {'type': 'text', 'data': '/多图两个人贴贴\n'},
+            {'type': 'image', 'data': '[图片：蓝发角色的自动描述]', 'hash': 'a' * 64},
+            {'type': 'image', 'data': '[图片：黑白发角色的自动描述]', 'hash': 'b' * 64},
+        ],
+    })
+    monkeypatch.setattr(host_bridge, 'image_from_hash', AsyncMock(
+        side_effect=lambda digest, kind: {'a' * 64: PNG, 'b' * 64: jpeg}.get(digest)
+    ))
+    monkeypatch.setattr(base_commands, 'build_drawing_endpoints', lambda: [{
+        'type': 'custom_chat', 'url': 'https://example.com/v1/chat/completions',
+        'key': 'test-key', 'model': 'gpt-image-2', 'protocol': 'gpt_image', 'stream': False,
+    }])
+
+    _, reason, _ = await command.execute()
+
+    assert reason == '绘图成功'
+    assert len(wire['requests']) == 1
+    content = json.loads(wire['requests'][0].content)['messages'][0]['content']
+    assert [part['text'] for part in content if part['type'] == 'text'] == [
+        'Prompt: 两个人贴贴', 'Image 1:', 'Image 2:',
+    ]
+    assert [part['image_url']['url'] for part in content if part['type'] == 'image_url'] == [
+        'data:image/png;base64,' + PNG_B64,
+        'data:image/jpeg;base64,' + base64.b64encode(jpeg).decode(),
+    ]
+
+
+@pytest.mark.parametrize('cached', [False, True])
+async def test_multi_image_command_hydrates_current_runtime_references(wire, monkeypatch, cached):
+    """覆盖未入库命令的 hash 缓存取图，以及已入库消息的官方能力取图。"""
+    import json
+    from unittest.mock import AsyncMock
+    from gemini_drawer.plugin import CompatMessage
+    from gemini_drawer.core import host_bridge
+
+    jpg_b64 = base64.b64encode(b"\xff\xd8" + b"j" * 300).decode()
+    raw = {
+        "message_id": "current-images",
+        "session_id": "stream-1",
+        "user_id": "456",
+        "raw_message": [
+            {"type": "text", "data": "/多图两个人贴贴\n"},
+            {"type": "image", "data": "", "hash": "a" * 64},
+            {"type": "image", "data": "", "hash": "b" * 64},
+        ],
+    }
+    cmd = make_cmd(MultiCmd)
+    cmd.message = CompatMessage(raw)
+    monkeypatch.setattr(host_bridge, 'image_from_hash', AsyncMock(
+        side_effect=lambda digest, kind: {'a' * 64: PNG, 'b' * 64: base64.b64decode(jpg_b64)}.get(digest) if cached else None
+    ))
+    cmd.ctx.message.get_by_id = AsyncMock(return_value=None if cached else {
+        **raw,
+        "raw_message": [
+            raw["raw_message"][0],
+            {**raw["raw_message"][1], "binary_data_base64": PNG_B64},
+            {**raw["raw_message"][2], "binary_data_base64": jpg_b64},
+        ],
+    })
+
+    _, reason, _ = await cmd.execute()
+
+    assert reason == "绘图成功"
+    if cached:
+        cmd.ctx.message.get_by_id.assert_not_awaited()
+    else:
+        cmd.ctx.message.get_by_id.assert_awaited_once_with(
+            "current-images", stream_id="stream-1", include_binary_data=True
+        )
+    parts = json.loads(wire["requests"][0].content)["contents"][0]["parts"]
+    assert [p["inline_data"]["data"] for p in parts if "inline_data" in p] == [PNG_B64, jpg_b64]
+    assert len(wire["requests"]) == 1
+
+
+async def test_images_are_not_sent_after_budget_expires_during_download(wire, monkeypatch):
+    """下载完成后预算已耗尽：不得再发送（F1，复现宿主超时后仍发图的事故）。"""
+    clock_state = {"now": 1000.0}
+    real_budget_cls = base_commands.TimeBudget
+
+    class ClockedBudget(real_budget_cls):
+        def __init__(self, total_seconds, *, reserve_seconds=0.0, clock=None):
+            super().__init__(
+                total_seconds,
+                reserve_seconds=reserve_seconds,
+                clock=lambda: clock_state["now"],
+            )
+
+    from gemini_drawer.core import budget as budget_module
+    monkeypatch.setattr(budget_module, "TimeBudget", ClockedBudget)
+    monkeypatch.setattr(base_commands, "TimeBudget", ClockedBudget)
+    wire["handler"] = lambda r: httpx.Response(
+        200, json={"data": [{"url": "https://cdn.example/out.png"}]}
+    )
+
+    async def slow_download(url, proxy, *, timeout=60.0, max_bytes=None):
+        clock_state["now"] += 300.0  # 下载期间宿主 RPC 已超时
+        return PNG
+
+    monkeypatch.setattr(base_commands, "download_image", slow_download)
+    cmd = make_cmd()
+
+    ok, reason, stop = await cmd.execute()
+
+    assert not ok and stop and "时间预算耗尽" in reason
+    assert cmd.ctx.hybrid_calls == []          # 图片一张都没有发出

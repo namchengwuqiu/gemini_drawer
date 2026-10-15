@@ -18,9 +18,11 @@ if "maibot_sdk" not in sys.modules:
     sys.modules["maibot_sdk"] = module
     spec.loader.exec_module(module)
 
+from _components import component_metadata  # noqa: E402
 from gemini_drawer.commands.actions import ImageGenerateAction  # noqa: E402
 from gemini_drawer.plugin import (  # noqa: E402
     DRAW_COMMAND_TIMEOUT_MS,
+    VIDEO_COMMAND_TIMEOUT_MS,
     GeminiDrawerPlugin,
 )
 
@@ -326,12 +328,17 @@ def test_cooldown_remaining_decays_with_time(monkeypatch):
 
 def test_media_tool_descriptions_keep_anti_repeat_guidance():
     """迁移到 @Tool 时丢过一次这段约束，导致一条用户消息连发两张自拍。"""
-    from maibot_sdk.components import _COMPONENT_INFO_ATTR
-
     for handler_name in ("handle_generate_image", "handle_selfie", "handle_selfie_video"):
-        info = getattr(getattr(GeminiDrawerPlugin, handler_name), _COMPONENT_INFO_ATTR)
-        text = f"{info.description}{info.detailed_description}"
+        metadata = component_metadata(handler_name)
+        text = f"{metadata.get('description', '')}{metadata.get('detailed_description', '')}"
         assert "不要连续" in text, handler_name
+
+
+def test_media_tool_timeouts_are_registered():
+    """timeout_ms 经 metadata 进入宿主解析；这里验证组件收集后的有效值（P2-4）。"""
+    assert component_metadata("handle_generate_image")["timeout_ms"] == DRAW_COMMAND_TIMEOUT_MS
+    assert component_metadata("handle_selfie")["timeout_ms"] == DRAW_COMMAND_TIMEOUT_MS
+    assert component_metadata("handle_selfie_video")["timeout_ms"] == VIDEO_COMMAND_TIMEOUT_MS
 
 
 @pytest.mark.asyncio
@@ -343,7 +350,7 @@ async def test_action_execute_waits_for_generation_to_finish(monkeypatch):
 
     monkeypatch.setattr(action, "_precheck", lambda feature: None)
 
-    async def fake_draw_and_send(prompt):
+    async def fake_draw_and_send(prompt, budget=None):
         started.set()
         await release.wait()
         return True, "图片已经生成并发送"

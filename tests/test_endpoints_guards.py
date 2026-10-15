@@ -181,11 +181,6 @@ def test_video_channel_without_key_warns(wire):
     assert len(warnings) == 1 and "veo" in warnings[0]
 
 
-async def test_async_wrapper_matches_sync(wire):
-    wire({"veo": {"url": VIDEO, "is_video": True, "key": "k"}})
-    assert await ep_mod.get_video_endpoints(None) == ep_mod.build_video_endpoints()
-
-
 # ── 准入校验 ─────────────────────────────────────────────────
 
 

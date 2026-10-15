@@ -30,6 +30,13 @@ from .base_commands import BaseDrawCommand, BaseMultiImageDrawCommand, BaseVideo
 from ..core.managers import data_manager
 from ..utils import logger
 
+#: 这些前缀由专门的 Command 处理，Action 不应重复触发，工具描述也由它生成。
+#: 新增绘图命令时必须同步维护这里（tests/test_actions_prefixes.py 有回归约束）。
+DRAW_COMMAND_PREFIXES: Tuple[str, ...] = (
+    "/绘图", "＃绘图", "/多图", "/bnn", "/+",
+    "/随机", "/随机绘图", "/图生视频", "/文生视频",
+)
+
 class CustomDrawCommand(BaseDrawCommand):
     command_name: str = "gemini_custom_draw"
     command_description: str = "使用自定义Prompt进行AI绘图"

@@ -1,5 +1,7 @@
 """取图模块测试：消息段解析、@提及提取、以及取图的优先级顺序。"""
 import base64
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, call
 
 import pytest
 
@@ -384,3 +386,147 @@ async def test_reply_images_never_fall_back_to_avatar(downloads):
 async def test_reply_images_empty_without_reply(downloads):
     msg = Msg(message_segment=SegList([Seg("text", "/多图 融合")]))
     assert await src.resolve_reply_images(msg, ctx=CapabilityCtx({})) == []
+
+
+# ── 当前命令消息只携带图片引用（include_binary_data=False） ──
+
+
+@pytest.fixture
+def current_image_message():
+    from gemini_drawer.plugin import CompatMessage
+
+    raw = {
+        "message_id": "current-images",
+        "session_id": "stream-1",
+        "raw_message": [
+            {"type": "text", "data": "/多图两个人贴贴\n"},
+            {"type": "image", "data": "", "hash": "a" * 64},
+            {"type": "emoji", "data": "", "hash": "b" * 64},
+        ],
+    }
+    full = {
+        **raw,
+        "raw_message": [
+            raw["raw_message"][0],
+            {**raw["raw_message"][1], "binary_data_base64": PNG_B64},
+            {**raw["raw_message"][2], "binary_data_base64": JPG_B64},
+        ],
+    }
+    return CompatMessage(raw), full
+
+
+async def test_current_reference_images_are_loaded_in_order(current_image_message, downloads):
+    msg, full = current_image_message
+    lookup = AsyncMock(return_value=full)
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=lookup))
+
+    assert await src.resolve_current_images(msg, ctx=ctx) == [PNG, JPG]
+    lookup.assert_awaited_once_with("current-images", stream_id="stream-1", include_binary_data=True)
+    assert downloads["calls"] == []
+
+
+async def test_single_image_uses_current_reference_before_avatar(current_image_message, downloads):
+    msg, full = current_image_message
+    msg.message_segment.data.insert(0, Seg("at", {"qq": "12345"}))
+    downloads["table"]["https://q1.qlogo.cn/g?b=qq&nk=12345&s=640"] = JPG
+    lookup = AsyncMock(return_value=full)
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=lookup))
+
+    assert await src.extract_source_image(msg, ctx=ctx) == PNG
+    lookup.assert_awaited_once_with("current-images", stream_id="stream-1", include_binary_data=True)
+    assert downloads["calls"] == []
+
+
+async def test_mixed_inline_and_reference_images_are_not_duplicated(current_image_message):
+    msg, full = current_image_message
+    msg.message_segment.data[1].data = PNG_B64
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=AsyncMock(return_value=full)))
+
+    assert await src.resolve_current_images(msg, ctx=ctx) == [PNG, JPG]
+
+
+async def test_complete_current_images_skip_lookup(current_image_message):
+    from gemini_drawer.plugin import CompatMessage
+
+    _, full = current_image_message
+    lookup = AsyncMock()
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=lookup))
+
+    assert await src.resolve_current_images(CompatMessage(full), ctx=ctx) == [PNG, JPG]
+    lookup.assert_not_awaited()
+
+
+@pytest.mark.parametrize("failure", [None, RuntimeError("capability unavailable")])
+async def test_current_lookup_failure_preserves_inline_image(current_image_message, failure):
+    msg, _ = current_image_message
+    msg.message_segment.data[1].data = PNG_B64
+    lookup = AsyncMock(return_value=None, side_effect=failure)
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=lookup))
+
+    assert await src.resolve_current_images(msg, ctx=ctx) == [PNG]
+
+
+async def test_text_only_current_message_skips_lookup():
+    msg = Msg(message_id="text-only", message_segment=SegList([Seg("text", "/多图融合")]))
+    lookup = AsyncMock()
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=lookup))
+
+    assert await src.resolve_current_images(msg, ctx=ctx) == []
+    lookup.assert_not_awaited()
+
+
+async def test_current_reference_without_id_does_not_query(current_image_message):
+    msg, _ = current_image_message
+    msg.message_id = ""
+    lookup = AsyncMock()
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=lookup))
+
+    assert await src.resolve_current_images(msg, ctx=ctx) == []
+    lookup.assert_not_awaited()
+
+
+async def test_current_capability_images_obey_count_limit(current_image_message, monkeypatch):
+    msg, full = current_image_message
+    monkeypatch.setattr(src, "MAX_MESSAGE_IMAGES", 1)
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=AsyncMock(return_value=full)))
+
+    assert await src.resolve_current_images(msg, ctx=ctx) == [PNG]
+
+
+async def test_unstored_current_message_reads_hash_cache(current_image_message, monkeypatch):
+    """新命令尚未写入消息表，图片和表情仍能从各自的 hash 缓存按顺序读取。"""
+    msg, _ = current_image_message
+    cache = AsyncMock(side_effect=lambda digest, kind: {('a' * 64, 'image'): PNG, ('b' * 64, 'emoji'): JPG}.get((digest, kind)))
+    monkeypatch.setattr(src.host_bridge, 'image_from_hash', cache)
+    lookup = AsyncMock(return_value=None)
+    ctx = SimpleNamespace(message=SimpleNamespace(get_by_id=lookup))
+
+    assert await src.resolve_current_images(msg, ctx=ctx) == [PNG, JPG]
+    assert cache.await_args_list == [call('a' * 64, 'image'), call('b' * 64, 'emoji')]
+    lookup.assert_not_awaited()
+
+
+@pytest.mark.parametrize('nested', [False, True])
+async def test_dictionary_hash_segments_use_cache(monkeypatch, nested):
+    cache = AsyncMock(return_value=PNG)
+    monkeypatch.setattr(src.host_bridge, 'image_from_hash', cache)
+    segment = {'type': 'image', 'data': {'hash': 'a' * 64}} if nested else {
+        'type': 'image', 'data': '', 'hash': 'a' * 64,
+    }
+
+    assert await src.extract_images_from_segments([segment]) == [PNG]
+    cache.assert_awaited_once_with('a' * 64, 'image')
+
+
+async def test_runtime_inline_bytes_are_preserved_with_description(monkeypatch):
+    from gemini_drawer.plugin import CompatMessage
+
+    cache = AsyncMock(return_value=None)
+    monkeypatch.setattr(src.host_bridge, 'image_from_hash', cache)
+    msg = CompatMessage({'raw_message': [{
+        'type': 'image', 'data': '[图片：已生成的描述]',
+        'hash': 'a' * 64, 'binary_data_base64': PNG_B64,
+    }]})
+
+    assert await src.extract_source_image(msg) == PNG
+    cache.assert_not_awaited()

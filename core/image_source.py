@@ -5,7 +5,7 @@ Gemini Drawer 取图模块
 
     回复的消息 > 当前消息 > @提及用户的头像
 
-每一层都有多条获取路径（消息段内联 base64 / 消息段 URL / SDK message capability /
+每一层都有多条获取路径（消息段内联 base64 / hash 缓存 / 消息段 URL / SDK message capability /
 宿主数据库回查），任一层失败都不影响后续层继续尝试。
 
 宿主数据库相关的依赖统一走 host_bridge，本模块不直接 import src.*。
@@ -18,6 +18,7 @@ from typing import Any, List, Optional, Tuple
 
 from . import host_bridge
 from ..utils import download_image, safe_json_dumps
+from ..utils.limits import MAX_INLINE_BASE64_CHARS, MAX_MESSAGE_IMAGES
 
 AVATAR_URL = "https://q1.qlogo.cn/g?b=qq&nk={user_id}&s=640"
 #: 消息段里 @对象 的可能键名
@@ -60,6 +61,13 @@ async def _segment_to_image(seg: Any, proxy: Optional[str], logger) -> Optional[
         return None
 
     def _decode(value: str) -> Optional[bytes]:
+        # 解码前先限制编码长度，避免超大内联数据占用内存（P1-8）
+        if len(value) > MAX_INLINE_BASE64_CHARS:
+            if logger:
+                logger.warning(
+                    f"消息段内联图片数据过大（{len(value)} 字符，上限 {MAX_INLINE_BASE64_CHARS}），已跳过。"
+                )
+            return None
         try:
             if logger:
                 logger.info(f"在消息段中找到Base64图片 (类型: {seg_type})。")
@@ -71,6 +79,17 @@ async def _segment_to_image(seg: Any, proxy: Optional[str], logger) -> Optional[
 
     if isinstance(binary_data_base64, str) and len(binary_data_base64) > _MIN_BASE64_LEN:
         return _decode(binary_data_base64)
+
+    # 命令调用只带 hash；此时图片已缓存，但当前消息要等命令结束后才入库。
+    binary_hash = seg.get('hash') if isinstance(seg, dict) else getattr(seg, 'hash', None)
+    if not binary_hash and isinstance(seg_data, dict):
+        binary_hash = seg_data.get('hash')
+    if binary_hash:
+        cached = await host_bridge.image_from_hash(binary_hash, seg_type)
+        if cached:
+            if logger:
+                logger.info(f"按消息段 hash 读取到缓存图片 (类型: {seg_type})。")
+            return cached
 
     if isinstance(seg_data, dict) and seg_data.get('url'):
         if logger:
@@ -91,9 +110,13 @@ async def _segment_to_image(seg: Any, proxy: Optional[str], logger) -> Optional[
 async def extract_images_from_segments(
     segments: Any, proxy: Optional[str] = None, logger=None
 ) -> List[bytes]:
-    """提取消息段中的**所有**图片（多图绘图用）。"""
+    """提取消息段中的**所有**图片（多图绘图用）；最多处理 MAX_MESSAGE_IMAGES 张。"""
     images = []
     for seg in normalize_segments(segments):
+        if len(images) >= MAX_MESSAGE_IMAGES:
+            if logger:
+                logger.warning(f"消息中的图片数量超过上限（{MAX_MESSAGE_IMAGES}），其余已忽略。")
+            break
         img = await _segment_to_image(seg, proxy, logger)
         if img:
             images.append(img)
@@ -212,6 +235,17 @@ async def resolve_reply_images(
     return await finder.all_reply_images()
 
 
+async def resolve_current_images(
+    message: Any,
+    proxy: Optional[str] = None,
+    logger=None,
+    ctx: Any = None,
+) -> List[bytes]:
+    """取回当前消息的全部图片，读取 hash 缓存，必要时向官方消息能力补取。"""
+    finder = _SourceImageFinder(message, proxy, logger, ctx, allow_avatar_fallback=False)
+    return await finder.all_current_images()
+
+
 class _SourceImageFinder:
     """把取图的三层策略拆开，任一层抛异常都不影响后续层。"""
 
@@ -289,12 +323,25 @@ class _SourceImageFinder:
 
     async def _from_current(self) -> Optional[bytes]:
         if hasattr(self.message, 'message_segment'):
-            return await extract_first_image_from_segments(
+            img = await extract_first_image_from_segments(
                 self.message.message_segment, self.proxy, self.logger
             )
+            if img:
+                return img
 
         msg_id = getattr(self.message, 'message_id', None)
         if msg_id:
+            # 命令 RPC 的 include_binary_data=False：有图片段不代表携带了原图。
+            # 先按当前消息 ID 请求二进制数据，避免把图片引用误判为没有图片。
+            try:
+                message_dict = await self._fetch_via_capability(msg_id)
+                if isinstance(message_dict, dict):
+                    img = await self._image_from_message_dict(message_dict, "官方消息能力当前消息")
+                    if img:
+                        return img
+            except Exception as e:
+                self._log("warning", f"Failed to fetch current message via capability: {e}")
+
             try:
                 return await self._image_from_db(msg_id, "当前消息(数据库回查)")
             except Exception as e:
@@ -323,6 +370,37 @@ class _SourceImageFinder:
         return None
 
     # ── 辅助 ────────────────────────────────────────────────
+
+    async def all_current_images(self) -> List[bytes]:
+        """直接附图优先；图片段缺少数据时按当前消息 ID 取回完整图片列表。"""
+        segments = getattr(self.message, 'message_segment', None)
+        images = await extract_images_from_segments(segments, self.proxy, self.logger)
+        expected_count = min(
+            sum(_seg_fields(seg)[0] in ('image', 'emoji') for seg in normalize_segments(segments)),
+            MAX_MESSAGE_IMAGES,
+        )
+        if segments is not None and len(images) >= expected_count:
+            return images
+
+        msg_id = getattr(self.message, 'message_id', None)
+        if not msg_id:
+            return images
+
+        try:
+            message_dict = await self._fetch_via_capability(msg_id)
+            if isinstance(message_dict, dict):
+                fetched = await extract_images_from_segments(
+                    _message_dict_segments(message_dict), self.proxy, self.logger
+                )
+                if len(fetched) > len(images):
+                    self._log("info", f"从官方消息能力当前消息中提取到 {len(fetched)} 张图片")
+                    # 回查包含同一消息的全部图片，替换而非追加，避免重复计数。
+                    return fetched
+        except Exception as e:
+            self._log("warning", f"Failed to fetch current message via capability: {e}")
+
+        # 回查失败时仍保留消息里能直接读取的图片。
+        return images
 
     def _reply_target_id(self) -> Optional[Any]:
         """被回复消息的 message_id。"""

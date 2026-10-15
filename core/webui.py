@@ -8,6 +8,12 @@ from urllib.parse import urlsplit
 
 import json
 
+from .channel_url import (
+    KIND_UNKNOWN,
+    ChannelUrlError,
+    classify_channel_url,
+    parse_channel_url,
+)
 from .managers import DataManager, KeyManager
 from .protocols import IMAGE_PROTOCOLS, VIDEO_PROTOCOLS, normalize_protocol
 
@@ -159,7 +165,7 @@ class DrawerWebUI:
                     "pages": max(1, (total + 19) // 20),
                     "counts": {"channels": len(data.get("channels", {})), "prompts": len(data.get("prompts", {})),
                                "keys": len(keys.get("keys", [])),
-                               "banana": len(self.data.get_banana_prompt_entries(show_restricted=True))}}
+                               "banana": self.data.count_banana_entries(show_restricted=True)}}
 
     def _banana_entries(self) -> tuple[Dict[str, Any], Dict[str, Any]]:
         banana = _read(self.data.banana_file, {"schema_version": 1, "prompts": {}})
@@ -302,9 +308,11 @@ class DrawerWebUI:
         url = info.get("url", "")
         if not isinstance(url, str):
             raise ValueError("API 地址必须是文本。")
-        parts = urlsplit(url.strip())
-        if parts.scheme not in {"http", "https"} or not parts.hostname:
-            raise ValueError("请输入完整的 http:// 或 https:// API 地址。")
+        # 与 /添加渠道 命令共用同一份 URL 校验，避免两套规则漂移（P1-10）
+        try:
+            parse_channel_url(url)
+        except ChannelUrlError as exc:
+            raise ValueError(str(exc)) from exc
         info["url"] = url.strip()
         for field in ("enabled", "is_video", "stream"):
             if field in info and type(info[field]) is not bool:
@@ -322,6 +330,12 @@ class DrawerWebUI:
             info["protocol"] = protocol
         if info.get("response_format") not in {None, "url", "b64_json"}:
             raise ValueError("返回格式只支持 url 或 b64_json。")
+        # 与 /添加渠道 共用同一套 URL 分类：本次提交带了 URL、却无法识别渠道类型、
+        # 又没显式指定协议时拒绝保存，否则绘图管线只会跳过这条记录（P1-10 / F10）。
+        if "url" in patch and classify_channel_url(info["url"]) == KIND_UNKNOWN and "protocol" not in info:
+            raise ValueError(
+                "无法从 URL 识别渠道类型，请在协议字段中显式指定（可选值与 /渠道设置协议 相同）。"
+            )
         return info
 
     @staticmethod

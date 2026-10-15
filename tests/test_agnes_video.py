@@ -54,6 +54,7 @@ def mock_api(monkeypatch):
     def factory(**kwargs):
         state["client_kwargs"].append(dict(kwargs))
         kwargs.pop("proxy", None)
+        kwargs.pop("transport", None)
         return real_client(transport=httpx.MockTransport(dispatch), **kwargs)
 
     async def fast_sleep(seconds):
@@ -171,7 +172,7 @@ async def test_failed_task_surfaces_error(mock_api, phase):
     failed = httpx.Response(200, json={"status": "failed", "error": {"code": "generation_failed", "message": "输入图片不合法"}})
     responses = [failed] if phase == "create" else [httpx.Response(200, json=queued()), failed]
     mock_api["handler"] = lambda request: responses.pop(0)
-    with pytest.raises(RuntimeError, match="输入图片不合法"):
+    with pytest.raises(RuntimeError, match="明确报告生成失败"):
         await agnes_video.generate_agnes_video(endpoint(), "p", B64, "image/png", None, LOGGER)
     assert sum(r.method == "POST" for r in mock_api["requests"]) == 1
 
@@ -195,7 +196,7 @@ async def test_non_retryable_http_errors(mock_api, phase, status):
     failure = httpx.Response(status, json={"detail": "request denied"})
     responses = [failure] if phase == "create" else [httpx.Response(200, json=queued()), failure]
     mock_api["handler"] = lambda request: responses.pop(0)
-    with pytest.raises(RuntimeError, match=f"HTTP {status}.*request denied"):
+    with pytest.raises(RuntimeError, match=f"HTTP {status}"):
         await agnes_video.generate_agnes_video(endpoint(), "p", None, None, None, LOGGER)
     assert len(mock_api["requests"]) == (1 if phase == "create" else 2)
 
@@ -272,7 +273,7 @@ async def test_total_generation_timeout(mock_api, monkeypatch, phase):
     with pytest.raises(RuntimeError, match="生成/轮询超时") as exc:
         await agnes_video.generate_agnes_video(endpoint(), "p", None, None, None, LOGGER)
     if phase == "poll":
-        assert "video-1" in str(exc.value)
+        assert "任务已创建" in str(exc.value)
     assert sum(r.method == "POST" for r in mock_api["requests"]) == 1
 
 
@@ -315,6 +316,9 @@ async def test_existing_video_pipeline_downloads_result(mock_api, monkeypatch, d
     movie = b"fake-mp4-video"
     keys = Mock()
     monkeypatch.setattr(video, "key_manager", keys)
+    # 下载地址校验会做 DNS 解析：固定解析结果，避免依赖本机 DNS（fake-ip 等）。
+    from gemini_drawer.utils import net
+    monkeypatch.setattr(net, "_resolve_host", lambda host: ("93.184.216.34",))
 
     def handler(request):
         if request.method == "POST":
@@ -415,7 +419,7 @@ async def test_completed_without_url_waits_for_same_task(mock_api, pending):
     assert [r.method for r in mock_api["requests"]] == ["POST", "GET", "GET"]
     assert all(r.url.params["video_id"] == "video-1" for r in mock_api["requests"][1:])
     logger.warning.assert_called_once()
-    assert "响应字段" in logger.warning.call_args.args[0]
+    assert "继续查询同一任务" in logger.warning.call_args.args[0]
 
 
 @pytest.mark.asyncio
@@ -436,7 +440,7 @@ async def test_missing_result_diagnostics_do_not_log_sensitive_values(mock_api):
     assert "PRIVATE-PROMPT" not in message
     assert "PRIVATE-TOKEN" not in message
     assert B64 not in message
-    assert "prompt" in message and "first_frame" in message  # 只记录字段名
+    assert "继续查询同一任务" in message  # 连字段名也可能包含上游敏感数据
 
 
 @pytest.mark.asyncio
@@ -487,3 +491,158 @@ def test_retry_after_http_date_is_respected(monkeypatch):
 
 def test_exponential_backoff_is_capped_without_retry_after():
     assert agnes_video._retry_delay(httpx.Response(429), 30.0) == 30.0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [408, 429, 500, 502, 503, 504])
+async def test_agnes_create_gateway_errors_follow_submission_state(
+    mock_api, monkeypatch, status
+):
+    """尚未收到创建成功响应时，HTTP 错误继续换渠道且不误记 Key 失效。"""
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    movie = base64.b64encode(b"legacy-mp4").decode()
+    posts = []
+
+    def handler(request):
+        if request.url.path == "/v1/videos":
+            posts.append(request)
+            return httpx.Response(status, json={"detail": "gateway error"})
+        assert request.url.path == "/v1/chat/completions"
+        posts.append(request)
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"data:video/mp4;base64,{movie}"}}]}
+        )
+
+    mock_api["handler"] = handler
+    legacy = {"type": "custom_legacy", "url": "https://legacy.example/v1/chat/completions",
+              "key": "legacy-key", "model": "legacy-video"}
+    result, error = await video.process_video_generation(
+        "p", None, None, [endpoint(), legacy], None, LOGGER
+    )
+
+    assert (result, error) == (movie, "")
+    assert len(posts) == 2
+    # 服务端故障及限流不说明 Key 失效，只有成功渠道记账。
+    keys.record_key_usage.assert_called_once_with("legacy-key", True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("protocol,stream", [
+    ("agnes_video", False), ("seedance_video", False), ("tsai_video", False),
+    ("gemini", False), ("openai_chat", False), ("openai_chat", True),
+])
+async def test_video_503_failover_is_consistent_across_protocols(mock_api, monkeypatch, protocol, stream):
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    movie = base64.b64encode(b"second-channel-video").decode()
+    first = {**endpoint(), "url": "https://first.example/v1/videos", "protocol": protocol, "stream": stream}
+    second = {"type": "custom_backup", "url": "https://second.example/v1/chat/completions",
+              "key": "backup-key", "model": "backup-video", "protocol": "openai_chat"}
+
+    def handler(request):
+        if request.url.host == "first.example":
+            return httpx.Response(503, json={"error": {"message": "service unavailable"}})
+        return httpx.Response(200, json={"choices": [{"message": {"content": f"data:video/mp4;base64,{movie}"}}]})
+
+    mock_api["handler"] = handler
+
+    assert await video.process_video_generation("p", None, None, [first, second], None, LOGGER) == (movie, "")
+    assert [(r.method, r.url.host) for r in mock_api["requests"]] == [
+        ("POST", "first.example"), ("POST", "second.example"),
+    ]
+    keys.record_key_usage.assert_called_once_with("backup-key", True)
+
+
+@pytest.mark.asyncio
+async def test_503_from_the_only_endpoint_reports_failure_without_uncertainty(mock_api, monkeypatch):
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    mock_api["handler"] = lambda request: httpx.Response(503)
+
+    result, error = await video.process_video_generation("p", None, None, [endpoint()], None, LOGGER)
+
+    assert result is None
+    assert "HTTP 503" in error
+    assert "未自动切换" not in error
+    assert len(mock_api["requests"]) == 1
+    keys.record_key_usage.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_503_after_creation_keeps_polling_original_task(mock_api, monkeypatch):
+    """同样的 503 出现在查询阶段时，只查原任务，备用渠道不能被提交。"""
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    movie = base64.b64encode(b"same-task-video").decode()
+    queries = 0
+    second = {**endpoint(), "url": "https://second.example/v1/videos", "key": "backup-key"}
+
+    async def download(*args, **kwargs):
+        return movie
+    monkeypatch.setattr(video, "_download_video_result", download)
+
+    def handler(request):
+        nonlocal queries
+        assert request.url.host == "apihub.agnes-ai.com"
+        if request.method == "POST":
+            return httpx.Response(200, json=queued())
+        queries += 1
+        assert request.url.params["video_id"] == "video-1"
+        return httpx.Response(503) if queries == 1 else httpx.Response(200, json=completed())
+
+    mock_api["handler"] = handler
+
+    assert await video.process_video_generation("p", None, None, [endpoint(), second], None, LOGGER) == (movie, "")
+    assert [r.method for r in mock_api["requests"]] == ["POST", "GET", "GET"]
+    keys.record_key_usage.assert_called_once_with("test-key", True)
+
+
+@pytest.mark.asyncio
+async def test_oversized_inline_video_result_does_not_failover(mock_api, monkeypatch):
+    """内联 base64 视频超过上限：不换渠道、不重新生成（F6）。"""
+    monkeypatch.setattr(video, "MAX_VIDEO_BASE64_CHARS", 10)
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    big = base64.b64encode(b"x" * 100).decode()
+
+    def handler(request):
+        assert request.url.path == "/v1/chat/completions"
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": f"data:video/mp4;base64,{big}"}}]}
+        )
+
+    mock_api["handler"] = handler
+    first = {"type": "custom_a", "url": "https://a.example/v1/chat/completions", "key": "k1", "model": "m"}
+    second = {"type": "custom_b", "url": "https://b.example/v1/chat/completions", "key": "k2", "model": "m"}
+    result, error = await video.process_video_generation("p", None, None, [first, second], None, LOGGER)
+
+    assert result is None
+    assert "过大" in error
+    assert len(mock_api["requests"]) == 1
+    keys.record_key_usage.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_video_sse_accumulation_limit_does_not_failover(mock_api, monkeypatch):
+    """视频 SSE 累积超限：不换渠道、不重新生成（F6）。"""
+    monkeypatch.setattr(video, "MAX_SSE_ACCUMULATED_CHARS", 10)
+    keys = Mock()
+    monkeypatch.setattr(video, "key_manager", keys)
+    body = "data: " + json.dumps({"choices": [{"delta": {"content": "x" * 50}}]}) + "\n\n"
+
+    def handler(request):
+        return httpx.Response(
+            200, content=body.encode(), headers={"Content-Type": "text/event-stream"}
+        )
+
+    mock_api["handler"] = handler
+    first = {"type": "custom_a", "url": "https://a.example/v1/chat/completions",
+             "key": "k1", "model": "m", "stream": True}
+    second = {**first, "url": "https://b.example/v1/chat/completions", "key": "k2"}
+    result, error = await video.process_video_generation("p", None, None, [first, second], None, LOGGER)
+
+    assert result is None
+    assert "上限" in error
+    assert len(mock_api["requests"]) == 1
+    keys.record_key_usage.assert_not_called()

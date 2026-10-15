@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import random
 from pathlib import Path
@@ -6,6 +7,16 @@ from typing import Tuple, List, Dict, Optional, Any
 from maibot_sdk.compat.base import BaseAction, ActionActivationType
 
 from ..config import DEFAULT_SELFIE_BASE_PROMPT, DEFAULT_SELFIE_POLISH_TEMPLATE
+from ..core.budget import (
+    DRAW_COMMAND_TIMEOUT_MS,
+    HOST_RETURN_MARGIN_SECONDS,
+    VIDEO_COMMAND_TIMEOUT_MS,
+    VIDEO_HOST_RETURN_MARGIN_SECONDS,
+    BudgetExpiredError,
+    budgeted_entry,
+    current_budget,
+    TimeBudget,
+)
 from ..core.host_bridge import get_plugin_logger
 
 from ..core.endpoints import build_drawing_endpoints
@@ -13,12 +24,15 @@ from ..core.image_source import extract_source_image
 from ..core.guards import evaluate_access
 from ..core.pipeline import run_drawing
 from ..providers import DrawRequest
-from ..utils import download_image, convert_if_gif, get_image_mime_type
+from ..utils import convert_if_gif, download_image, get_image_mime_type, interpret_send_result
+from .base_commands import REFERENCE_IMAGE_TIMEOUT_SECONDS
+from .draw_commands import DRAW_COMMAND_PREFIXES
 
 logger = get_plugin_logger("plugin.gemini_drawer.action")
 
-#: 这些前缀由专门的 Command 处理，Action 不应重复触发
-COMMAND_PREFIXES = ("/绘图", "＃绘图", "/多图", "/bnn", "/文生视频", "/图生视频", "/+")
+#: 这些前缀由专门的 Command 处理，Action 不应重复触发。
+#: 与工具描述共用 commands/draw_commands.py 的同一份定义（P2-9）。
+COMMAND_PREFIXES = DRAW_COMMAND_PREFIXES
 
 
 def is_command_message(message: Any) -> bool:
@@ -58,6 +72,8 @@ def is_command_message(message: Any) -> bool:
 
 class _DrawActionMixin:
     """Action 侧共享的准入校验、绘图与发图逻辑。"""
+
+    retry_unconfirmed_timeout: bool = False
 
     def _proxy(self) -> Optional[str]:
         return self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
@@ -100,20 +116,8 @@ class _DrawActionMixin:
 
     @staticmethod
     def _interpret_send_result(result: Any) -> bool:
-        """判定 send 能力的返回值是否代表真的发出去了。
-
-        返回结构随 SDK 版本不同：
-        - SDK >= 2.8 且 return_details=True：``{"sent": bool, "message_id": str | None}``，
-          **没有** ``success`` 字段，只按 ``success`` 判断会恒为失败。
-        - 更早的 SDK 或宿主原始返回：``{"success": bool, "sent": bool, ...}``。
-        - 未开 return_details 时统一收敛成 bool。
-        所以只校验实际存在的标志位，全部为真才算成功；一个都没有则视为失败，
-        避免非空字典被当成 True。
-        """
-        if isinstance(result, dict):
-            flags = [result[key] for key in ("success", "sent") if key in result]
-            return bool(flags) and all(bool(flag) for flag in flags)
-        return bool(result)
+        """判定 send 能力的返回值是否代表真的发出去了（实现见 utils.response）。"""
+        return interpret_send_result(result)
 
     def _precheck(self, feature: str) -> Optional[Tuple[bool, str]]:
         """统一的 Action 准入校验；返回 None 表示放行。"""
@@ -129,8 +133,10 @@ class _DrawActionMixin:
 
         return None
 
-    async def _draw(self, prompt: str, images: List[bytes]) -> Tuple[List[str], str]:
-        images = [convert_if_gif(img) for img in images]
+    async def _draw(self, prompt: str, images: List[bytes],
+                    budget: Optional[TimeBudget] = None) -> Tuple[List[str], str]:
+        # GIF 解码/转换是同步阻塞操作，放到工作线程，避免卡住事件循环。
+        images = await asyncio.to_thread(lambda: [convert_if_gif(img) for img in images])
         request = DrawRequest(
             prompt=prompt,
             images=images,
@@ -142,15 +148,24 @@ class _DrawActionMixin:
             proxy=self._proxy(),
             logger=logger,
             debug_mode=self.get_config("behavior.debug_mode", False),
+            budget=budget,
+            retry_unconfirmed_timeout=self.retry_unconfirmed_timeout,
         )
 
-    async def _send_images(self, img_data: List[str]) -> int:
+    async def _send_images(self, img_data: List[str],
+                           budget: Optional[TimeBudget] = None) -> int:
         """把 pipeline 返回的图片数据发出去，返回成功发送的张数。"""
         proxy = self._proxy()
         sent_count = 0
         for raw in img_data:
+            if budget is not None and not budget.can_start(minimum=5.0):
+                logger.warning("时间预算耗尽，剩余图片不再发送")
+                break
             if raw.startswith(('http://', 'https://')):
-                downloaded = await download_image(raw, proxy)
+                timeout = 60.0
+                if budget is not None:
+                    timeout = budget.stage_timeout(60.0, minimum=5.0)
+                downloaded = await download_image(raw, proxy, timeout=timeout)
                 image_b64 = base64.b64encode(downloaded).decode('utf-8') if downloaded else None
             elif 'base64,' in raw:
                 image_b64 = raw.split('base64,', 1)[1]
@@ -159,9 +174,18 @@ class _DrawActionMixin:
 
             if not image_b64:
                 continue
-            sent = await self._send_image_data(
-                image_b64.replace('\n', '').replace('\r', '').replace(' ', '')
-            )
+            if budget is not None and not budget.can_start(minimum=5.0):
+                # 下载可能吃掉大部分预算：真正发送之前再检查一次（F1）。
+                logger.warning("时间预算耗尽，剩余图片下载完成但不再发送")
+                break
+            async def send_image():
+                result = await self._send_image_data(
+                    image_b64.replace('\n', '').replace('\r', '').replace(' ', '')
+                )
+                if result and budget:
+                    budget.media_sent = True
+                return result
+            sent = await budget.run(send_image) if budget else await send_image()
             if sent:
                 sent_count += 1
             else:
@@ -199,6 +223,7 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
 
     associated_types = ["image"]
 
+    @budgeted_entry(DRAW_COMMAND_TIMEOUT_MS)
     async def execute(self) -> Tuple[bool, str]:
         """执行绘图动作"""
         blocked = self._precheck("绘图")
@@ -210,10 +235,13 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
         if not prompt:
             return False, "没有提供绘图提示词"
 
+        # 预算先于等待提示建立：等待提示本身也消耗宿主 RPC 时间（F1）。
+        budget = current_budget() or TimeBudget.from_rpc_timeout_ms(DRAW_COMMAND_TIMEOUT_MS)
         await self._send_wait_message()
-        return await self._draw_and_send(prompt)
+        return await self._draw_and_send(prompt, budget)
 
-    async def _draw_and_send(self, prompt: str) -> Tuple[bool, str]:
+    async def _draw_and_send(self, prompt: str,
+                             budget: Optional[TimeBudget] = None) -> Tuple[bool, str]:
         logger.info(f"执行绘图 Action，Prompt: {prompt}")
 
         try:
@@ -221,22 +249,39 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
             images = []
             if self.action_message:
                 try:
-                    source = await extract_source_image(
-                        self.action_message, self._proxy(), logger, getattr(self, 'ctx', None)
+                    # 参考图获取同样受整体预算约束（F1）；预算耗尽时取消本次生成。
+                    timeout = REFERENCE_IMAGE_TIMEOUT_SECONDS
+                    if budget is not None:
+                        timeout = budget.stage_timeout(REFERENCE_IMAGE_TIMEOUT_SECONDS)
+                    source = await asyncio.wait_for(
+                        extract_source_image(
+                            self.action_message, self._proxy(), logger, getattr(self, 'ctx', None)
+                        ),
+                        timeout=timeout,
                     )
                     if source:
                         logger.info("Action 检测到图片输入，将执行图生图模式。")
                         images.append(source)
+                except BudgetExpiredError as e:
+                    logger.warning(f"时间预算耗尽，已取消本次生成: {e}")
+                    await self._send_text("❌ 生成耗时超出本次处理预算，已取消，请重试。")
+                    return False, "生成超时未发送"
                 except Exception as e:
                     logger.warning(f"尝试提取图片输入失败: {e}")
 
-            img_data, error = await self._draw(prompt, images)
+            img_data, error = await self._draw(prompt, images, budget=budget)
 
             if not img_data:
                 await self._send_text(f"绘图失败了...\n错误: {error}")
                 return False, f"绘图失败: {error}"
 
-            if await self._send_images(img_data) == 0:
+            if budget is not None and not budget.can_start(minimum=5.0):
+                # 宿主 RPC 随时可能超时；期限耗尽后不得再开始发送。
+                logger.warning("时间预算耗尽，已生成但不再发送图片")
+                await self._send_text("❌ 生成耗时超出本次处理预算，图片未发送，请重试。")
+                return False, "生成超时未发送"
+
+            if await self._send_images(img_data, budget=budget) == 0:
                 await self._send_text("图片生成成功，但处理失败。")
                 return False, "图片生成成功，但发送失败"
 
@@ -251,6 +296,9 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
 class _SelfieActionBase(_DrawActionMixin, BaseAction):
     """自拍类工具的共享逻辑：底图定位、提示词润色与同步执行。"""
 
+    #: 尚未收到成功响应时，允许在总预算内切换超时端点。
+    retry_unconfirmed_timeout: bool = True
+
     #: 润色模板的配置键
     polish_template_key: str = "selfie.polish_template"
     polish_template_default: str = ""
@@ -260,6 +308,22 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
     polish_request_type: str = "gemini_drawer.selfie_polish"
     #: 功能名（日志与提示用）
     feature_name: str = "自拍"
+    #: 该工具对应组件的 RPC 超时与返回余量（子类可覆写，如视频）
+    rpc_timeout_ms: int = DRAW_COMMAND_TIMEOUT_MS
+    budget_reserve_seconds: float = HOST_RETURN_MARGIN_SECONDS
+    #: 提示词润色的时间上限（会被整体预算进一步收敛）
+    POLISH_TIMEOUT_SECONDS: float = 60.0
+
+    async def _polish_with_budget(self, prompt: str, budget: Optional[TimeBudget]) -> str:
+        """在整体预算内润色提示词；超时或预算耗尽时回退到原始提示词（F1）。"""
+        try:
+            timeout = self.POLISH_TIMEOUT_SECONDS
+            if budget is not None:
+                timeout = budget.stage_timeout(self.POLISH_TIMEOUT_SECONDS)
+            return await asyncio.wait_for(self._polish_prompt(prompt), timeout=timeout)
+        except (asyncio.TimeoutError, BudgetExpiredError):
+            logger.warning(f"{self.feature_name}提示词润色超出时间预算，使用原始提示词")
+            return prompt
 
     def _identity_prompt(self) -> str:
         """Return the configured identity constraint, falling back for legacy blank configs."""
@@ -337,6 +401,7 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
         base_prompt = self._identity_prompt()
         return f"{base_prompt}, {action}" if base_prompt else action
 
+    @budgeted_entry(DRAW_COMMAND_TIMEOUT_MS)
     async def _run_generation(self, coro_factory) -> Tuple[bool, str]:
         """统一执行前置校验，并等待媒体生成和发送完成。"""
         blocked = self._precheck(self.feature_name)
@@ -357,8 +422,12 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
 
         try:
             user_action = (self.action_data.get("requested_action") or "").strip()
+            # 预算先于等待提示建立：等待提示本身也消耗宿主 RPC 时间（F1）。
+            budget = current_budget() or TimeBudget.from_rpc_timeout_ms(
+                self.rpc_timeout_ms, reserve_seconds=self.budget_reserve_seconds
+            )
             await self._send_wait_message()
-            return await coro_factory(ref_image_path, user_action)
+            return await coro_factory(ref_image_path, user_action, budget)
         except Exception as e:
             logger.error(f"{self.feature_name} Tool Error: {e}")
             await self._send_text(f"处理{self.feature_name}时发生了错误: {e}")
@@ -391,25 +460,31 @@ class SelfieGenerateAction(_SelfieActionBase):
     async def execute(self) -> Tuple[bool, str]:
         return await self._run_generation(self._do_selfie)
 
-    async def _do_selfie(self, ref_image_path: Path, user_action: str) -> Tuple[bool, str]:
+    async def _do_selfie(self, ref_image_path: Path, user_action: str,
+                         budget: Optional[TimeBudget] = None) -> Tuple[bool, str]:
         try:
-            image_bytes = ref_image_path.read_bytes()
+            image_bytes = await asyncio.to_thread(ref_image_path.read_bytes)
 
             full_prompt = self._compose_prompt(
                 user_action,
                 self.get_config("selfie.random_actions") or [],
                 "looking at viewer",
             )
-            full_prompt = await self._polish_prompt(full_prompt)
+            full_prompt = await self._polish_with_budget(full_prompt, budget)
 
             logger.info(f"Generating selfie with prompt: {full_prompt}")
-            img_data, error = await self._draw(full_prompt, [image_bytes])
+            img_data, error = await self._draw(full_prompt, [image_bytes], budget=budget)
 
             if not img_data:
                 await self._send_text(f"自拍生成失败了: {error}")
                 return False, f"自拍生成失败: {error}"
 
-            if await self._send_images(img_data) == 0:
+            if budget is not None and not budget.can_start(minimum=5.0):
+                logger.warning("时间预算耗尽，已生成但不再发送自拍")
+                await self._send_text("❌ 生成耗时超出本次处理预算，自拍未发送，请重试。")
+                return False, "生成超时未发送"
+
+            if await self._send_images(img_data, budget=budget) == 0:
                 await self._send_text("自拍生成了，但是处理出错了。")
                 return False, "自拍生成成功，但发送失败"
 
@@ -457,22 +532,27 @@ class SelfieVideoAction(_SelfieActionBase):
         "比耶手势",
     ]
 
+    #: 视频工具使用宿主视频组件的 RPC 上限与返回余量
+    rpc_timeout_ms: int = VIDEO_COMMAND_TIMEOUT_MS
+    budget_reserve_seconds: float = VIDEO_HOST_RETURN_MARGIN_SECONDS
+
     async def execute(self) -> Tuple[bool, str]:
         return await self._run_generation(self._do_video)
 
-    async def _do_video(self, ref_image_path: Path, user_action: str) -> Tuple[bool, str]:
+    async def _do_video(self, ref_image_path: Path, user_action: str,
+                        budget: Optional[TimeBudget] = None) -> Tuple[bool, str]:
         try:
             from ..core.endpoints import build_video_endpoints
-            from ..core.video import process_video_generation, send_video_via_napcat
+            from ..core.video import process_video_generation, send_video_media
 
-            image_bytes = ref_image_path.read_bytes()
+            image_bytes = await asyncio.to_thread(ref_image_path.read_bytes)
 
             full_prompt = self._compose_prompt(
                 user_action,
                 self.get_config("selfie.video_actions", self.DEFAULT_VIDEO_ACTIONS),
                 "looking at camera",
             )
-            full_prompt = await self._polish_prompt(full_prompt)
+            full_prompt = await self._polish_with_budget(full_prompt, budget)
             logger.info(f"Generating selfie video with prompt: {full_prompt}")
 
             endpoints = build_video_endpoints(logger=logger)
@@ -488,19 +568,29 @@ class SelfieVideoAction(_SelfieActionBase):
                 proxy=self._proxy(),
                 logger=logger,
                 debug_mode=self.get_config("behavior.debug_mode", False),
+                budget=budget,
+                retry_unconfirmed_timeout=self.retry_unconfirmed_timeout,
             )
 
             if not video_data:
                 await self._send_text(f"视频生成失败了: {error}")
                 return False, f"视频生成失败: {error}"
 
-            success, send_error = await send_video_via_napcat(
+            if budget is not None and not budget.can_start(minimum=5.0):
+                logger.warning("时间预算耗尽，已生成但不再发送视频")
+                await self._send_text("❌ 生成耗时超出本次处理预算，视频未发送，请重试。")
+                return False, "生成超时未发送"
+
+            success, send_error = await send_video_media(
                 video_base64=video_data,
+                ctx=getattr(self, "ctx", None),
+                stream_id=self._target_stream_id(),
                 group_id=self.group_id,
                 user_id=self.user_id,
                 napcat_host=self.get_config("api.napcat_host", "napcat"),
                 napcat_port=self.get_config("api.napcat_port", 3033),
                 logger=logger,
+                budget=budget,
             )
 
             if success:

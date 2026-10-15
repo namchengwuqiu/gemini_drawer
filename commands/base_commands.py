@@ -28,20 +28,71 @@ from typing import Any, List, Optional, Tuple
 
 from maibot_sdk.compat.base import BaseCommand
 
+from ..core.budget import (
+    DRAW_COMMAND_TIMEOUT_MS,
+    VIDEO_COMMAND_TIMEOUT_MS,
+    VIDEO_HOST_RETURN_MARGIN_SECONDS,
+    BudgetExpiredError,
+    budgeted_entry,
+    current_budget,
+    TimeBudget,
+)
 from ..core.host_bridge import get_plugin_logger
 
 from ..core.endpoints import build_drawing_endpoints, build_video_endpoints
 from ..core.image_source import download_avatar, extract_source_image
 from ..core.guards import evaluate_access, message_user_id
-from ..core.pipeline import run_drawing
+from ..core.pipeline import DrawingAttempts, run_drawing
 from ..providers import DrawRequest
 from ..utils import convert_if_gif, download_image, get_image_mime_type
 
 logger = get_plugin_logger("plugin.gemini_drawer")
 
+#: 参考图获取阶段的超时上限（会被整体预算进一步收敛）
+REFERENCE_IMAGE_TIMEOUT_SECONDS = 120.0
 
 
-class BaseAdminCommand(BaseCommand, ABC):
+def _consume_task_result(task: "asyncio.Task[Any]") -> None:
+    """读取后台任务的异常，避免 "Task exception was never retrieved" 警告。"""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning(f"后台任务异常: {type(exc).__name__}: {exc}")
+
+
+class CtxSendMixin:
+    """命令层的统一发送入口。
+
+    优先走 SDK 原生上下文（``self.ctx.send.*``，由插件在运行桥接里注入），
+    上下文缺失或调用失败时回退兼容层方法，保证测试环境与旧宿主可用。
+    """
+
+    async def _send_text(self, text: str, **kwargs: Any) -> bool:
+        ctx = getattr(self, "ctx", None)
+        stream_id = self._get_stream_id() if hasattr(self, "_get_stream_id") else ""
+        if callable(getattr(getattr(ctx, "send", None), "text", None)) and stream_id:
+            try:
+                return bool(await ctx.send.text(str(text), stream_id, **kwargs))
+            except Exception as e:
+                logger.warning(f"ctx.send.text 发送确认失败: {type(e).__name__}，不重复发送")
+                return False
+        return await self.send_text(text)
+
+    async def _send_image(self, image_base64: str) -> bool:
+        ctx = getattr(self, "ctx", None)
+        stream_id = self._get_stream_id() if hasattr(self, "_get_stream_id") else ""
+        if callable(getattr(getattr(ctx, "send", None), "image", None)) and stream_id:
+            try:
+                return bool(await ctx.send.image(image_base64, stream_id))
+            except Exception as e:
+                logger.warning(f"ctx.send.image 发送确认失败: {type(e).__name__}，不重复发送")
+                return False
+        return await self.send_image(image_base64)
+
+
+
+class BaseAdminCommand(CtxSendMixin, BaseCommand, ABC):
     permission: str = "owner"
 
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
@@ -51,12 +102,12 @@ class BaseAdminCommand(BaseCommand, ABC):
         str_user_id = message_user_id(self.message)
         if not str_user_id:
             logger.warning("无法从 self.message.message_info.user_info 中获取 user_id")
-            await self.send_text("无法获取用户信息，操作失败。")
+            await self._send_text("无法获取用户信息，操作失败。")
             return False, "无法获取用户信息", True
 
         admin_list = self.get_config("general.admins", []) or []
         if str_user_id not in {str(admin) for admin in admin_list}:
-            await self.send_text("❌ 仅管理员可用")
+            await self._send_text("❌ 仅管理员可用")
             return True, "无权限访问", True
 
         return await self.handle_admin_command()
@@ -78,7 +129,7 @@ class BaseAdminCommand(BaseCommand, ABC):
                     "\n".join(seg[1] for seg in node[2] if seg[1])
                     for node in nodes_to_send
                 )
-                await self.send_text(all_text)
+                await self._send_text(all_text)
                 return True
 
             messages = []
@@ -97,7 +148,7 @@ class BaseAdminCommand(BaseCommand, ABC):
                 return True
 
             all_text = "\n".join(m["segments"][0]["content"] for m in messages)
-            await self.send_text(all_text)
+            await self._send_text(all_text)
             return True
         except Exception as e:
             logger.warning(f"转发消息失败，降级为纯文本: {e}")
@@ -105,7 +156,7 @@ class BaseAdminCommand(BaseCommand, ABC):
                 "\n".join(seg[1] for seg in node[2] if seg[1])
                 for node in nodes_to_send
             )
-            await self.send_text(all_text)
+            await self._send_text(all_text)
             return True
 
 
@@ -166,7 +217,7 @@ class _ChatContextMixin:
         return self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
 
-class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
+class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
     permission: str = "user"
     allow_text_only: bool = False
 
@@ -205,7 +256,7 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
             if await self._send_poke_via_napcat():
                 return
 
-        await self.send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
+        await self._send_text(f"✅ 生成完成 ({elapsed:.2f}s)")
 
     def get_image_caption(self) -> Optional[str]:
         """子类可重写此方法，返回要与图片一起发送的文字说明"""
@@ -214,7 +265,7 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
     async def _notify_start(self) -> None:
         """开始处理时通知用户：优先戳一戳，失败回落文字"""
         if not await self._send_poke_via_napcat():
-            await self.send_text("🎨 开始处理...")
+            await self._send_text("🎨 开始处理...")
 
     async def _send_poke_via_napcat(self) -> bool:
         """通过 NapCat 适配器发送戳一戳，返回是否成功
@@ -284,7 +335,7 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
 
         来源优先级：回复消息中的图片 > 当前消息中的图片 > @提及用户的头像
         """
-        from ..core.image_source import extract_images_from_segments, extract_mentioned_user_ids, resolve_reply_images
+        from ..core.image_source import extract_mentioned_user_ids, resolve_current_images, resolve_reply_images
 
         proxy = self._proxy()
         images: List[bytes] = []
@@ -300,8 +351,8 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
             images.extend(reply_images)
             logger.info(f"[多图] 从回复消息中提取到 {len(reply_images)} 张图片")
 
-        # 2. 当前消息中的图片
-        images.extend(await extract_images_from_segments(self.message.message_segment, proxy, logger))
+        # 2. 当前消息中的图片；命令 RPC 可能仅携带 hash，需按消息 ID 补取原图。
+        images.extend(await resolve_current_images(self.message, proxy, logger, getattr(self, 'ctx', None)))
 
         # 3. @提及用户的头像
         for user_id in extract_mentioned_user_ids(self.message.message_segment):
@@ -319,17 +370,21 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
 
     # ── 主流程 ──────────────────────────────────────────────
 
+    @budgeted_entry(DRAW_COMMAND_TIMEOUT_MS, command=True)
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         decision = self._check_access()
         if not decision.allowed:
             if decision.message:
-                await self.send_text(decision.message)
+                await self._send_text(decision.message)
             else:
                 logger.info(f"拒绝执行绘图命令: {decision.reason}")
             return True, decision.reason, decision.should_stop
 
         start_time = datetime.now()
         status_msg_start_time = time.time()
+        # 整体时间预算：宿主 RPC 超时后不会再取消插件侧任务，预算耗尽时
+        # 必须停止生成与发送（见 core/budget.py）。
+        budget = current_budget() or TimeBudget.from_rpc_timeout_ms(DRAW_COMMAND_TIMEOUT_MS)
 
         prompt = await self.get_prompt()
         if not prompt:
@@ -337,13 +392,22 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
 
         await self._notify_start()
 
-        images = await self.collect_images()
+        try:
+            images = await asyncio.wait_for(
+                self.collect_images(),
+                timeout=budget.stage_timeout(REFERENCE_IMAGE_TIMEOUT_SECONDS),
+            )
+        except (asyncio.TimeoutError, BudgetExpiredError):
+            logger.warning("获取参考图超出时间预算，已取消本次生成")
+            await self._send_text("❌ 获取参考图超时，已取消本次生成。")
+            return True, "参考图获取超时", True
         error = self.check_images(images)
         if error:
-            await self.send_text(error)
+            await self._send_text(error)
             return True, "参考图不满足要求", True
 
-        images = [convert_if_gif(img) for img in images]
+        # GIF 解码/转换是同步阻塞操作，放到工作线程，避免卡住事件循环。
+        images = await asyncio.to_thread(lambda: [convert_if_gif(img) for img in images])
         request = DrawRequest(
             prompt=prompt,
             images=images,
@@ -352,36 +416,57 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
 
         endpoints = build_drawing_endpoints()
         if not endpoints:
-            await self.send_text("❌ 未配置任何API密钥或端点。")
+            await self._send_text("❌ 未配置任何API密钥或端点。")
             return True, "无可用密钥或端点", True
 
         proxy = self._proxy()
+        attempts = DrawingAttempts()
         img_data, last_error = await run_drawing(
             request=request,
             endpoints=endpoints,
             proxy=proxy,
             logger=logger,
             debug_mode=self.get_config("behavior.debug_mode", False),
+            budget=budget,
+            attempts=attempts,
         )
 
         elapsed = (datetime.now() - start_time).total_seconds()
 
         if img_data:
+            if not budget.can_start(minimum=5.0):
+                # 宿主 RPC 随时可能超时；期限耗尽后不得再开始发送。
+                logger.warning("时间预算耗尽，已生成但不再发送图片")
+                await self._send_text("❌ 生成耗时超出本次处理预算，图片未发送，请重试。")
+                return True, "生成超时未发送", True
             logger.info(f"绘图成功，耗时 {elapsed:.2f}s")
             try:
-                await self._deliver_images(img_data, proxy, elapsed)
+                await self._deliver_images(img_data, proxy, elapsed, budget=budget)
             except Exception as e:
-                logger.error(f"发送图片失败: {e}")
-                await self.send_text("❌ 图片发送失败。")
+                logger.error(f"图片发送未确认: {type(e).__name__}")
+                if isinstance(e, (TimeoutError, BudgetExpiredError)):
+                    raise
+                await self._send_text("❌ 图片发送未确认，请勿立即重复操作。")
+                return False, "图片发送未确认", True
             await self._recall_status_messages(status_msg_start_time)
             return True, "绘图成功", True
 
-        fail_msg = f"❌ 生成失败 ({elapsed:.2f}s, {len(endpoints)}次尝试)\n最终错误: {last_error}"
+        fail_msg = f"❌ 生成失败 ({elapsed:.2f}s, {attempts.count}次尝试)\n最终错误: {last_error}"
         fail_msg_send_time = time.time()
-        await self.send_text(fail_msg)
-        asyncio.create_task(self._delayed_recall_fail_message(fail_msg_send_time, fail_msg))
+        await self._send_text(fail_msg)
+        self._schedule_delayed_recall(fail_msg_send_time, fail_msg)
         await self._recall_status_messages(status_msg_start_time)
         return True, "所有尝试均失败", True
+
+    def _schedule_delayed_recall(self, fail_msg_send_time: float, fail_msg: str) -> None:
+        """失败消息的延迟撤回交给插件统一管理，卸载时可取消（P1-5）。"""
+        task = asyncio.create_task(self._delayed_recall_fail_message(fail_msg_send_time, fail_msg))
+        plugin = getattr(self, "plugin", None)
+        tracker = getattr(plugin, "track_background_task", None)
+        if tracker is not None:
+            tracker(task)
+        else:
+            task.add_done_callback(_consume_task_result)
 
     # ── 发图 ────────────────────────────────────────────────
 
@@ -389,10 +474,16 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
     def _clean_base64(value: str) -> str:
         return value.replace('\n', '').replace('\r', '').replace(' ', '')
 
-    async def _to_base64(self, raw: str, proxy: Optional[str]) -> Optional[str]:
+    async def _to_base64(self, raw: str, proxy: Optional[str],
+                         budget: Optional[TimeBudget] = None) -> Optional[str]:
         """把 pipeline 返回的图片数据（URL / data URL / 裸 base64）统一成裸 base64。"""
         if raw.startswith(('http://', 'https://')):
-            downloaded = await download_image(raw, proxy)
+            timeout = 60.0
+            if budget is not None:
+                timeout = budget.stage_timeout(60.0, minimum=5.0)
+            async def download():
+                return await download_image(raw, proxy, timeout=timeout)
+            downloaded = await budget.run(download) if budget else await download()
             return base64.b64encode(downloaded).decode('utf-8') if downloaded else None
         if 'base64,' in raw:
             return self._clean_base64(raw.split('base64,', 1)[1])
@@ -402,7 +493,7 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
         self, image_b64: str, caption: Optional[str], with_at: bool, stream_id: str
     ) -> bool:
         if not getattr(self, 'ctx', None):
-            return await self.send_image(image_b64)
+            return await self._send_image(image_b64)
 
         # 用消息段自带 @提及，而不是有坑的 set_reply
         segments: List[dict] = []
@@ -416,7 +507,8 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
 
         return await self.ctx.send.hybrid(segments, stream_id)
 
-    async def _deliver_images(self, img_data: List[str], proxy: Optional[str], elapsed: float) -> None:
+    async def _deliver_images(self, img_data: List[str], proxy: Optional[str], elapsed: float,
+                              budget: Optional[TimeBudget] = None) -> None:
         stream_id = self._get_stream_id()
         if not stream_id:
             raise RuntimeError("无法从当前消息中确定stream_id")
@@ -427,17 +519,30 @@ class BaseDrawCommand(_ChatContextMixin, BaseCommand, ABC):
 
         sent_count = 0
         for idx, raw in enumerate(img_data):
-            image_b64 = await self._to_base64(raw, proxy)
+            if budget is not None and not budget.can_start(minimum=5.0):
+                logger.warning(f"时间预算耗尽，第 {idx + 1} 张起的图片不再发送")
+                break
+            image_b64 = await self._to_base64(raw, proxy, budget=budget)
             if not image_b64:
                 logger.error(f"第 {idx + 1} 张图片下载或转换失败")
                 continue
+            if budget is not None and not budget.can_start(minimum=5.0):
+                # 下载可能吃掉大部分预算：真正发送之前再检查一次（F1）。
+                logger.warning(f"时间预算耗尽，第 {idx + 1} 张图片下载完成但不再发送")
+                break
 
             is_first = idx == 0
             caption = self.get_image_caption() if is_first else None
-            if await self._send_one_image(
-                image_b64, caption, with_at=reply_with_image and is_first and can_at,
-                stream_id=stream_id,
-            ):
+            async def send_image():
+                result = await self._send_one_image(
+                    image_b64, caption, with_at=reply_with_image and is_first and can_at,
+                    stream_id=stream_id,
+                )
+                if result and budget:
+                    budget.media_sent = True
+                return result
+            sent = await budget.run(send_image) if budget else await send_image()
+            if sent:
                 sent_count += 1
                 if caption:
                     logger.info(f"[发送] 发送图文混合消息，说明: {caption}")
@@ -531,7 +636,7 @@ class BaseMultiImageDrawCommand(BaseDrawCommand):
         return None
 
 
-class BaseVideoCommand(_ChatContextMixin, BaseCommand, ABC):
+class BaseVideoCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
     """
     视频生成命令基类
     仅使用标记为 is_video=True 的渠道进行视频生成
@@ -571,16 +676,21 @@ class BaseVideoCommand(_ChatContextMixin, BaseCommand, ABC):
 
         return group_id, user_id
 
+    @budgeted_entry(VIDEO_COMMAND_TIMEOUT_MS, reserve=VIDEO_HOST_RETURN_MARGIN_SECONDS, command=True)
     async def execute(self) -> Tuple[bool, Optional[str], bool]:
         decision = self._check_access()
         if not decision.allowed:
             if decision.message:
-                await self.send_text(decision.message)
+                await self._send_text(decision.message)
             else:
                 logger.info(f"拒绝执行视频生成命令: {decision.reason}")
             return True, decision.reason, decision.should_stop
 
         start_time = datetime.now()
+        # 视频流程更慢：预算为宿主 RPC 上限扣除返回余量。
+        budget = current_budget() or TimeBudget.from_rpc_timeout_ms(
+            VIDEO_COMMAND_TIMEOUT_MS, reserve_seconds=VIDEO_HOST_RETURN_MARGIN_SECONDS
+        )
 
         prompt = await self.get_prompt()
         if not prompt:
@@ -590,27 +700,36 @@ class BaseVideoCommand(_ChatContextMixin, BaseCommand, ABC):
         mime_type = None
 
         if self.requires_image:
-            image_bytes = await self.get_source_image_bytes()
+            try:
+                image_bytes = await asyncio.wait_for(
+                    self.get_source_image_bytes(),
+                    timeout=budget.stage_timeout(REFERENCE_IMAGE_TIMEOUT_SECONDS),
+                )
+            except (asyncio.TimeoutError, BudgetExpiredError):
+                logger.warning("获取视频参考图超出时间预算，已取消本次生成")
+                await self._send_text("❌ 获取参考图超时，已取消本次生成。")
+                return True, "参考图获取超时", True
             if not image_bytes:
-                await self.send_text(
+                await self._send_text(
                     "❌ 图生视频需要一张图片作为输入！\n请回复图片或@用户或发送图片后使用此指令。"
                 )
                 return True, "缺少图片", True
 
-            image_bytes = convert_if_gif(image_bytes)
+            # GIF 解码/转换是同步阻塞操作，放到工作线程。
+            image_bytes = await asyncio.to_thread(convert_if_gif, image_bytes)
             base64_img = base64.b64encode(image_bytes).decode('utf-8')
             mime_type = get_image_mime_type(image_bytes)
 
-        from ..core.video import process_video_generation, send_video_via_napcat
+        from ..core.video import process_video_generation, send_video_media
 
         endpoints_to_try = build_video_endpoints(logger=logger)
         if not endpoints_to_try:
-            await self.send_text(
+            await self._send_text(
                 "❌ 未配置视频生成渠道。\n请使用 `/渠道设置视频 <渠道名> true` 启用视频渠道。"
             )
             return True, "无视频渠道", True
 
-        await self.send_text("🎬 开始生成视频，请稍候...")
+        await self._send_text("🎬 开始生成视频，请稍候...")
 
         video_data, last_error = await process_video_generation(
             prompt=prompt,
@@ -620,27 +739,36 @@ class BaseVideoCommand(_ChatContextMixin, BaseCommand, ABC):
             proxy=self._proxy(),
             logger=logger,
             debug_mode=self.get_config("behavior.debug_mode", False),
+            budget=budget,
         )
 
         elapsed = (datetime.now() - start_time).total_seconds()
 
         if not video_data:
-            await self.send_text(f"❌ 视频生成失败 ({elapsed:.2f}s)\n错误: {last_error}")
+            await self._send_text(f"❌ 视频生成失败 ({elapsed:.2f}s)\n错误: {last_error}")
             return True, "所有尝试均失败", True
 
+        if not budget.can_start(minimum=5.0):
+            logger.warning("时间预算耗尽，已生成但不再发送视频")
+            await self._send_text("❌ 生成耗时超出本次处理预算，视频未发送，请重试。")
+            return True, "生成超时未发送", True
+
         group_id, user_id = self._resolve_send_target()
-        success, send_error = await send_video_via_napcat(
+        success, send_error = await send_video_media(
             video_base64=video_data,
+            ctx=getattr(self, "ctx", None),
+            stream_id=self._get_stream_id(),
             group_id=group_id,
             user_id=user_id,
             napcat_host=self.get_config("api.napcat_host", "napcat"),
             napcat_port=self.get_config("api.napcat_port", 3033),
             logger=logger,
+            budget=budget,
         )
 
         if success:
-            await self.send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")
+            await self._send_text(f"✅ 视频生成完成 ({elapsed:.2f}s)")
             return True, "视频生成成功", True
 
-        await self.send_text(f"❌ 视频发送失败: {send_error}")
+        await self._send_text(f"❌ 视频发送失败: {send_error}")
         return True, f"视频发送失败: {send_error}", True

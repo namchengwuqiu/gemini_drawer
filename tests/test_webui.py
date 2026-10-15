@@ -91,12 +91,15 @@ def test_key_edit_keeps_latest_usage_state_order_and_unknown_fields(store):
     detail = web.detail("keys", web.list_records("keys")["rows"][0]["id"])
     old_data, old_config = data.data_file.read_bytes(), config.read_bytes()
     keys.record_key_usage("test-secret-key-one", False, force_disable=True)
+    # 记账会更新 last_used；页面编辑必须保留这次记账后的最新值
+    latest_last_used = json.loads(keys.keys_file.read_text())["keys"][0]["last_used"]
+    assert latest_last_used != "yesterday"
     web.change("keys", "save", detail["id"], detail["version"], {"value": "", "max_errors": 9, "type": "google"})
     saved = json.loads(keys.keys_file.read_text())
     assert [key["value"] for key in saved["keys"]] == ["test-secret-key-one", "test-secret-key-two"]
     key = saved["keys"][0]
     assert key["error_count"] == 3 and key["status"] == "disabled"
-    assert key["last_used"] == "yesterday" and key["custom"] == "preserve" and key["max_errors"] == 9
+    assert key["last_used"] == latest_last_used and key["custom"] == "preserve" and key["max_errors"] == 9
     assert saved["current_index"] == 7
     assert data.data_file.read_bytes() == old_data and config.read_bytes() == old_config
     detail = web.detail("keys", detail["id"])
@@ -147,6 +150,24 @@ def test_invalid_channel_is_not_saved(store, payload):
     with pytest.raises(ValueError):
         web.change("channels", "save", "bad", "", payload)
     assert data.data_file.read_bytes() == before
+
+
+def test_unknown_channel_url_requires_explicit_protocol(store):
+    """与 /添加渠道 一致：无法识别类型的 URL 必须显式指定协议（F10）。"""
+    web, data, _, _ = store
+    before = data.data_file.read_bytes()
+    with pytest.raises(ValueError, match="显式指定"):
+        web.change("channels", "save", "newbad", "", {"url": "https://example.com/weird-path"})
+    assert data.data_file.read_bytes() == before
+
+    web.change("channels", "save", "newbad", "",
+               {"url": "https://example.com/weird-path", "protocol": "images_json"})
+    assert data.get_channels()["newbad"]["protocol"] == "images_json"
+
+    # 仅清除协议、不重新提交 URL 的存量编辑仍可保存（不追溯卡死旧记录）。
+    detail = web.detail("channels", "newbad")
+    web.change("channels", "save", "newbad", detail["version"], {"protocol": ""})
+    assert "protocol" not in data.get_channels()["newbad"]
 
 
 def test_concurrent_usage_updates_and_new_records_are_not_lost(store):

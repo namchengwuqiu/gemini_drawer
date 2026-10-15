@@ -3,8 +3,9 @@ Gemini Drawer 宿主桥接层
 
 本模块是插件中**唯一**允许 import 宿主内部模块（src.*）的地方。
 
-插件正常运行只依赖 maibot_sdk 提供的能力；但"取回复消息里的图片"这一路径
-在 SDK 的 message capability 拿不到数据时，需要回落到宿主数据库直查。
+插件正常运行优先依赖 maibot_sdk 提供的能力；命令 RPC 只携带图片 hash 时，
+当前消息尚未入库，需要按 hash 读取已保存的图片。历史消息的 SDK 查询不可用时，
+也可通过此处查询宿主数据库。
 把这层依赖收敛在一处的好处：
 
 - 宿主重构 src.* 时只需改这一个文件
@@ -17,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Optional
 
 # ── 日志 ─────────────────────────────────────────────────────
@@ -48,6 +50,48 @@ except Exception:  # pragma: no cover - 取决于宿主环境
     _Messages = None
 
 HAS_DB: bool = _Messages is not None
+
+
+async def image_from_hash(binary_hash: Any, image_type: str) -> Optional[bytes]:
+    """按消息段的 SHA-256 读取宿主图片缓存，不依赖当前消息已经入库。"""
+    if not HAS_DB or image_type not in ('image', 'emoji'):
+        return None
+    if not isinstance(binary_hash, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', binary_hash):
+        return None
+
+    from ..utils.limits import MAX_IMAGE_BYTES
+
+    try:
+        from sqlmodel import select
+
+        from src.common.database.database import get_db_session
+        from src.common.database.database_model import Images, ImageType
+        from src.common.utils.image_path import resolve_stored_image_path
+
+        def _read() -> Optional[bytes]:
+            # 只使用图片表登记的路径；查询及受限文件读取都放在线程中执行。
+            kind = ImageType.IMAGE if image_type == 'image' else ImageType.EMOJI
+            with get_db_session(auto_commit=False) as session:
+                record = session.exec(
+                    select(Images).filter_by(image_hash=binary_hash.lower(), image_type=kind).limit(1)
+                ).first()
+                if record is None or record.no_file_flag:
+                    return None
+                image_path = resolve_stored_image_path(record.full_path)
+            if image_path.stat().st_size > MAX_IMAGE_BYTES:
+                logger.warning("宿主缓存图片超过大小上限，已跳过")
+                return None
+            with image_path.open('rb') as image_file:
+                data = image_file.read(MAX_IMAGE_BYTES + 1)
+            if len(data) > MAX_IMAGE_BYTES:
+                logger.warning("宿主缓存图片超过大小上限，已跳过")
+                return None
+            return data or None
+
+        return await asyncio.to_thread(_read)
+    except Exception as exc:
+        logger.warning(f"按 hash 读取宿主缓存图片失败: {type(exc).__name__}")
+        return None
 
 
 async def fetch_mai_message(message_id: Any) -> Optional[Any]:

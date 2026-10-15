@@ -2,6 +2,13 @@
 
 参考图直接使用 Data URI Base64 作为 keyframe 首帧。下载与发送继续由
 core.video 负责；这里不上传图片，也不在轮询失败时重新创建任务。
+
+错误按结构化契约上报（core/errors.py）：
+
+- 创建阶段的 HTTP 失败抛 ``UpstreamHTTPError(stage="submit")``，由调用方
+  结合创建状态决定是否换渠道；尚未收到创建成功响应的 HTTP 错误可继续下一渠道；
+- 任务创建之后（含查询阶段）的任何失败都抛 ``AgnesVideoPendingError``，
+  它继承 ``SubmissionUncertainError``，调用方不得换渠道重新生成。
 """
 from __future__ import annotations
 
@@ -14,7 +21,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-from ..utils import extract_text_failure_reason
+from .errors import SubmissionUncertainError, UpstreamHTTPError, GenerationRejectedError, GenerationState
+from ..utils import extract_text_failure_reason, sanitize_upstream_text
+from ..utils.http import request_capped
+from ..utils.log import redact_request
 
 DEFAULT_MODEL = "agnes-video-2.5-flash"
 # 宿主视频组件上限为 600 秒；生成阶段最多 420 秒，为下载和发送留出时间。
@@ -23,8 +33,12 @@ POLL_INTERVAL = 5.0
 MAX_RETRY_DELAY = 30.0
 
 
-class AgnesVideoPendingError(RuntimeError):
+class AgnesVideoPendingError(SubmissionUncertainError):
     """服务端可能仍有任务在运行，调用方不应切换 Key/渠道重复提交。"""
+
+
+class AgnesResponseFormatError(AgnesVideoPendingError):
+    """Agnes 返回了无法解析的响应；任务可能仍在运行，不重新提交。"""
 
 
 def _model_name(endpoint: Dict[str, Any]) -> str:
@@ -78,7 +92,13 @@ def _query_url(api_url: str) -> str:
     return urlunsplit((url.scheme, url.netloc, path, "", ""))
 
 
-def _raise_for_api_error(response: httpx.Response, action: str) -> None:
+def _raise_for_api_error(response: httpx.Response, action: str, *, stage: str) -> None:
+    """把非 2xx 响应转成结构化错误，调用方据此决定是否换渠道（F3）。
+
+    - 创建阶段（stage="submit"）：保留 HTTP 状态码，由视频渠道循环决定轮换与 Key 记账；
+    - 查询阶段（stage="poll"）：任务已经创建，只能围绕同一任务恢复，
+      任何不可重试的状态码都抛 AgnesVideoPendingError，绝不重新生成。
+    """
     if response.is_success:
         return
     reason = response.reason_phrase
@@ -89,16 +109,27 @@ def _raise_for_api_error(response: httpx.Response, action: str) -> None:
     except ValueError:
         pass
     # 只提取可读错误，不回显包含参考图 Base64 的整个响应/请求体。
-    raise RuntimeError(f"Agnes {action}失败 (HTTP {response.status_code}): {reason}")
+    reason = "上游拒绝任务请求"
+    if stage == "poll":
+        raise AgnesVideoPendingError(
+            f"Agnes {action}失败 (HTTP {response.status_code}): {reason}；"
+            "任务已创建，为避免重复生成，不重新提交"
+        )
+    raise UpstreamHTTPError(
+        response.status_code,
+        stage="submit",
+        body=response.text,
+        reason=reason,
+    )
 
 
 def _json_object(response: httpx.Response) -> Dict[str, Any]:
     try:
         data = response.json()
     except ValueError as exc:
-        raise RuntimeError("Agnes 视频接口返回了无效 JSON") from exc
+        raise AgnesResponseFormatError("Agnes 视频接口返回了无效 JSON") from exc
     if not isinstance(data, dict):
-        raise RuntimeError("Agnes 视频接口响应必须是 JSON 对象")
+        raise AgnesResponseFormatError("Agnes 视频接口响应必须是 JSON 对象")
     return data
 
 
@@ -126,10 +157,12 @@ def _task_result(data: Dict[str, Any]) -> Optional[str]:
         # completed 与结果地址发布可能不同步；让调用方继续查询同一任务。
         return None
     if status == "failed":
-        reason = extract_text_failure_reason(data) or "未知错误"
-        raise RuntimeError(f"Agnes 视频生成失败: {reason}")
+        raise GenerationRejectedError("Agnes 视频任务明确报告生成失败")
     if status not in ("queued", "in_progress"):
-        raise RuntimeError(f"Agnes 返回了未知视频任务状态: {status!r}")
+        # 任务已创建，返回了无法识别的状态：不能据此重新生成（F3）。
+        raise AgnesVideoPendingError(
+            "Agnes 返回了未知视频任务状态；任务已创建，不重新提交"
+        )
     return None
 
 
@@ -160,7 +193,16 @@ async def generate_agnes_video(
     mime_type: Optional[str],
     proxy: Optional[str],
     logger: Any,
+    timeout: Optional[float] = None,
+    state: Optional[GenerationState] = None,
 ) -> str:
+    """创建并轮询一个 Agnes 视频任务，返回成片 URL。
+
+    Args:
+        timeout: 生成阶段总超时；None 时使用模块级 GENERATION_TIMEOUT。
+            调用方用整体预算收敛该值（见 core/budget.py）。
+    """
+    state = state or GenerationState()
     api_url = endpoint["url"]
     poll_url = _query_url(api_url)
     payload = build_agnes_video_payload(endpoint, prompt, base64_img, mime_type)
@@ -176,23 +218,19 @@ async def generate_agnes_video(
         if data.get("status") != "completed" or waiting_for_url:
             return
         waiting_for_url = True
-        # 只打印字段名用于定位协议变化，不打印提示词、参考图、URL 或密钥。
-        fields = ", ".join(sorted(data))
-        metadata = data.get("metadata")
-        metadata_fields = ", ".join(sorted(metadata)) if isinstance(metadata, dict) else "无"
-        logger.warning(
-            f"[Agnes 视频] 任务已完成但视频地址尚不可用，继续查询同一任务；"
-            f"响应字段: {fields}；metadata 字段: {metadata_fields}"
-        )
+        # 只记录本地固定诊断，字段名也可能包含上游敏感数据。
+        logger.warning("[Agnes 视频] 任务已完成但地址尚不可用，继续查询同一任务")
 
-    async with httpx.AsyncClient(
+    async with redact_request(endpoint.get("key")), httpx.AsyncClient(
+        headers={"Accept-Encoding": "identity"},
         proxy=proxy, timeout=60.0, follow_redirects=True,
+        event_hooks={"response": [state.observe]},
     ) as client:
         async def submit_and_poll() -> str:
             nonlocal video_id
             # 创建请求不自动重试，避免网络超时时重复提交/计费。
             try:
-                response = await client.post(api_url, json=payload, headers=headers)
+                response = await request_capped(client, "POST", api_url, json=payload, headers=headers)
             except (
                 httpx.ReadTimeout, httpx.WriteTimeout,
                 httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
@@ -200,16 +238,21 @@ async def generate_agnes_video(
                 raise AgnesVideoPendingError(
                     "Agnes 视频任务提交结果不确定，服务端可能已接收任务；为避免重复生成，不自动重试"
                 ) from exc
-            _raise_for_api_error(response, "创建视频任务")
+            _raise_for_api_error(response, "创建视频任务", stage="submit")
             data = _json_object(response)
             result = _task_result(data)
             if result:
                 return result
             video_id = data.get("video_id")
             if not isinstance(video_id, str) or not video_id.strip():
-                raise RuntimeError("Agnes 创建任务未返回 video_id，不能使用 id/task_id 代替查询")
+                # 创建请求已被接受（HTTP 200）却拿不到 video_id：任务可能已在
+                # 服务端创建，无法恢复也无法证明未创建，不自动换渠道（F3）。
+                raise AgnesVideoPendingError(
+                    "Agnes 创建任务未返回 video_id，不能使用 id/task_id 代替查询；"
+                    "无法确认任务是否已创建，不自动切换渠道"
+                )
             video_id = video_id.strip()
-            logger.info(f"[Agnes 视频] 任务已创建: {video_id}")
+            logger.info("[Agnes 视频] 任务已创建，开始查询同一任务")
             note_missing_result_url(data)
             params = {"video_id": video_id, "model_name": payload["model"]}
             delay = POLL_INTERVAL
@@ -217,8 +260,8 @@ async def generate_agnes_video(
             while True:
                 await asyncio.sleep(delay)
                 try:
-                    response = await client.get(
-                        poll_url, params=params, headers=headers, timeout=30.0,
+                    response = await request_capped(
+                        client, "GET", poll_url, params=params, headers=headers, timeout=30.0,
                     )
                 except httpx.RequestError as exc:
                     delay = min(delay * 2, MAX_RETRY_DELAY)
@@ -230,18 +273,27 @@ async def generate_agnes_video(
                     delay = _retry_delay(response, delay)
                     logger.warning(f"[Agnes 视频] 查询返回 HTTP {response.status_code}，{delay:g} 秒后重试同一任务")
                     continue
-                _raise_for_api_error(response, "查询视频任务")
-                data = _json_object(response)
+                _raise_for_api_error(response, "查询视频任务", stage="poll")
+                try:
+                    data = _json_object(response)
+                except AgnesResponseFormatError:
+                    # 查询返回了无法解析的响应：继续查询同一任务，不重新生成。
+                    delay = min(delay * 2, MAX_RETRY_DELAY)
+                    logger.warning(
+                        f"[Agnes 视频] 查询返回了无效 JSON，{delay:g} 秒后重试同一任务"
+                    )
+                    continue
                 result = _task_result(data)
                 if result:
                     return result
                 note_missing_result_url(data)
                 # 成功查询后保留已经退避的间隔，避免恢复高频轮询后再次触发 429。
 
+        generation_timeout = GENERATION_TIMEOUT if timeout is None else max(0.0, float(timeout))
         try:
-            return await asyncio.wait_for(submit_and_poll(), timeout=GENERATION_TIMEOUT)
+            return await asyncio.wait_for(submit_and_poll(), timeout=generation_timeout)
         except asyncio.TimeoutError as exc:
-            detail = f" (video_id={video_id})" if video_id else ""
+            detail = "（任务已创建）" if video_id else ""
             if waiting_for_url:
                 raise AgnesVideoPendingError(
                     f"Agnes 服务端已报告完成，但一直未返回可用视频地址（metadata.url/url）{detail}"

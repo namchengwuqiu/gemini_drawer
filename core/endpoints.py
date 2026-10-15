@@ -144,8 +144,3 @@ def build_video_endpoints(logger=None) -> List[Dict[str, Any]]:
             )
 
     return endpoints
-
-
-async def get_video_endpoints(config_getter=None, logger=None) -> List[Dict[str, Any]]:
-    """异步包装，保留给现有调用方；config_getter 已不再使用。"""
-    return build_video_endpoints(logger=logger)

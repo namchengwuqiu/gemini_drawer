@@ -10,14 +10,23 @@ HelpCommand (/基咪绘图帮助):
     - 用户可用的绘图指令说明
     - 管理员专用命令（仅对管理员显示）
 
-帮助信息通过原生 send.forward() 转发消息发送，分为多个节点展示不同类别的内容。
-管理员命令部分会根据发送者是否在管理员列表中动态显示。
+帮助信息优先通过注入的 SDK 原生上下文（``ctx.send.forward()``）发送，上下文
+不可用时回退兼容层；管理员命令只放在管理员节点里，普通用户节点不再出现
+管理员指令（P2-12）。
 """
-from typing import Tuple, Optional
-from maibot_sdk.compat.base import BaseCommand
-from ..core.managers import data_manager
+from typing import Optional, Tuple
 
-class HelpCommand(BaseCommand):
+from maibot_sdk.compat.base import BaseCommand
+
+from ..config import PLUGIN_DISPLAY_NAME
+from ..core.host_bridge import get_plugin_logger
+from ..core.managers import data_manager
+from .base_commands import CtxSendMixin
+
+logger = get_plugin_logger("plugin.gemini_drawer")
+
+
+class HelpCommand(CtxSendMixin, BaseCommand):
     command_name: str = "gemini_help"
     command_description: str = "显示Gemini绘图插件的帮助信息和所有可用指令。"
     command_pattern: str = "/基咪绘图帮助"
@@ -28,7 +37,7 @@ class HelpCommand(BaseCommand):
         banana_enabled = self.get_config("behavior.enable_banana_prompts", True)
         banana_show_restricted = self.get_config("behavior.show_restricted", False)
         banana_prompts = data_manager.get_banana_prompts(show_restricted=banana_show_restricted) if banana_enabled else {}
-        bot_name = "Gemini Drawer"
+        bot_name = PLUGIN_DISPLAY_NAME
 
         # 节点1: 标题和介绍
         header_text = "🎨 Gemini 绘图插件帮助 🎨\n"
@@ -36,7 +45,7 @@ class HelpCommand(BaseCommand):
         header_text += "━━━━━━━━━━━━━━━━━━━━\n"
         header_text += "💡 Tip: 管理员可以使用 /添加提示词 动态添加新指令哦！"
 
-        # 节点2: 用户指令
+        # 节点2: 用户指令（只列普通用户可用的命令）
         user_text = "✨ 用户指令 ✨\n━━━━━━━━━━━━━━━━━━━━\n"
         user_text += "【绘图指令】\n"
         user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片\n"
@@ -44,8 +53,7 @@ class HelpCommand(BaseCommand):
         user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用\n"
         user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图\n"
         user_text += "▪️ /图生视频 {描述词}: 图生视频，需配合图片使用\n"
-        user_text += "▪️ /文生视频 {描述词}: 文生视频，只需文字描述\n"
-        user_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容\n\n"
+        user_text += "▪️ /文生视频 {描述词}: 文生视频，只需文字描述\n\n"
         user_text += "【使用方法】\n"
         user_text += "1. 回复图片 + 指令\n"
         user_text += "2. @用户 + 指令\n"
@@ -55,7 +63,6 @@ class HelpCommand(BaseCommand):
         if banana_enabled:
             user_text += "\n\n【大香蕉扩展词库】\n"
             user_text += f"▪️ 当前可用 {len(banana_prompts)} 条"
-            user_text += "\n▪️ /大香蕉提示词 {关键词}: 搜索扩展提示词"
             user_text += "\n▪️ 搜索结果可直接用 `/+ 完整名称` 调用"
         else:
             user_text += "\n\n【大香蕉扩展词库】\n▪️ 当前未启用"
@@ -76,8 +83,10 @@ class HelpCommand(BaseCommand):
         user_id_from_msg = getattr(self.message.message_info.user_info, 'user_id', None)
         admin_list = self.get_config("general.admins", [])
         str_admin_list = [str(admin) for admin in admin_list]
+        is_admin = bool(user_id_from_msg) and str(user_id_from_msg) in str_admin_list
 
-        if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
+        admin_text = ""
+        if is_admin:
             admin_text = "🔑 管理员指令 🔑\n━━━━━━━━━━━━━━━━━━━━\n"
             admin_text += "▪️ /渠道添加key: 添加渠道API Key\n"
             admin_text += "▪️ /渠道删除key: 删除渠道API Key\n"
@@ -87,6 +96,7 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /添加提示词 {名称}:{prompt}: 动态添加绘图风格\n"
             admin_text += "▪️ /修改提示词 {名称}:{新prompt}: 修改已有绘图风格\n"
             admin_text += "▪️ /删除提示词 {名称}: 删除绘图风格\n"
+            admin_text += "▪️ /查看提示词 {名称}: 查看指定提示词的完整内容\n"
             admin_text += "▪️ /添加渠道: 添加自定义API渠道（含 Agnes 图片/视频）\n"
             admin_text += "▪️ /删除渠道: 删除自定义API渠道\n"
             admin_text += "▪️ /渠道修改模型: 修改渠道模型\n"
@@ -94,26 +104,30 @@ class HelpCommand(BaseCommand):
             admin_text += "▪️ /禁用渠道: 禁用指定渠道\n"
             admin_text += "▪️ /渠道设置流式 {名称} {true|false}: 设置渠道是否使用流式请求\n"
             admin_text += "▪️ /渠道设置视频 {名称} {true|false}: 设置渠道是否用于视频生成\n"
+            admin_text += "▪️ /渠道设置协议 {名称} {协议|自动}: 显式指定渠道请求协议\n"
+            admin_text += "▪️ /渠道设置输出格式 {名称} {url|b64_json|默认}: 设置渠道输出格式\n"
             admin_text += "▪️ /渠道列表: 查看所有渠道状态\n"
             admin_text += "▪️ /渠道同步大香蕉: 手动同步大香蕉扩展词库\n"
+            admin_text += "▪️ /大香蕉提示词 {关键词}: 搜索扩展提示词\n"
             admin_text += "▪️ /渠道设置猎奇 开启|关闭: 显示或隐藏大香蕉限制级提示词"
             messages.append({"user_id": "0", "nickname": bot_name, "segments": [{"type": "text", "content": admin_text}]})
 
-        # 使用原生 send.forward() API 发送转发消息
         stream_id = self._get_stream_id()
-        if stream_id:
-            from maibot_sdk.compat._context_holder import get_context
-            ctx = get_context()
-            if ctx:
-                await ctx.send.forward(messages, stream_id)
-            else:
-                # 兜底: 如果无法获取原生上下文，则用纯文本发送
-                all_text = header_text + "\n\n" + user_text
-                if user_id_from_msg and str(user_id_from_msg) in str_admin_list:
-                    all_text += "\n\n" + admin_text
-                await self.send_text(all_text)
-        else:
-            await self.send_text("❌ 无法获取消息流ID")
+        if not stream_id:
+            await self._send_text("❌ 无法获取消息流ID")
             return False, "无法获取stream_id", True
 
+        # 优先使用注入的原生上下文，不再依赖兼容层的上下文持有者（P2-2）
+        ctx = getattr(self, "ctx", None)
+        if ctx is not None:
+            try:
+                await ctx.send.forward(messages, stream_id)
+                return True, "帮助信息已发送", True
+            except Exception as e:
+                logger.warning(f"发送帮助转发消息失败，回退纯文本: {e}")
+
+        all_text = header_text + "\n\n" + user_text
+        if admin_text:
+            all_text += "\n\n" + admin_text
+        await self._send_text(all_text)
         return True, "帮助信息已发送", True

@@ -4,6 +4,7 @@
 - extract_all_image_data(): 从各家 API 响应中提取所有图片（URL 或 Base64）
 - extract_video_data(): 从 API 响应中提取视频（Base64 或 "url:" 前缀的地址）
 """
+import json
 import re
 from typing import Any, Dict, List, Optional
 
@@ -266,6 +267,33 @@ def extract_text_failure_reason(response_data: Dict[str, Any], max_length: int =
         return ""
     return ""
 
+def extract_http_error_reason(response: Any, max_length: int = 200) -> str:
+    """从错误响应（httpx.Response、原始 bytes/str）里提取简短可读的原因。
+
+    只取 message/error 等字段的简短内容，解析失败时返回空串。返回值仍可能
+    含上游的凭据或内网地址，进入用户文案与日志前必须经过
+    ``utils.log.sanitize_upstream_text``（结构化错误在构造时统一处理）。
+    """
+    if isinstance(response, (bytes, bytearray)):
+        try:
+            data = json.loads(bytes(response).decode("utf-8", "ignore"))
+        except Exception:
+            return ""
+    elif isinstance(response, str):
+        try:
+            data = json.loads(response)
+        except Exception:
+            return ""
+    else:
+        try:
+            data = response.json()
+        except Exception:
+            return ""
+    if not isinstance(data, dict):
+        return ""
+    return extract_text_failure_reason(data, max_length=max_length)
+
+
 async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
     """从API响应中提取所有图片数据（URL或Base64），支持多图响应
     
@@ -283,7 +311,7 @@ async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
             for item in response_data["data"]:
                 if isinstance(item, dict):
                     if "url" in item and item["url"]:
-                        logger.info(f"从豆包响应中提取到图片URL: {item['url'][:100]}...")
+                        logger.info("从豆包响应中提取到图片URL")
                         results.append(item["url"])
                     elif "b64_json" in item and item["b64_json"]:
                         logger.info("从豆包响应中提取到 base64 图片数据")
@@ -374,8 +402,7 @@ async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
                                 logger.info("从响应中提取到图片 base64 数据 (markdown 格式)")
                                 results.append(b64_data)
                             else:
-                                log_url = url[:100] + "..." if len(url) > 100 else url
-                                logger.info(f"从响应中提取到图片URL: {log_url}")
+                                logger.info("从响应中提取到图片URL")
                                 results.append(url)
                         if results:
                             return results
@@ -384,7 +411,7 @@ async def extract_all_image_data(response_data: Dict[str, Any]) -> List[str]:
                     all_img_urls = re.findall(r"https?://[^\s]+\.(?:png|jpg|jpeg|gif|webp|bmp|ico|tiff?)(?:\?[^\s]*)?", content_text, re.IGNORECASE)
                     if all_img_urls:
                         for url in all_img_urls:
-                            logger.info(f"从响应中提取到裸图片URL: {url[:100]}...")
+                            logger.info("从响应中提取到裸图片URL")
                             results.append(url)
                         return results
                     
@@ -490,14 +517,14 @@ async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
                 match_video_url = re.search(r"(https?://[^\s<>\"]+\.mp4(?:\?[^\s<>\"]*)?)", content_data)
                 if match_video_url:
                     video_url = match_video_url.group(1)
-                    logger.info(f"从响应中提取到视频 URL: {video_url}")
+                    logger.info("从响应中提取到视频 URL")
                     return f"url:{video_url}"
                 
                 # 匹配 HTML <source> 标签中的视频 URL
                 match_source_tag = re.search(r'<source[^>]+src="([^"]+)"', content_data)
                 if match_source_tag:
                     video_url = match_source_tag.group(1)
-                    logger.info(f"从响应中提取到视频 URL (HTML source 标签): {video_url}")
+                    logger.info("从响应中提取到视频 URL (HTML source 标签)")
                     return f"url:{video_url}"
         
         # Gemini 格式响应解析
@@ -529,3 +556,20 @@ async def extract_video_data(response_data: Dict[str, Any]) -> Optional[str]:
         return None
     except Exception:
         return None
+
+
+def interpret_send_result(result: Any) -> bool:
+    """判定 send 能力的返回值是否代表真的发出去了。
+
+    返回结构随 SDK 版本不同：
+    - SDK >= 2.8 且 return_details=True：``{"sent": bool, "message_id": str | None}``，
+      **没有** ``success`` 字段，只按 ``success`` 判断会恒为失败。
+    - 更早的 SDK 或宿主原始返回：``{"success": bool, "sent": bool, ...}``。
+    - 未开 return_details 时统一收敛成 bool。
+    所以只校验实际存在的标志位，全部为真才算成功；一个都没有则视为失败，
+    避免非空字典被当成 True。
+    """
+    if isinstance(result, dict):
+        flags = [result[key] for key in ("success", "sent") if key in result]
+        return bool(flags) and all(bool(flag) for flag in flags)
+    return bool(result)
