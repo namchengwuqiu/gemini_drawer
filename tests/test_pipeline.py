@@ -347,8 +347,10 @@ async def test_async_task_provider_uses_whole_task_timeout(mock_http, fake_keys,
 
 
 @pytest.mark.asyncio
-async def test_one_shot_provider_timeout_stops_without_failover(mock_http, fake_keys, monkeypatch):
-    """一次性 provider 的 fetch 超过 call.timeout：停止等待且不换端点（提交不确定）。"""
+async def test_one_shot_provider_timeout_retries_next_endpoint(mock_http, fake_keys, monkeypatch):
+    """一次性 provider 的 fetch 超过 call.timeout：绝对期限不被抬高，未收到响应则换端点。"""
+    calls = []
+
     class SlowOnceProvider:
         task_timeout = None
 
@@ -356,7 +358,8 @@ async def test_one_shot_provider_timeout_stops_without_failover(mock_http, fake_
             return HttpCall(url="https://task.example/api", timeout=0.01)
 
         async def fetch(self, call, client, logger, debug_mode=False):
-            # 单次请求 0.01 秒的绝对期限不能被抬高；验证超时后不换端点。
+            # 单次请求 0.01 秒的绝对期限不能被抬高；超时后继续下一个端点。
+            calls.append(call.url)
             await asyncio.sleep(0.05)
             return [IMG_B64]
 
@@ -369,8 +372,9 @@ async def test_one_shot_provider_timeout_stops_without_failover(mock_http, fake_
     )
 
     assert img == []
-    assert "未自动切换其他端点" in err
-    assert fake_keys.calls == []
+    assert calls == ["https://task.example/api", "https://task.example/api"]
+    assert "没有更多可用端点" in err
+    assert fake_keys.calls == []      # 结果不确定的超时不记 Key 失效
     assert mock_http["requests"] == []
 
 

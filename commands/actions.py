@@ -73,8 +73,6 @@ def is_command_message(message: Any) -> bool:
 class _DrawActionMixin:
     """Action 侧共享的准入校验、绘图与发图逻辑。"""
 
-    retry_unconfirmed_timeout: bool = False
-
     def _proxy(self) -> Optional[str]:
         return self.get_config("proxy.proxy_url") if self.get_config("proxy.enable") else None
 
@@ -149,7 +147,6 @@ class _DrawActionMixin:
             logger=logger,
             debug_mode=self.get_config("behavior.debug_mode", False),
             budget=budget,
-            retry_unconfirmed_timeout=self.retry_unconfirmed_timeout,
         )
 
     async def _send_images(self, img_data: List[str],
@@ -295,9 +292,6 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
 
 class _SelfieActionBase(_DrawActionMixin, BaseAction):
     """自拍类工具的共享逻辑：底图定位、提示词润色与同步执行。"""
-
-    #: 尚未收到成功响应时，允许在总预算内切换超时端点。
-    retry_unconfirmed_timeout: bool = True
 
     #: 润色模板的配置键
     polish_template_key: str = "selfie.polish_template"
@@ -569,7 +563,6 @@ class SelfieVideoAction(_SelfieActionBase):
                 logger=logger,
                 debug_mode=self.get_config("behavior.debug_mode", False),
                 budget=budget,
-                retry_unconfirmed_timeout=self.retry_unconfirmed_timeout,
             )
 
             if not video_data:

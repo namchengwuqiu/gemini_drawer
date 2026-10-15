@@ -8,8 +8,8 @@ Gemini Drawer 绘图管线
 
 - 整体时间预算（core/budget.py）：预算耗尽后不再开始新的端点或请求；每次
   任务协议的 fetch 使用独立任务期限，一次性请求使用该请求的绝对期限；
-- HTTP 错误响应继续切换端点；已接收的任务或传输中断导致提交结果不确定时
-  默认停止自动切换；自拍允许未收到成功响应的超时在总预算内继续轮换；
+- HTTP 错误响应继续切换端点；请求已发出但未收到成功响应时，读写超时或单端点
+  等待超时也在总预算内继续轮换（可能重复生成）；已接收结果的异常不再换端点；
 - Key 记账通过工作线程执行，不在事件循环里做同步文件读写；记账失败只记
   警告，绝不影响本次生成结果或触发换端点。
 """
@@ -88,14 +88,10 @@ async def run_drawing(
     debug_mode: bool = False,
     budget: Optional[TimeBudget] = None,
     attempts: Optional[DrawingAttempts] = None,
-    *,
-    retry_unconfirmed_timeout: bool = False,
 ) -> Tuple[List[str], str]:
     """依次尝试各端点直到成功。
 
     Args:
-        retry_unconfirmed_timeout: 自拍入口允许未收到成功响应的超时继续换端点；
-            仅影响生成阶段，仍可能在原服务产生重复任务。
         budget: 整体时间预算；预算不足时不再开始新的端点，期限耗尽后
             不发起任何新的生成请求。
 
@@ -197,7 +193,10 @@ async def run_drawing(
             last_error = str(e)
             break
         except (asyncio.TimeoutError, httpx.ReadTimeout, httpx.WriteTimeout, SubmissionUncertainError) as e:
-            if retry_unconfirmed_timeout and state.is_unconfirmed_timeout(e):
+            if state.is_unconfirmed_timeout(e):
+                # 请求已发出但没等到成功响应。上游可能仍在生成，换端点意味着
+                # 可能重复出图与计费；但只试一个端点就失败同样不可接受，因此
+                # 在总预算内继续轮换（已接收结果的异常不走这里）。
                 last_error = f"端点 {endpoint.type} 等待响应超时，服务端结果尚未确认"
                 if i + 1 >= len(endpoint_list):
                     last_error += "；没有更多可用端点"
@@ -207,7 +206,7 @@ async def run_drawing(
                 ):
                     last_error += "；剩余时间不足，未继续尝试"
                     break
-                logger.warning(f"{last_error}；按自拍重试策略继续尝试下一个端点")
+                logger.warning(f"{last_error}；继续尝试下一个端点")
                 await asyncio.sleep(RETRY_DELAY)
                 continue
             if not isinstance(e, asyncio.TimeoutError):

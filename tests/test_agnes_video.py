@@ -360,7 +360,7 @@ async def test_agnes_failure_can_fall_back_to_existing_chat_video(mock_api, monk
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("phase", ["create", "poll"])
-async def test_pending_task_does_not_switch_keys_or_channels(mock_api, monkeypatch, phase):
+async def test_pending_task_rotation_depends_on_creation_state(mock_api, monkeypatch, phase):
     monkeypatch.setattr(agnes_video, "GENERATION_TIMEOUT", 0.01)
     keys = Mock()
     monkeypatch.setattr(video, "key_manager", keys)
@@ -378,8 +378,15 @@ async def test_pending_task_does_not_switch_keys_or_channels(mock_api, monkeypat
     other = {**endpoint(), "key": "another-key"}
     result, error = await video.process_video_generation("p", None, None, [endpoint(), other], None, LOGGER)
     assert result is None
-    assert "未自动切换其他渠道" in error
-    assert sum(r.method == "POST" for r in mock_api["requests"]) == 1
+    posts = sum(r.method == "POST" for r in mock_api["requests"])
+    if phase == "create":
+        # 创建阶段没收到成功响应：换 Key/渠道继续尝试，两个端点都试过。
+        assert posts == 2
+        assert "没有更多可用端点" in error
+    else:
+        # 任务已创建（video_id 已拿到）：围绕原任务轮询，不得换渠道重建。
+        assert posts == 1
+        assert "未自动切换其他渠道" in error
     # video_id 含 429 也不能被旧的字符串判断误认为密钥额度不足。
     keys.record_key_usage.assert_not_called()
 

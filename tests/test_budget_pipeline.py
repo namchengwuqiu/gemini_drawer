@@ -95,8 +95,8 @@ async def test_request_timeout_is_clamped_to_remaining_budget(mock_http, fake_ke
 
 
 @pytest.mark.asyncio
-async def test_uncertain_submission_stops_failover(mock_http, fake_keys):
-    """读超时说明请求已发出：提交结果不确定，不得换端点重复生成（P0-2）。"""
+async def test_unconfirmed_timeout_failover_tries_next_endpoint(mock_http, fake_keys):
+    """读超时说明请求已发出但没收到结果：总预算内换端点，不记 Key 失效。"""
     def handler(request):
         raise httpx.ReadTimeout("submission may have succeeded", request=request)
 
@@ -107,9 +107,9 @@ async def test_uncertain_submission_stops_failover(mock_http, fake_keys):
     )
 
     assert img == []
-    assert "未自动切换其他端点" in err
-    assert len(mock_http["requests"]) == 1   # 第二个端点没有被提交
-    assert fake_keys.calls == []              # 不确定的失败不记 Key 失效
+    assert "没有更多可用端点" in err
+    assert len(mock_http["requests"]) == 2    # 两个端点都尝试过
+    assert fake_keys.calls == []              # 结果不确定的失败不记 Key 失效
 
 
 @pytest.mark.asyncio

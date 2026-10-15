@@ -7,7 +7,8 @@ Gemini Drawer 视频生成
 失败响应与已接收状态共同决定是否换渠道，与图片链路保持一致：
 
 - 尚未收到创建成功响应时，HTTP 错误（含 5xx/408）→ 尝试下一渠道；服务端故障与限流不记 Key 失效；
-- 已收到创建成功响应 → 停止自动切换；自拍视频允许未收到成功响应的超时在总预算内轮换；
+- 已收到创建成功响应 → 停止自动切换；尚未收到成功响应时，读写超时或单渠道
+  等待超时也在总预算内轮换（可能重复生成）；
 - 成片下载失败 → 只重试下载同一结果（先带认证头、再不带），绝不重新生成。
 
 整体时间预算（core/budget.py）覆盖创建、轮询、下载与发送；期限耗尽后不再
@@ -230,8 +231,6 @@ async def process_video_generation(
     logger,
     debug_mode: bool = False,
     budget: Optional[TimeBudget] = None,
-    *,
-    retry_unconfirmed_timeout: bool = False,
 ) -> Tuple[Optional[str], str]:
     """
     处理视频生成请求，返回 (video_base64_data, error_message)
@@ -244,8 +243,6 @@ async def process_video_generation(
         proxy: 代理地址
         logger: 日志对象
         budget: 整体时间预算；预算耗尽后不再开始新的渠道
-        retry_unconfirmed_timeout: 自拍视频允许未收到成功响应的超时继续换端点；
-            不适用于已创建的任务或发送阶段。
     """
     last_error = ""
 
@@ -648,7 +645,9 @@ async def process_video_generation(
             last_error = str(e)
             break
         except (asyncio.TimeoutError, httpx.ReadTimeout, httpx.WriteTimeout, SubmissionUncertainError) as e:
-            if retry_unconfirmed_timeout and state.is_unconfirmed_timeout(e):
+            if state.is_unconfirmed_timeout(e):
+                # 请求已发出但没等到成功响应：上游可能仍在生成，换渠道意味着可能
+                # 重复生成；仍留一个渠道就不重试的做法代价更大，因此继续轮换。
                 last_error = f"端点 {endpoint_type} 等待响应超时，服务端结果尚未确认"
                 if endpoint_index + 1 >= len(endpoints):
                     last_error += "；没有更多可用端点"
@@ -658,7 +657,7 @@ async def process_video_generation(
                 ):
                     last_error += "；剩余时间不足，未继续尝试"
                     break
-                logger.warning(f"[视频] {last_error}；按自拍视频重试策略继续尝试下一个端点")
+                logger.warning(f"[视频] {last_error}；继续尝试下一个端点")
                 await asyncio.sleep(1)
                 continue
             if not isinstance(e, asyncio.TimeoutError):

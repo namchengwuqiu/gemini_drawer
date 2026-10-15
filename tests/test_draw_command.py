@@ -223,6 +223,38 @@ async def test_generation_failure_reports_reason_to_user(wire):
     assert any("生成失败" in t and "SAFETY" in t for t in cmd.sent_texts)
 
 
+async def test_unconfirmed_timeout_rotates_to_next_endpoint(wire, monkeypatch):
+    """命令侧同样适用超时轮换：首个端点没等到结果就换下一个端点出图。"""
+    attempts = []
+    second_url = "https://second.example/v1/chat/completions"
+    monkeypatch.setattr(pipeline, "RETRY_DELAY", 0.0)
+    monkeypatch.setattr(
+        base_commands, "build_drawing_endpoints",
+        lambda: [
+            {"type": "custom_first", "url": GEMINI_URL, "key": "k1", "model": None, "stream": False},
+            {"type": "custom_second", "url": second_url, "key": "k2", "model": None, "stream": False},
+        ],
+    )
+
+    def handler(request):
+        attempts.append(str(request.url))
+        if str(request.url).startswith(GEMINI_URL):
+            raise httpx.ReadTimeout("response not confirmed", request=request)
+        return httpx.Response(200, json=_gemini_ok())
+
+    wire["handler"] = handler
+    cmd = make_cmd()
+
+    ok, reason, stop = await cmd.execute()
+
+    assert (ok, reason, stop) == (True, "绘图成功", True)
+    # Gemini 渠道会把 Key 拼进查询串，比较主机与顺序即可。
+    assert len(attempts) == 2
+    assert attempts[0].startswith(GEMINI_URL)
+    assert attempts[1] == second_url
+    assert len(cmd.ctx.hybrid_calls) == 1
+
+
 async def test_no_endpoints_configured(wire, monkeypatch):
     monkeypatch.setattr(base_commands, "build_drawing_endpoints", list)
     cmd = make_cmd()

@@ -7,9 +7,9 @@
 - ``SubmissionUncertainError``：提交结果不确定（请求可能已被上游接收）；
 - ``submission_state_for(...)``：把异常映射为 rejected / uncertain 两种提交状态。
 
-分类保留提交状态的不确定性；是否继续尝试由调用方结合已接收状态与重试策略决定。
-HTTP 错误响应可继续换端点，5xx 不计为 Key 失效。自拍允许未收到成功响应时
-在剩余预算内继续尝试超时请求，但不能据此宣称原服务一定没有创建任务。
+分类保留提交状态的不确定性；是否继续尝试由调用方结合已接收状态与剩余预算决定。
+HTTP 错误响应与未收到成功响应的超时都可继续换端点，5xx 不计为 Key 失效。
+换端点不能证明原服务没有创建任务，因此仍可能重复生成或计费。
 """
 from __future__ import annotations
 
@@ -145,7 +145,11 @@ class GenerationState:
         return self.accepted and not isinstance(exc, GenerationRejectedError)
 
     def is_unconfirmed_timeout(self, exc: BaseException) -> bool:
-        """仅识别尚未收到成功响应的超时，包含视频协议包装的原始超时。"""
+        """仅识别尚未收到成功响应的超时，包含视频协议包装的原始超时。
+
+        已收到成功响应（``accepted``）时一律返回 False：任务已经创建，换渠道
+        只会重复生成，必须围绕原任务恢复。
+        """
         if self.accepted:
             return False
         seen = set()
