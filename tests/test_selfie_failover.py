@@ -25,7 +25,7 @@ RESULT = base64.b64encode(b'generated-media' * 100).decode()
 def runtime(monkeypatch, tmp_path):
     reference = tmp_path / 'selfie.png'
     reference.write_bytes(REFERENCE)
-    rig = SimpleNamespace(requests=[], handler=None, channels={}, records=Mock())
+    rig = SimpleNamespace(requests=[], http_sends=[], handler=None, channels={}, records=Mock())
     send = SimpleNamespace(
         text=AsyncMock(return_value=True),
         image=AsyncMock(return_value={'sent': True, 'message_id': 'image-result'}),
@@ -50,8 +50,14 @@ def runtime(monkeypatch, tmp_path):
     real_client, real_sleep = httpx.AsyncClient, asyncio.sleep
 
     async def dispatch(request):
-        rig.requests.append(request)
         assert plugin._media_is_pending('stream-1')
+        if request.url.host == 'napcat':
+            assert request.url.path == '/send_group_msg'
+            payload = json.loads(request.content)
+            assert payload['message'] == [{'type': 'video', 'data': {'file': 'base64://' + RESULT}}]
+            rig.http_sends.append(request)
+            return httpx.Response(200, json={'status': 'ok', 'retcode': 0, 'data': {'message_id': 123}})
+        rig.requests.append(request)
         return await rig.handler(request)
 
     def client(**kwargs):
@@ -140,8 +146,14 @@ async def test_selfie_tool_reaches_backup_and_sends_once(runtime, monkeypatch, k
             assert content[0]['text'] == '保持底图人物, 在海边挥手'
     assert runtime.records.call_count == 1
     assert runtime.records.call_args.args[:2] == ('second-key', True)
-    sent = runtime.send.image if kind == 'image' else runtime.send.custom
-    sent.assert_awaited_once()
+    if kind == 'image':
+        runtime.send.image.assert_awaited_once()
+        assert runtime.http_sends == []
+    else:
+        assert len(runtime.http_sends) == 1
+    runtime.send.custom.assert_not_awaited()
+    if result['success'] is False:
+        assert runtime.http_sends == []
     assert not runtime.plugin._media_is_pending('stream-1')
     assert runtime.plugin._media_cooldown_remaining('stream-1') > 0
 
@@ -172,6 +184,8 @@ async def test_selfie_does_not_recreate_after_success_response(runtime, monkeypa
     assert sum(r.method == 'POST' for r in runtime.requests) == 1
     runtime.send.image.assert_not_awaited()
     runtime.send.custom.assert_not_awaited()
+    if result['success'] is False:
+        assert runtime.http_sends == []
     runtime.records.assert_not_called()
     assert not runtime.plugin._media_is_pending('stream-1')
     assert runtime.plugin._media_cooldown_remaining('stream-1') == 0
@@ -199,5 +213,7 @@ async def test_selfie_timeout_stops_without_backup_or_remaining_budget(runtime, 
     assert len(runtime.requests) == 1
     runtime.send.image.assert_not_awaited()
     runtime.send.custom.assert_not_awaited()
+    if result['success'] is False:
+        assert runtime.http_sends == []
     runtime.records.assert_not_called()
     assert not runtime.plugin._media_is_pending('stream-1')

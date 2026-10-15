@@ -422,33 +422,32 @@ async def test_command_deadline_includes_start_notification(monkeypatch):
     cmd.collect_images.assert_not_called()
 
 
-@pytest.mark.parametrize('outcome', ['timeout', 'exception', 'unknown_result', 'sent_id'])
-async def test_uncertain_video_send_never_uses_napcat(monkeypatch, outcome):
+@pytest.mark.parametrize('outcome', ['timeout', 'disconnect', 'unknown_result'])
+async def test_uncertain_http_video_send_is_never_repeated(monkeypatch, outcome):
+    from test_video_send import _send, FakeSend, mock_http
+    import httpx
+    error = (httpx.ReadTimeout('ack lost') if outcome == 'timeout' else
+             httpx.RemoteProtocolError('ack lost') if outcome == 'disconnect' else None)
+    calls = mock_http(monkeypatch, payload={}, error=error)
+    send = FakeSend(error=AssertionError('不得调用 SDK'))
+    ok, message = await _send(send)
+    assert not ok and '状态不确定' in message
+    assert len(calls) == 1 and send.calls == []
+
+
+async def test_http_video_send_wait_is_cancelled_at_absolute_budget(monkeypatch):
     from test_video_send import _send, FakeSend
-    send = FakeSend(error=TimeoutError('ack lost') if outcome == 'timeout' else
-                    RuntimeError('ack lost') if outcome == 'exception' else None,
-                    result={'sent': False, 'message_id': 'm1'} if outcome == 'sent_id' else {})
-    fallback = AsyncMock()
-    monkeypatch.setattr(video, 'send_video_via_napcat', fallback)
-    ok, error = await _send(send)
-    assert not ok and '状态不确定' in error
-    fallback.assert_not_called()
-
-
-async def test_video_send_wait_is_cancelled_at_absolute_budget(monkeypatch):
-    from test_video_send import _send
-    # 保留真实时间/超时机制，只降低进入阶段所需的最小余量，让测试可在毫秒级完成。
     class SmallBudget(TimeBudget):
         def can_start(self, **kwargs):
             return not self.expired()
     cancelled = asyncio.Event()
-    async def custom(*args, **kwargs):
+    async def request(*args, **kwargs):
         try:
             await asyncio.Event().wait()
         finally:
             cancelled.set()
-    fallback = AsyncMock()
-    monkeypatch.setattr(video, 'send_video_via_napcat', fallback)
-    ok, error = await _send(SimpleNamespace(custom=custom), budget=SmallBudget(.03, reserve_seconds=0))
-    assert not ok and '状态不确定' in error and cancelled.is_set()
-    fallback.assert_not_called()
+    monkeypatch.setattr(video, 'request_capped', request)
+    send = FakeSend(error=AssertionError('不得调用 SDK'))
+    ok, message = await _send(send, budget=SmallBudget(.03, reserve_seconds=0))
+    assert not ok and '状态不确定' in message and cancelled.is_set()
+    assert send.calls == []

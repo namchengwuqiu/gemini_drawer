@@ -13,16 +13,19 @@ Gemini Drawer 视频生成
 
 整体时间预算（core/budget.py）覆盖创建、轮询、下载与发送；期限耗尽后不再
 开始新的渠道，单个渠道的创建/轮询/成片下载另有独立的绝对截止控制（F1）。
-视频发送优先走 SDK 的 send.custom 能力（进入宿主发送链路，有历史记录），
-SDK 不可用时回退 NapCat 正向 HTTP；每次真实发送与回退之前都会重新检查剩余预算。
+视频仅通过配置的 OneBot 正向 HTTP 端口发送，读取简短发送响应；
+不调用 SDK 或 get_msg，也不在确认异常后重新生成或发送。
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
+import os
+import tempfile
+import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urlparse
 
 import httpx
 
@@ -52,11 +55,8 @@ from ..utils import (
     MediaTooLargeError,
     extract_http_error_reason,
     extract_video_data,
-    interpret_send_result,
     logger,
-    sanitize_upstream_text,
     stream_download,
-    truncate_for_log,
 )
 from ..utils.limits import MAX_SSE_ACCUMULATED_CHARS, MAX_VIDEO_BASE64_CHARS, MAX_VIDEO_BYTES
 
@@ -720,6 +720,34 @@ async def process_video_generation(
     return None, last_error
 
 
+def _stage_shared_video(video_base64: str, shared_dir: str) -> Path:
+    """将视频写入双端同路径挂载的目录；仅清理本插件超过一天的遗留文件。"""
+    directory = Path(shared_dir).expanduser()
+    if not directory.is_absolute():
+        raise ValueError("视频共享目录必须是绝对路径")
+    directory.mkdir(parents=True, exist_ok=True)
+    for old in directory.glob("gemini-video-*.mp4"):
+        try:
+            if old.is_file() and time.time() - old.stat().st_mtime > 86400:
+                old.unlink()
+        except OSError:
+            pass  # 遗留文件清理失败不影响当前视频，不能重新生成。
+    if len(video_base64) > MAX_VIDEO_BASE64_CHARS:
+        raise ValueError("视频超过大小上限")
+    data = base64.b64decode(video_base64.replace("\n", "").replace("\r", ""), validate=True)
+    if not data or len(data) > MAX_VIDEO_BYTES:
+        raise ValueError("视频数据为空或超过大小上限")
+    with tempfile.NamedTemporaryFile(dir=directory, prefix="gemini-video-", suffix=".mp4", delete=False) as file:
+        try:
+            file.write(data)
+            # SnowLuma 与宿主可能以不同容器 UID 运行，需要读取共享文件。
+            os.fchmod(file.fileno(), 0o644)
+        except BaseException:
+            Path(file.name).unlink(missing_ok=True)
+            raise
+    return Path(file.name)
+
+
 async def send_video_media(
     video_base64: str,
     *,
@@ -731,44 +759,16 @@ async def send_video_media(
     napcat_port: int,
     logger,
     budget: Optional[TimeBudget] = None,
+    shared_video_dir: str = "",
 ) -> Tuple[bool, str]:
-    """发送视频：优先走 SDK；仅在 SDK 不可用时使用 NapCat HTTP。
+    """仅通过配置的 OneBot HTTP 端口发送视频，不查询完整消息回执。
 
-    SDK 路径进入宿主发送链路（有历史记录、由适配器编码消息段），
-    通过 ``return_details=True`` 读取平台返回的真实发送状态。
-    ``budget`` 在每次真实发送与回退之前重新检查剩余预算（F1）：宿主 RPC
-    随时可能超时，期限耗尽后不能再开始新的发送。
+    ctx / stream_id 保留为现有调用方的兼容参数；视频不进入 SDK 发送链路。
+    发送接口确认成功即结束；超时或未知响应保留投递未确认状态，绝不重发。
     """
-    def budget_allows(stage: str) -> bool:
-        if budget is None or budget.can_start(minimum=5.0):
-            return True
-        logger.warning(f"[视频] 时间预算耗尽，不再开始{stage}（宿主 RPC 可能已超时）")
-        return False
-
-    send = getattr(getattr(ctx, "send", None), "custom", None)
-    if callable(send) and stream_id and budget_allows("SDK 发送"):
-        try:
-            timeout = budget.stage_timeout(300.0) if budget else 300.0
-            if budget:
-                budget.media_delivery_pending = True
-            result = await asyncio.wait_for(send(
-                "video", {"binary_data_base64": video_base64}, stream_id, return_details=True,
-            ), timeout=timeout)
-        except Exception as exc:
-            logger.warning(f"[视频] SDK 发送确认异常: {type(exc).__name__}，不自动重复发送")
-            return False, MediaDeliveryUncertain()
-        if interpret_send_result(result):
-            if budget:
-                budget.media_sent = True
-                budget.media_delivery_pending = False
-            return True, ""
-        # 宿主会把“平台已经接收、回执查询失败”也压成 sent=False / 无消息 ID。
-        # 负返回值不能证明未投递；SDK 已调用后绝不再走第二条发送链路。
-        logger.warning("[视频] SDK 未确认投递结果，不回退发送，也不重新生成")
-        return False, MediaDeliveryUncertain()
-
-    if not budget_allows("NapCat 回退发送"):
-        return False, "时间预算耗尽，未再尝试发送（宿主 RPC 可能已超时）"
+    if budget is not None and not budget.can_start(minimum=5.0):
+        logger.warning("[视频] 时间预算耗尽，不再开始 HTTP 发送")
+        return False, "时间预算耗尽，未尝试发送视频"
 
     napcat_timeout = 300.0
     if budget is not None:
@@ -785,6 +785,7 @@ async def send_video_media(
             napcat_port=napcat_port,
             logger=logger,
             timeout=napcat_timeout,
+            shared_video_dir=shared_video_dir,
         ), timeout=napcat_timeout)
     except TimeoutError:
         return False, MediaDeliveryUncertain()
@@ -803,36 +804,68 @@ async def send_video_via_napcat(
     napcat_port: int,
     logger,
     timeout: float = 300.0,
+    shared_video_dir: str = "",
 ) -> Tuple[bool, str]:
     """
-    通过 NapCat HTTP API 发送视频（SDK 发送能力不可用时的回退路径）
+    通过 SnowLuma / NapCat 的 OneBot HTTP API 发送一次视频
 
     Returns:
         (success, error_message)
     """
-    video_base64_uri = f"base64://{video_base64}"
-
     if group_id:
         api_url = f"http://{napcat_host}:{napcat_port}/send_group_msg"
-        request_data = {"group_id": group_id, "message": [{"type": "video", "data": {"file": video_base64_uri}}]}
+        request_data = {"group_id": group_id, "message": [{"type": "video", "data": {"file": ""}}]}
     elif user_id:
         api_url = f"http://{napcat_host}:{napcat_port}/send_private_msg"
-        request_data = {"user_id": user_id, "message": [{"type": "video", "data": {"file": video_base64_uri}}]}
+        request_data = {"user_id": user_id, "message": [{"type": "video", "data": {"file": ""}}]}
     else:
         return False, "无法确定发送目标"
+
+    staged_file = None
+    if shared_video_dir:
+        try:
+            staged_file = await asyncio.to_thread(_stage_shared_video, video_base64, shared_video_dir)
+        except (OSError, ValueError) as exc:
+            logger.error(f"[视频] 共享文件准备失败: {type(exc).__name__}，未调用发送接口")
+            return False, "视频共享文件准备失败，未尝试发送"
+        request_data["message"][0]["data"]["file"] = staged_file.as_uri()
+        logger.info("[视频] 使用共享文件发送，HTTP 请求仅包含文件路径")
+    else:
+        request_data["message"][0]["data"]["file"] = f"base64://{video_base64}"
 
     try:
         async with asyncio.timeout(timeout), httpx.AsyncClient(headers={"Accept-Encoding": "identity"}, timeout=timeout, trust_env=False) as client:
             response = await request_capped(client, "POST", api_url, json=request_data)
-            if response.status_code == 200:
-                result = response.json()
-                if result.get("status") == "ok" or result.get("retcode") == 0:
-                    logger.info(f"[视频] 发送成功")
-                    return True, ""
-                else:
-                    return False, "NapCat 明确报告发送失败"
-            else:
-                return False, f"HTTP {response.status_code}"
+            if response.status_code != 200:
+                if 400 <= response.status_code < 500 and response.status_code != 408:
+                    return False, f"视频发送接口拒绝请求: HTTP {response.status_code}"
+                return False, MediaDeliveryUncertain()
+
+            result = response.json()
+            if not isinstance(result, dict):
+                return False, MediaDeliveryUncertain()
+            status = result.get("status")
+            retcode = result.get("retcode")
+            data = result.get("data")
+            message_id = data.get("message_id") if isinstance(data, dict) else None
+            valid_message_id = (
+                not isinstance(message_id, bool)
+                and isinstance(message_id, (int, str))
+                and str(message_id).removeprefix("-").isdigit()
+                and int(message_id) != 0
+            )
+            # 标准成功响应必须一致，且包含消息 ID；不再额外调用 get_msg。
+            if status == "ok" and type(retcode) is int and retcode == 0 and valid_message_id:
+                logger.info("[视频] HTTP 发送接口已确认成功")
+                if staged_file is not None:
+                    try:
+                        await asyncio.to_thread(staged_file.unlink, missing_ok=True)
+                    except OSError:
+                        logger.warning("[视频] 已发送，共享临时文件清理失败，将在后续发送时清理")
+                return True, ""
+            if status == "failed" and type(retcode) is int and retcode != 0:
+                return False, "视频发送接口明确报告失败"
+            return False, MediaDeliveryUncertain()
     except Exception as e:
         logger.error(f"[视频] 发送确认失败: {type(e).__name__}")
         return False, MediaDeliveryUncertain()

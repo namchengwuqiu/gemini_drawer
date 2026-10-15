@@ -1,14 +1,8 @@
 # Gemini 绘图插件
 
-> **Version:** 1.15.3
+> **Version:** 1.15.4
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
-
-## v1.15.3 更新说明
-
-- 自拍与自拍视频的提示词润色最多尝试三次，失败后使用原始提示词；重试共享整体处理预算。
-- 视频发送回执丢失时保留“投递未确认”，不回退重发；同一会话 10 分钟内拦截重复视频工具调用，避免再次生成。保护期内主动的新视频请求也会被拦截，插件重载会清空保护。
-- SnowLuma 的大视频回执断连还需安装适配器对应修复；详见 [更新日志](CHANGELOG.md)。
 
 ## 主要特性
 
@@ -47,12 +41,12 @@ pip install -r requirements.txt
 ### 开发者发布版本
 
 1. 更新 `_manifest.json` 的 `version`、`config.py` 中的 `version` / `config_version` 默认值以及 README 顶部版本号，并在 `CHANGELOG.md` 添加对应的 `## vX.Y.Z` 更新说明。保持插件 ID `namchengwuqiu.gemini_drawer` 不变，按实际兼容情况声明 MaiBot 与 SDK 版本范围。
-2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如发布当前 `1.15.3`：
+2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如发布当前 `1.15.4`：
 
    ```shell
    git push origin main
-   git tag v1.15.3
-   git push origin v1.15.3
+   git tag v1.15.4
+   git push origin v1.15.4
    ```
 
 3. GitHub Actions 的 **Publish plugin release** 工作流会校验 Tag、插件 ID、manifest 版本及必需文件，从更新日志提取该版本说明，并创建正式 GitHub Release。使用 GitHub 自动生成的源码包即可，无需额外上传附件。
@@ -210,16 +204,19 @@ Key 错误；请求已发出但没等到成功响应时（读写超时、单端�
 
 ### `[api]` - 视频发送
 
-此部分只配置发送视频所需的 NapCat 连接信息，绘图渠道说明见 `[general]` 的 `channel_setup_guide`。
+此部分配置发送视频所需的 SnowLuma / NapCat OneBot HTTP 连接信息，绘图渠道说明见 `[general]` 的 `channel_setup_guide`。
 
 - `napcat_host` (字符串, 默认 `napcat`): NapCat HTTP 服务器地址。Docker 环境下通常为 `napcat`，本地运行可设为 `localhost`。
-- `napcat_port` (整数, 默认 `3033`): NapCat 正向 HTTP 端口。
+- `napcat_port` (整数, 默认 `3033`): SnowLuma / NapCat 正向 HTTP 端口。
+- `video_shared_dir` (字符串, 默认空): 共享视频临时目录，必须是两个进程或容器均可访问的同一绝对路径。配置后将视频保存为文件，HTTP 请求仅携带 `file://` 路径，避免大段 Base64 超过服务端请求体上限。成功响应后删除临时文件；确认异常时保留文件，超过 24 小时后在后续发送准备时清理。留空保持 Base64 传输，受服务端请求体限制。
+
+本仓库 Docker 部署已将同一数据目录挂载为 `/MaiMBot/data`，可设置 `api.video_shared_dir = "/MaiMBot/data/gemini_drawer/video_outbox"`。单独部署的 SnowLuma / NapCat 也必须能读到该路径，否则不能使用共享文件模式。
 
 旧版本 `config.toml` 中的 `api_url`、`enable_google`、`lmarena_api_*` 会在插件加载时自动迁移到渠道数据，并从配置文件中移除。
 
 ### NapCat HTTP 服务器配置 🆕
 
-视频默认通过宿主 SDK 和当前适配器发送，无需额外配置 NapCat HTTP。只有 SDK 发送能力不可用时才使用以下备用链路：
+视频只通过 SnowLuma / NapCat 的 OneBot HTTP API 发送。请确保 HTTP 服务已开启，并按以下步骤配置：
 
 1. **在 NapCat 网络配置中新建一个 HTTP 服务器**
 2. **配置参数**：
@@ -235,7 +232,7 @@ Key 错误；请求已发出但没等到成功响应时（读写超时、单端�
 *   `selfie.reference_image_path` (字符串, 默认 `"selfie_base.jpg"`): 人设底图文件名，实际读取位置为插件的 `assets/` 目录。
 *   `selfie.base_prompt` (字符串): 人设身份与画风约束。默认要求严格保持底图人物的脸、五官、发色、发型、瞳色、体型特征和原始画风，只改变用户指定的动作、服装、表情、镜头与场景。
 *   `selfie.random_actions` (数组): 随机场景/动作列表。
-*   `selfie.polish_enable` (布尔值, 默认 `true`): 是否启用提示词润色 🆕。
+*   `selfie.polish_enable` (布尔值, 默认 `true`): 是否启用提示词润色。失败时最多尝试三次，全部失败后使用原始提示词，重试受整体时间预算限制。
 *   `selfie.polish_model` (字符串, 默认 `"replyer"`): 润色使用的模型任务配置名（如 `replyer`、`utils`）🆕。
 *   `selfie.polish_template` (字符串): 润色提示词模板。必须保留 `{original_prompt}`；默认模板禁止润色模型改变人物身份或在动漫与写实风格之间转换。
 
@@ -403,8 +400,9 @@ Host 与 TLS 名称。本地绘图渠道需要下载本地地址时，推荐在 
 代理侧解析无法本地验证，因此本地公网 DNS 结果、fake-IP 或仅开启代理都不会自动获得放行。
 生成接口的代理设置不受此媒体下载策略影响。
 
-等待提示、生成、下载和发送共用一个绝对期限。SDK 发送结果不确定时不会自动改走 NapCat 再发一次；
-只有 SDK 发送能力不可用时才使用备用发送；`False` 或没有消息 ID 的 `sent=False` 也可能是回执丢失，不能据此再次投递。
+等待提示、生成、下载和发送共用一个绝对期限。视频仅调用一次配置的 HTTP 发送接口，不额外查询完整消息；超时、断连、5xx 或不明确的响应保留投递未确认，不改用 SDK 重发。
+
+视频生成失败、发送失败或执行中断后，同一会话进入 10 分钟保护期，保护期内主动的新视频请求也会被拦截。保护记录保存在插件外部数据目录的 `video_retry_guard.json`，重载或重启不会清空；重载时仍在执行的任务最多保护 20 分钟。正常成功后解除本次失败保护，普通媒体冷却仍生效。无法读取或保存保护记录时暂停新视频任务。
 
 **注意**: 你不需要手动创建 `data/data.json`，插件会自动管理。
 

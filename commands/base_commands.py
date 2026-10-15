@@ -763,6 +763,7 @@ class BaseVideoCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
             user_id=user_id,
             napcat_host=self.get_config("api.napcat_host", "napcat"),
             napcat_port=self.get_config("api.napcat_port", 3033),
+            shared_video_dir=self.get_config("api.video_shared_dir", ""),
             logger=logger,
             budget=budget,
         )

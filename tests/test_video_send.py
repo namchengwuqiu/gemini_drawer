@@ -40,135 +40,177 @@ async def _send(send, ctx=None, **overrides):
     return await video.send_video_media("ZmFrZQ==", **kwargs)
 
 
-@pytest.mark.asyncio
-async def test_sdk_send_is_used_first_and_reports_success(monkeypatch):
-    send = FakeSend(result={"sent": True, "message_id": "m1"})
+def mock_http(monkeypatch, payload=None, status=200, error=None):
+    import httpx
+    calls = []
 
-    async def fail_napcat(*args, **kwargs):
-        raise AssertionError("SDK 发送成功时不应回退 NapCat")
+    async def request(client, method, url, **kwargs):
+        calls.append((method, url, kwargs))
+        if error:
+            raise error
+        return httpx.Response(status, json=payload)
 
-    monkeypatch.setattr(video, "send_video_via_napcat", fail_napcat)
-
-    ok, error = await _send(send)
-
-    assert (ok, error) == (True, "")
-    message_type, content, stream_id, kwargs = send.calls[0]
-    assert message_type == "video"
-    assert content == {"binary_data_base64": "ZmFrZQ=="}
-    assert stream_id == "s1"
-    assert kwargs["return_details"] is True
+    monkeypatch.setattr(video, "request_capped", request)
+    return calls
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("result", [False, {"sent": False, "message_id": None}])
-async def test_negative_sdk_result_does_not_prove_not_delivered(monkeypatch, result):
-    send = FakeSend(result=result)
-
-    async def fail_napcat(**kwargs):
-        raise AssertionError("SDK 负返回值也可能是投递回执丢失，不能再次发送")
-
-    monkeypatch.setattr(video, "send_video_via_napcat", fail_napcat)
-    ok, error = await _send(send)
-    assert not ok
-    assert isinstance(error, video.MediaDeliveryUncertain)
-    assert len(send.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_sdk_unclassified_exception_does_not_repeat_send(monkeypatch):
-    send = FakeSend(error=RuntimeError("unclassified RPC failure"))
-
-    async def fake_napcat(**kwargs):
-        raise AssertionError("未知 SDK 异常不能触发再次发送")
-
-    monkeypatch.setattr(video, "send_video_via_napcat", fake_napcat)
-
-    ok, error = await _send(send, group_id=None, user_id="u1")
-
-    assert not ok and isinstance(error, video.MediaDeliveryUncertain)
-
-
-@pytest.mark.asyncio
-async def test_missing_ctx_goes_straight_to_napcat(monkeypatch):
-    async def fake_napcat(**kwargs):
-        return True, ""
-
-    monkeypatch.setattr(video, "send_video_via_napcat", fake_napcat)
-
-    ok, _ = await _send(None, ctx=None)
-
-    assert ok is True
-
-
-@pytest.mark.asyncio
-async def test_expired_budget_blocks_sending(monkeypatch):
-    """预算耗尽后不得再开始发送，也不回退 NapCat（F1）。"""
-    send = FakeSend(result={"sent": True, "message_id": "m1"})
-    called = {}
-
-    async def fake_napcat(**kwargs):
-        called.update(kwargs)
-        return True, ""
-
-    monkeypatch.setattr(video, "send_video_via_napcat", fake_napcat)
-    clock = {"now": 1000.0}
-    budget = TimeBudget(1.0, reserve_seconds=0.0, clock=lambda: clock["now"])
-    clock["now"] += 2.0  # 预算已耗尽
-
-    ok, error = await _send(send, budget=budget)
-
-    assert ok is False
+@pytest.mark.parametrize("group_id,user_id,path,target", [
+    ("g1", None, "send_group_msg", "group_id"),
+    (None, "u1", "send_private_msg", "user_id"),
+])
+async def test_video_uses_only_http_and_never_queries_full_message(monkeypatch, group_id, user_id, path, target):
+    send = FakeSend(error=AssertionError("视频不应调用 SDK"))
+    calls = mock_http(monkeypatch, {"status": "ok", "retcode": 0, "data": {"message_id": -123}})
+    budget = TimeBudget(100, reserve_seconds=0)
+    assert await _send(send, group_id=group_id, user_id=user_id, budget=budget) == (True, "")
     assert send.calls == []
-    assert called == {}
-    assert "时间预算耗尽" in error
+    assert len(calls) == 1
+    method, url, kwargs = calls[0]
+    assert method == "POST" and url == f"http://napcat:3033/{path}"
+    assert kwargs["json"][target] == (group_id or user_id)
+    assert kwargs["json"]["message"] == [{"type": "video", "data": {"file": "base64://ZmFrZQ=="}}]
+    assert budget.media_sent and not budget.media_delivery_pending
 
 
 @pytest.mark.asyncio
-async def test_napcat_timeout_is_clamped_to_remaining_budget(monkeypatch):
-    """NapCat 回退的 300 秒 timeout 收敛到剩余预算内（F1）。"""
-    send = None  # 只有 SDK 不可用时才会进入 NapCat
-    called = {}
-
-    async def fake_napcat(**kwargs):
-        called.update(kwargs)
-        return True, ""
-
-    monkeypatch.setattr(video, "send_video_via_napcat", fake_napcat)
-    budget = TimeBudget(100.0, reserve_seconds=0.0)
-
-    ok, _ = await _send(send, budget=budget)
-
-    assert ok is True
-    assert 5.0 <= called["timeout"] <= 100.0
-
-
-@pytest.mark.asyncio
-async def test_sdk_receipt_lost_marks_pending_not_sent():
-    budget = TimeBudget(100.0, reserve_seconds=0)
-    ok, error = await _send(FakeSend(result={"sent": False}), budget=budget)
+@pytest.mark.parametrize("payload,status", [
+    ({"status": "ok", "retcode": 0}, 200),
+    ({"status": "failed", "retcode": 0}, 200),
+    ({"status": "ok", "retcode": 100}, 200),
+    ({"status": "async", "retcode": 1}, 200),
+    ({"status": "ok", "retcode": 0, "data": {"message_id": True}}, 200),
+    ({"status": "ok", "retcode": 0, "data": {"message_id": 0}}, 200),
+    ({}, 200), ([], 200), ({}, 503), ({}, 408),
+])
+async def test_ambiguous_http_response_never_repeats_send(monkeypatch, payload, status):
+    calls = mock_http(monkeypatch, payload, status)
+    budget = TimeBudget(100, reserve_seconds=0)
+    ok, error = await _send(FakeSend(), budget=budget)
     assert not ok and isinstance(error, video.MediaDeliveryUncertain)
+    assert len(calls) == 1
     assert budget.media_delivery_pending and not budget.media_sent
 
 
 @pytest.mark.asyncio
-async def test_entry_deadline_preserves_pending_delivery(monkeypatch):
+@pytest.mark.parametrize("status,payload", [
+    (400, {}), (401, {}),
+    (200, {"status": "failed", "retcode": 100}),
+])
+async def test_explicit_http_failure_is_not_success(monkeypatch, status, payload):
+    calls = mock_http(monkeypatch, payload, status)
+    ok, error = await _send(FakeSend())
+    assert not ok and not isinstance(error, video.MediaDeliveryUncertain)
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_expired_budget_blocks_http_sending(monkeypatch):
+    calls = mock_http(monkeypatch)
+    ok, error = await _send(FakeSend(), budget=TimeBudget(0, reserve_seconds=0))
+    assert not ok and "时间预算耗尽" in error
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_http_timeout_is_clamped_to_remaining_budget(monkeypatch):
+    called = {}
+    async def direct(**kwargs):
+        called.update(kwargs)
+        return True, ""
+    monkeypatch.setattr(video, "send_video_via_napcat", direct)
+    assert await _send(FakeSend(), budget=TimeBudget(100, reserve_seconds=0)) == (True, "")
+    assert 0 < called["timeout"] <= 100
+
+
+@pytest.mark.asyncio
+async def test_missing_ctx_still_uses_http(monkeypatch):
+    calls = mock_http(monkeypatch, {"status": "ok", "retcode": 0, "data": {"message_id": 1}})
+    assert await _send(None, ctx=None) == (True, "")
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_entry_deadline_preserves_pending_http_delivery(monkeypatch):
     import asyncio
-    from gemini_drawer.core.budget import budgeted_entry, current_budget, MediaDeliveryUncertain
-
-    # 用极短期限验证入口取消；仅跳过发送前的最小 5 秒准入要求。
+    from gemini_drawer.core.budget import budgeted_entry, current_budget
     monkeypatch.setattr(TimeBudget, "can_start", lambda *args, **kwargs: True)
-
+    cancelled = asyncio.Event()
+    async def slow_request(*args, **kwargs):
+        try:
+            await asyncio.sleep(10)
+        finally:
+            cancelled.set()
+    monkeypatch.setattr(video, "request_capped", slow_request)
     class Action:
         rpc_timeout_ms = 30
         budget_reserve_seconds = 0
-
         @budgeted_entry(30, reserve=0)
         async def execute(self):
-            class SlowSend:
-                async def custom(self, *args, **kwargs):
-                    await asyncio.sleep(10)
-
-            return await _send(SlowSend(), budget=current_budget())
-
+            return await _send(FakeSend(), budget=current_budget())
     ok, error = await Action().execute()
-    assert not ok and isinstance(error, MediaDeliveryUncertain)
+    assert not ok and isinstance(error, video.MediaDeliveryUncertain)
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_shared_file_keeps_large_http_request_small(monkeypatch, tmp_path):
+    import base64
+    import json
+    from pathlib import Path
+    from urllib.parse import unquote, urlparse
+    import httpx
+
+    data = b'video-test' * 350_000  # 3.5 MB，Base64 已超过服务端 2 MiB 请求限制。
+    paths = []
+    async def request(client, method, url, **kwargs):
+        payload = kwargs['json']
+        assert len(json.dumps(payload).encode()) < 1024
+        uri = payload['message'][0]['data']['file']
+        assert uri.startswith('file:///')
+        path = Path(unquote(urlparse(uri).path))
+        paths.append(path)
+        assert path.read_bytes() == data
+        assert path.stat().st_mode & 0o004  # 其他容器 UID 可读
+        return httpx.Response(200, json={'status': 'ok', 'retcode': 0, 'data': {'message_id': 123}})
+    monkeypatch.setattr(video, 'request_capped', request)
+    assert await video.send_video_via_napcat(
+        base64.b64encode(data).decode(), 'g1', None, 'napcat', 3033, LOGGER,
+        shared_video_dir=str(tmp_path),
+    ) == (True, '')
+    assert len(paths) == 1 and not paths[0].exists()
+
+
+@pytest.mark.asyncio
+async def test_uncertain_shared_file_send_keeps_file_without_retry(monkeypatch, tmp_path):
+    import httpx
+    calls = mock_http(monkeypatch, error=httpx.RemoteProtocolError('ack lost'))
+    ok, error = await _send(FakeSend(), shared_video_dir=str(tmp_path))
+    assert not ok and isinstance(error, video.MediaDeliveryUncertain)
+    assert len(calls) == 1
+    files = list(tmp_path.glob('gemini-video-*.mp4'))
+    assert len(files) == 1 and files[0].read_bytes() == b'fake'
+
+
+@pytest.mark.asyncio
+async def test_invalid_shared_directory_does_not_start_http(monkeypatch):
+    calls = mock_http(monkeypatch)
+    ok, message = await _send(FakeSend(), shared_video_dir='relative/path')
+    assert not ok and '未尝试发送' in message
+    assert calls == []
+
+
+def test_shared_staging_prunes_only_own_expired_files(tmp_path):
+    import os
+    import time
+    stale = tmp_path / 'gemini-video-old.mp4'
+    foreign = tmp_path / 'other.mp4'
+    recent = tmp_path / 'gemini-video-recent.mp4'
+    for path in (stale, foreign, recent):
+        path.write_bytes(b'old')
+    before = time.time() - 90000
+    os.utime(stale, (before, before))
+    os.utime(foreign, (before, before))
+    path = video._stage_shared_video('ZmFrZQ==', str(tmp_path))
+    assert path.read_bytes() == b'fake'
+    assert not stale.exists() and foreign.exists() and recent.exists()

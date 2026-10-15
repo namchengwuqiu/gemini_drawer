@@ -35,8 +35,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.15.3", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.15.3", description="配置版本",
+    version: str = Field(default="1.15.4", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.15.4", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -196,6 +196,15 @@ class ApiConfig(PluginConfigBase):
         json_schema_extra=ui(
             "NapCat HTTP 端口",
             "NapCat 正向 HTTP 服务端口，用于发送视频文件。",
+        ),
+    )
+
+    video_shared_dir: str = Field(
+        default="",
+        description="视频共享目录：MaiBot 与 SnowLuma/NapCat 须以相同绝对路径访问；配置后发送文件路径而非 Base64",
+        json_schema_extra=ui(
+            "视频共享目录",
+            "可避免 HTTP 大请求限制。两个容器必须挂载同一目录到同一路径；留空使用 Base64。",
         ),
     )
 

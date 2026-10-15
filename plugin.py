@@ -2,6 +2,7 @@ from typing import Any, Tuple, Optional, Type
 from pathlib import Path
 import asyncio
 import json
+import math
 import random
 import time
 import httpx
@@ -15,6 +16,7 @@ from .core.managers import data_manager, key_manager
 from .core.webui import DrawerWebUI
 from .utils import configure_policy
 from .utils.version import get_plugin_version
+from .utils.config_file import _atomic_write_text
 
 from .commands.help_command import HelpCommand
 from .commands.draw_commands import (
@@ -288,11 +290,68 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         # 常常还在处理同一条用户消息，于是又拍一张——pending 那时已经清零，拦不住。
         self._media_last_sent_at: dict[str, float] = {}
         self._video_delivery_uncertain_until: dict[str, float] = {}
+        self._video_failure_until: dict[str, float] = {}
+        self._video_guard_path: Optional[Path] = None
+        self._video_guard_load_error = False
+        self._video_guard_lock = asyncio.Lock()
         self._webui = DrawerWebUI(data_manager, key_manager)
         self._banana_update_task: Optional[asyncio.Task] = None
         self._banana_update_state: dict[str, Any] = {"job_id": "", "status": "idle", "message": ""}
         #: 插件持有的后台任务（如失败消息的延迟撤回）；卸载时统一取消（P1-5）
         self._background_tasks: set[asyncio.Task] = set()
+
+    async def _load_video_guards(self, path: Path) -> None:
+        """将持久化的墙钟期限换为本进程单调时钟，重载不释放在途任务。"""
+        self._video_guard_path = path
+        try:
+            def read():
+                if not path.exists():
+                    return {"version": 1, "failed": {}, "uncertain": {}}
+                return json.loads(path.read_text(encoding="utf-8"))
+            saved = await asyncio.to_thread(read)
+            if not isinstance(saved, dict) or saved.get("version") != 1:
+                raise ValueError("视频保护记录格式错误")
+            now, wall = time.monotonic(), time.time()
+            restored = {}
+            for key in ("failed", "uncertain"):
+                rows = saved.get(key)
+                if not isinstance(rows, dict):
+                    raise ValueError("视频保护记录格式错误")
+                restored[key] = {}
+                for stream_id, until in rows.items():
+                    if type(until) not in (int, float) or not math.isfinite(until):
+                        raise ValueError("视频保护期限无效")
+                    if until > wall:
+                        restored[key][stream_id] = now + min(until - wall, 1200.0)
+            self._video_failure_until = restored["failed"]
+            self._video_delivery_uncertain_until = restored["uncertain"]
+            self._video_guard_load_error = False
+        except (OSError, ValueError, TypeError) as exc:
+            self._video_guard_load_error = True
+            self._get_logger().error(f"[GeminiDrawer] 视频保护记录读取失败，暂停新视频任务: {type(exc).__name__}")
+
+    async def _save_video_guards(self) -> bool:
+        """串行原子保存，写入失败不允许开始新的收费视频任务。"""
+        if self._video_guard_load_error:
+            return False
+        if self._video_guard_path is None:
+            return True
+        async with self._video_guard_lock:
+            now, wall = time.monotonic(), time.time()
+            saved = {"version": 1}
+            for key, table in (("failed", self._video_failure_until),
+                               ("uncertain", self._video_delivery_uncertain_until)):
+                active = sorted(((sid, until) for sid, until in table.items() if until > now),
+                                key=lambda item: item[1], reverse=True)[:_MEDIA_COOLDOWN_MAX_ENTRIES]
+                table.clear()
+                table.update(active)
+                saved[key] = {sid: wall + until - now for sid, until in active}
+            try:
+                await asyncio.to_thread(_atomic_write_text, self._video_guard_path, json.dumps(saved))
+                return True
+            except OSError as exc:
+                self._get_logger().error(f"[GeminiDrawer] 视频保护记录保存失败: {type(exc).__name__}")
+                return False
 
     async def _webui_call(self, method, **kwargs: Any) -> dict[str, Any]:
         # 文件解析与写入在工作线程执行，不占用插件的消息处理循环。
@@ -486,6 +545,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         except Exception as e:
             self.ctx.logger.warning(f"[GeminiDrawer] 历史数据迁移失败: {e}")
 
+        await self._load_video_guards(data_manager.data_dir / "video_retry_guard.json")
+
         # 初始化自拍目录
         try:
             if self.config.selfie.enable:
@@ -643,9 +704,11 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             except asyncio.CancelledError:
                 pass
         await self._cancel_background_tasks()
+        await self._save_video_guards()
         self._media_pending.clear()
         self._media_last_sent_at.clear()
         self._video_delivery_uncertain_until.clear()
+        self._video_failure_until.clear()
         self.ctx.logger.info("Gemini Drawer 插件已卸载")
 
     async def on_config_update(self, scope: str, config_data: dict[str, Any], version: str) -> None:
@@ -863,6 +926,16 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 "error": reason,
             }
 
+        is_video = tool_name == "gemini_selfie_video"
+        if is_video and (self._video_guard_load_error or self._video_failure_until.get(stream_id, 0) > time.monotonic()):
+            reason = (
+                "上次视频任务已经失败或执行被中断，本次自动重复调用已拦截，未创建新视频任务。"
+                "保护期为10分钟；请如实说明本次未确认成功，不要声称已拍好或已发送，"
+                "不要自动重试，只有用户在保护期结束后重新明确要求才可再次调用。"
+            ) if not self._video_guard_load_error else "视频保护记录读取失败，已暂停新视频任务，请管理员检查。"
+            return {"name": tool_name, "success": False, "content": reason, "error": reason,
+                    "retryable": False, "generation_status": "not_retried"}
+
         if tool_name == "gemini_selfie_video":
             now = time.monotonic()
             self._video_delivery_uncertain_until = {
@@ -895,7 +968,15 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             }
 
         self._begin_media_task(stream_id)
+        completed_success = False
+        delivery_unknown = False
+        if is_video:
+            # 先落盘再生成：即使运行时在失败返回前重启，也不能再次创建任务。
+            self._video_failure_until[stream_id] = time.monotonic() + VIDEO_COMMAND_TIMEOUT_MS / 1000 + _VIDEO_DELIVERY_GUARD_SECONDS
         try:
+            if is_video and not await self._save_video_guards():
+                reason = "视频保护记录保存失败，未创建视频任务，禁止自动重试。"
+                return {"name": tool_name, "success": False, "content": reason, "error": reason, "retryable": False}
             success, message = await self._run_action(
                 action_cls,
                 stream_id,
@@ -904,6 +985,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 **kwargs,
             )
             if isinstance(message, MediaDeliveryUncertain):
+                delivery_unknown = True
                 self._video_delivery_uncertain_until[stream_id] = time.monotonic() + _VIDEO_DELIVERY_GUARD_SECONDS
                 if len(self._video_delivery_uncertain_until) > _MEDIA_COOLDOWN_MAX_ENTRIES:
                     oldest = min(self._video_delivery_uncertain_until, key=self._video_delivery_uncertain_until.get)
@@ -912,6 +994,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                     "name": tool_name, "success": False, "content": str(message), "error": str(message),
                     "delivery_status": "unknown", "retryable": False,
                 }
+            completed_success = bool(success)
             if success:
                 # 只在真正发出去之后才起算冷却，生成失败时用户应该能立刻重试。
                 self._mark_media_sent(stream_id)
@@ -921,9 +1004,18 @@ class GeminiDrawerPlugin(MaiBotPlugin):
                 "content": str(message or ""),
             }
             if not success:
+                if is_video:
+                    result["retryable"] = False
+                    result["content"] += "；本次视频请求已结束，10分钟内禁止自动再次调用或重新生成，请等待用户重新明确要求。"
                 result["error"] = str(message or "媒体任务执行失败")
             return result
         finally:
+            if is_video:
+                if completed_success or delivery_unknown:
+                    self._video_failure_until.pop(stream_id, None)
+                else:
+                    self._video_failure_until[stream_id] = time.monotonic() + _VIDEO_DELIVERY_GUARD_SECONDS
+                await self._save_video_guards()
             self._end_media_task(stream_id)
 
     # ── 用户与绘图指令 ──

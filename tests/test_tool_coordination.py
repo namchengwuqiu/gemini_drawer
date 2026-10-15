@@ -436,7 +436,7 @@ def test_media_components_are_native_tools_with_long_timeouts():
 
 @pytest.mark.asyncio
 async def test_video_receipt_lost_blocks_planner_regeneration(monkeypatch, tmp_path):
-    """真实 Action + 发送路径：宿主返回失败但实际可能送达，只生成和发送一次。"""
+    """真实 Action + HTTP 路径：回执丢失时只生成和发送一次。"""
     from gemini_drawer.commands.actions import SelfieVideoAction
     from gemini_drawer.core import endpoints, video
     from gemini_drawer.core.budget import MediaDeliveryUncertain, TimeBudget
@@ -455,11 +455,12 @@ async def test_video_receipt_lost_blocks_planner_regeneration(monkeypatch, tmp_p
         return "ZmFrZQ==", ""
 
     async def send(*args, **kwargs):
+        import httpx
         counts["send"] += 1
-        return {"sent": False, "message_id": None}
+        raise httpx.RemoteProtocolError("HTTP 回执丢失")
 
-    async def no_fallback(**kwargs):
-        raise AssertionError("不能回退重发")
+    async def no_sdk(*args, **kwargs):
+        raise AssertionError("视频不能调用 SDK")
 
     async def polish(prompt, budget):
         return prompt
@@ -469,8 +470,8 @@ async def test_video_receipt_lost_blocks_planner_regeneration(monkeypatch, tmp_p
 
     monkeypatch.setattr(endpoints, "build_video_endpoints", lambda **kw: [{}])
     monkeypatch.setattr(video, "process_video_generation", generate)
-    monkeypatch.setattr(video, "send_video_via_napcat", no_fallback)
-    monkeypatch.setattr(action.ctx.send, "custom", send, raising=False)
+    monkeypatch.setattr(video, "request_capped", send)
+    monkeypatch.setattr(action.ctx.send, "custom", no_sdk, raising=False)
     monkeypatch.setattr(action, "get_config", lambda key, default=None: default)
     monkeypatch.setattr(action, "_compose_prompt", lambda *args: "wave")
     monkeypatch.setattr(action, "_polish_with_budget", polish)
@@ -525,3 +526,99 @@ async def test_uncertain_video_guard_expires_without_extending_on_duplicates(mon
     now[0] += 2
     await plugin._run_media_tool(*args)
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_failed_video_generation_blocks_next_planner_round_even_if_prompt_changes(monkeypatch):
+    from gemini_drawer.commands.actions import SelfieVideoAction
+    from unittest.mock import AsyncMock
+    plugin = _plugin_with_cooldown(monkeypatch, 0)
+    run = AsyncMock(return_value=(False, "未返回有效视频数据；上游可能已接收任务"))
+    monkeypatch.setattr(plugin, '_run_action', run)
+    monkeypatch.setattr(plugin, '_pick_wait_message', lambda kind: '')
+    for prompt in ('沙发上微笑', '改成黑裙子', '再换一个动作'):
+        result = await plugin._run_media_tool('gemini_selfie_video', SelfieVideoAction, 's1', 'video', {'requested_action': prompt})
+        assert not result['success'] and result['retryable'] is False
+    assert run.await_count == 1
+    assert not plugin._media_is_pending('s1')
+
+
+@pytest.mark.asyncio
+async def test_video_failure_and_uncertain_delivery_guards_survive_reload(monkeypatch, tmp_path):
+    from gemini_drawer.commands.actions import SelfieVideoAction
+    from gemini_drawer.core.budget import MediaDeliveryUncertain
+    from unittest.mock import AsyncMock
+    for outcome in ('failed', 'uncertain'):
+        path = tmp_path / (outcome + '.json')
+        plugin = _plugin_with_cooldown(monkeypatch, 0)
+        await plugin._load_video_guards(path)
+        message = MediaDeliveryUncertain() if outcome == 'uncertain' else '视频生成失败'
+        monkeypatch.setattr(plugin, '_run_action', AsyncMock(return_value=(False, message)))
+        monkeypatch.setattr(plugin, '_pick_wait_message', lambda kind: '')
+        await plugin._run_media_tool('gemini_selfie_video', SelfieVideoAction, 's1', 'video', {})
+        restored = _plugin_with_cooldown(monkeypatch, 0)
+        await restored._load_video_guards(path)
+        run = AsyncMock()
+        monkeypatch.setattr(restored, '_run_action', run)
+        result = await restored._run_media_tool('gemini_selfie_video', SelfieVideoAction, 's1', 'video', {})
+        assert not result['success'] and result['retryable'] is False
+        run.assert_not_awaited()
+        if outcome == 'uncertain':
+            assert result['delivery_status'] == 'unknown'
+        else:
+            assert '已经生成' not in result['content']
+
+
+@pytest.mark.asyncio
+async def test_inflight_video_is_saved_before_generation_and_blocks_after_restart(monkeypatch, tmp_path):
+    from gemini_drawer.commands.actions import SelfieVideoAction
+    from unittest.mock import AsyncMock
+    plugin = _plugin_with_cooldown(monkeypatch, 0)
+    path = tmp_path / 'guards.json'
+    await plugin._load_video_guards(path)
+    async def simulate_restart(*args, **kwargs):
+        restored = _plugin_with_cooldown(monkeypatch, 0)
+        await restored._load_video_guards(path)
+        run = AsyncMock()
+        monkeypatch.setattr(restored, '_run_action', run)
+        result = await restored._run_media_tool('gemini_selfie_video', SelfieVideoAction, 's1', 'video', {})
+        assert not result['success']
+        run.assert_not_awaited()
+        raise RuntimeError('runner interrupted')
+    monkeypatch.setattr(plugin, '_run_action', simulate_restart)
+    monkeypatch.setattr(plugin, '_pick_wait_message', lambda kind: '')
+    with pytest.raises(RuntimeError, match='runner interrupted'):
+        await plugin._run_media_tool('gemini_selfie_video', SelfieVideoAction, 's1', 'video', {})
+    assert not plugin._media_is_pending('s1')
+
+
+@pytest.mark.asyncio
+async def test_corrupt_video_guard_file_blocks_without_overwriting_it(monkeypatch, tmp_path):
+    from gemini_drawer.commands.actions import SelfieVideoAction
+    from unittest.mock import AsyncMock
+    path = tmp_path / 'guards.json'
+    path.write_text('broken json')
+    plugin = _plugin_with_cooldown(monkeypatch, 0)
+    await plugin._load_video_guards(path)
+    run = AsyncMock()
+    monkeypatch.setattr(plugin, '_run_action', run)
+    result = await plugin._run_media_tool('gemini_selfie_video', SelfieVideoAction, 's1', 'video', {})
+    assert not result['success']
+    assert not await plugin._save_video_guards()
+    assert path.read_text() == 'broken json'
+    run.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_guard_write_failure_does_not_create_video(monkeypatch, tmp_path):
+    from gemini_drawer.commands.actions import SelfieVideoAction
+    from unittest.mock import AsyncMock, Mock
+    plugin = _plugin_with_cooldown(monkeypatch, 0)
+    await plugin._load_video_guards(tmp_path / 'guards.json')
+    monkeypatch.setattr('gemini_drawer.plugin._atomic_write_text', Mock(side_effect=OSError('disk full')))
+    run = AsyncMock()
+    monkeypatch.setattr(plugin, '_run_action', run)
+    result = await plugin._run_media_tool('gemini_selfie_video', SelfieVideoAction, 's1', 'video', {})
+    assert not result['success'] and result['retryable'] is False
+    run.assert_not_awaited()
+    assert not plugin._media_is_pending('s1')
