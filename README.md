@@ -40,8 +40,6 @@ pip install -r requirements.txt
 
 ---
 
----
-
 ## 自然语言交互 🆕
 
 本插件提供 `gemini_generate_image`、`gemini_selfie`、`gemini_selfie_video` 三个原生 Tool，允许 Bot 理解自然语言的绘图、自拍和自拍视频请求。
