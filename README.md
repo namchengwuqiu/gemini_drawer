@@ -38,24 +38,6 @@
 pip install -r requirements.txt
 ```
 
-### 开发者发布版本
-
-1. 更新 `_manifest.json` 的 `version`、`config.py` 中的 `version` / `config_version` 默认值以及 README 顶部版本号，并在 `CHANGELOG.md` 添加对应的 `## vX.Y.Z` 更新说明。保持插件 ID `namchengwuqiu.gemini_drawer` 不变，按实际兼容情况声明 MaiBot 与 SDK 版本范围。
-2. 提交并推送代码，然后创建、推送与 manifest 版本一致的 Tag。例如发布当前 `1.15.4`：
-
-   ```shell
-   git push origin main
-   git tag v1.15.4
-   git push origin v1.15.4
-   ```
-
-3. GitHub Actions 的 **Publish plugin release** 工作流会校验 Tag、插件 ID、manifest 版本及必需文件，从更新日志提取该版本说明，并创建正式 GitHub Release。使用 GitHub 自动生成的源码包即可，无需额外上传附件。
-4. 等待插件市场同步、审核和收录。市场收录完成后，详情页会显示该版本供用户选择。
-
-如果 Tag 已推送但 Release 尚未创建，可在仓库 Actions 页面手动运行 **Publish plugin release**，填写已有 Tag。历史版本需在其实际对应的提交上创建 Tag 和 Release；不要把多个版本号都指向当前代码。
-
-已经收录的 Tag 与提交应保持不变；后续修复请使用新版本号发布。完整要求见[插件市场贡献指南](https://github.com/Mai-with-u/plugin-repo/blob/main/CONTRIBUTING.md)和[多版本说明](https://github.com/Mai-with-u/plugin-repo/blob/main/VERSIONING.md)。
-
 ---
 
 ---
