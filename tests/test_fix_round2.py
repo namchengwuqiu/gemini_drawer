@@ -15,7 +15,6 @@ from gemini_drawer.core.budget import TimeBudget
 from gemini_drawer.core.channel_url import split_url_and_model
 from gemini_drawer.providers import DrawRequest, Endpoint
 from gemini_drawer.providers.gemini import GeminiProvider
-from gemini_drawer.providers import tsai
 from gemini_drawer.utils import limits, net
 from gemini_drawer.utils.http import iter_sse_lines
 from gemini_drawer.utils.http import read_body_capped
@@ -71,25 +70,24 @@ def reset_policy():
     net.reset_policy()
 
 
-@pytest.mark.parametrize('protocol', ['seedance_video', 'tsai_video'])
 @pytest.mark.parametrize('recover', [False, True])
-async def test_completed_video_without_url_never_recreates(wire, protocol, recover):
+async def test_completed_video_without_url_never_recreates(wire, recover):
     polls = 0
 
     def handler(request):
         nonlocal polls
         if request.method == 'POST':
-            return httpx.Response(200, json={'id': 'task-1'} if protocol == 'seedance_video' else {'data': {'id': 'task-1'}})
+            return httpx.Response(200, json={'id': 'task-1'})
         polls += 1
         url = {'video_url': 'https://8.8.8.8/result.mp4'} if recover and polls == 2 else {}
         if request.url.host == '8.8.8.8':
             return httpx.Response(200, content=b'movie')
-        data = {'status': 'succeeded', 'content': url} if protocol == 'seedance_video' else {'data': {'status': 'completed', 'result': url}}
+        data = {'status': 'succeeded', 'content': url}
         return httpx.Response(200, json=data)
 
     wire.handler = handler
     result, error = await video.process_video_generation('p', None, None,
-        [endpoint(protocol), endpoint('openai_chat', 'second.example')], None, LOGGER)
+        [endpoint('seedance_video'), endpoint('openai_chat', 'second.example')], None, LOGGER)
     assert sum(r.method == 'POST' for r in wire.requests) == 1
     if recover:
         assert result == base64.b64encode(b'movie').decode() and not error
@@ -99,22 +97,19 @@ async def test_completed_video_without_url_never_recreates(wire, protocol, recov
 
 
 @pytest.mark.parametrize('case', ['invalid_json', 'wrong_result', 'wrong_data', 'wrong_top_level'])
-async def test_image_parse_failure_preserves_accepted_state(wire, monkeypatch, case):
-    monkeypatch.setattr(tsai, 'POLL_ATTEMPTS', 2)
+async def test_image_parse_failure_preserves_accepted_state(wire, case):
     def handler(request):
         if case == 'invalid_json':
             return httpx.Response(200, content=b'{"truncated":')
-        if request.method == 'POST':
-            return httpx.Response(200, json={'data': {'id': 'task-1'}})
-        data = {'data': {'status': 'completed', 'result': ['changed-schema']}}
+        data = {'candidates': [{'content': {'parts': ['changed-schema']}}]}
         if case == 'wrong_data':
-            data = {'data': ['changed-schema']}
+            data = {'candidates': ['changed-schema']}
         if case == 'wrong_top_level':
             data = ['changed-schema']
         return httpx.Response(200, json=data)
     wire.handler = handler
     result, error = await pipeline.run_drawing(DrawRequest('p'),
-        [endpoint('gemini' if case == 'invalid_json' else 'tsai'), endpoint('gemini', 'second.example')], None, LOGGER)
+        [endpoint('gemini'), endpoint('gemini', 'second.example')], None, LOGGER)
     assert not result and '未自动切换' in error
     assert sum(r.method == 'POST' for r in wire.requests) == 1
     assert not wire.records
@@ -150,7 +145,7 @@ async def test_debug_success_without_media_does_not_dump_response(wire, caplog):
     assert 'internal.local' not in caplog.text + image_error + video_error
 
 
-@pytest.mark.parametrize('protocol', ['openai_chat', 'gemini', 'seedance_video', 'tsai_video', 'agnes_video'])
+@pytest.mark.parametrize('protocol', ['openai_chat', 'gemini', 'seedance_video', 'agnes_video'])
 async def test_all_video_submit_bodies_are_capped(wire, monkeypatch, protocol):
     monkeypatch.setattr(limits, 'MAX_HTTP_RESPONSE_BYTES', 128)
     wire.handler = lambda request: httpx.Response(200, json=video_ok(padding='X' * 4096))
@@ -163,11 +158,11 @@ async def test_all_video_submit_bodies_are_capped(wire, monkeypatch, protocol):
     assert len(wire.requests) == 1 and not wire.records
 
 
-async def test_tsai_poll_body_is_capped_without_recreation(wire, monkeypatch):
+async def test_seedance_poll_body_is_capped_without_recreation(wire, monkeypatch):
     monkeypatch.setattr(limits, 'MAX_HTTP_RESPONSE_BYTES', 128)
-    wire.handler = lambda r: httpx.Response(200, json={'data': {'id': 'task-1'}} if r.method == 'POST' else {'padding': 'X' * 4096})
-    result, error = await pipeline.run_drawing(DrawRequest('p'),
-        [endpoint('tsai'), endpoint('gemini', 'second.example')], None, LOGGER)
+    wire.handler = lambda r: httpx.Response(200, json={'id': 'task-1'} if r.method == 'POST' else {'padding': 'X' * 4096})
+    result, error = await video.process_video_generation('p', None, None,
+        [endpoint('seedance_video'), endpoint('openai_chat', 'second.example')], None, LOGGER)
     assert not result and '上限' in error
     assert [r.method for r in wire.requests] == ['POST', 'GET'] and not wire.records
 

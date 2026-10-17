@@ -11,7 +11,6 @@ from gemini_drawer.core.channel_url import (
     KIND_IMAGES,
     KIND_OPENAI_CHAT,
     KIND_SEEDANCE_VIDEO,
-    KIND_TSAI,
     KIND_UNKNOWN,
     classify_channel_url,
     is_gemini_suffix,
@@ -27,8 +26,8 @@ GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-p
     ("https://ark.example/api/v3/images/generations", KIND_IMAGES),
     ("https://ark.example/api/v3/contents/generations/tasks", KIND_SEEDANCE_VIDEO),
     ("https://apihub.agnes-ai.com/v1/videos", KIND_AGNES_VIDEO),
-    ("https://api.tavr.top/?endpoint=image", KIND_TSAI),
-    ("https://api.tsart.lat/v1/x", KIND_TSAI),
+    ("https://api.tavr.top/?endpoint=image", KIND_UNKNOWN),
+    ("https://api.tsart.lat/v1/x", KIND_UNKNOWN),
     ("not-a-url", KIND_UNKNOWN),
     ("ftp://example.com/v1/chat/completions", KIND_UNKNOWN),
 ])
@@ -137,11 +136,10 @@ async def test_gemini_channel_with_query_is_accepted(command_factory):
 
 
 @pytest.mark.asyncio
-async def test_tsai_channel_without_model_is_accepted(command_factory):
+async def test_removed_tsai_channel_is_rejected(command_factory):
     cmd, channels = command_factory("/添加渠道 tsai:https://api.tavr.top/?endpoint=image")
 
     result = await cmd.handle_admin_command()
 
-    assert result == (True, "添加成功", True)
-    assert channels["tsai"]["url"] == "https://api.tavr.top/?endpoint=image"
-    assert channels["tsai"].get("is_video", False) is False
+    assert result[1] == "URL格式错误"
+    assert not channels

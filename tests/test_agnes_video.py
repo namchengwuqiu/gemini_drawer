@@ -536,7 +536,7 @@ async def test_agnes_create_gateway_errors_follow_submission_state(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("protocol,stream", [
-    ("agnes_video", False), ("seedance_video", False), ("tsai_video", False),
+    ("agnes_video", False), ("seedance_video", False),
     ("gemini", False), ("openai_chat", False), ("openai_chat", True),
 ])
 async def test_video_503_failover_is_consistent_across_protocols(mock_api, monkeypatch, protocol, stream):

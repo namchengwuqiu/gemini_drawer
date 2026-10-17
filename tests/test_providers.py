@@ -17,7 +17,6 @@ from gemini_drawer.providers import (
     GeminiProvider,
     GptImageProvider,
     OpenAICompatProvider,
-    TsAiProvider,
     describe_protocol,
     resolve_provider,
 )
@@ -32,7 +31,6 @@ JPG_URL = f"data:image/jpeg;base64,{JPG_B64}"
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/x:generateContent"
 OPENAI_URL = "https://api.example.com/v1/chat/completions"
 DOUBAO_URL = "https://ark.cn-beijing.volces.com/api/v3/images/generations"
-TSAI_URL = "https://api.tavr.top/?endpoint=image"
 
 SAFETY = [{"category": "HARM_CATEGORY_SEXUALLY_EXPLICIT", "threshold": "BLOCK_NONE"}]
 
@@ -63,7 +61,6 @@ def test_gpt_image_wins_over_openai_on_chat_completions_url():
 
 def test_registry_order_is_load_bearing():
     assert REGISTRY.index(GptImageProvider) < REGISTRY.index(OpenAICompatProvider)
-    assert REGISTRY.index(TsAiProvider) == len(REGISTRY) - 1
 
 
 @pytest.mark.parametrize(
@@ -73,8 +70,6 @@ def test_registry_order_is_load_bearing():
         (Endpoint(type="custom_o", url=OPENAI_URL, key="k", model="gpt-4o"), OpenAICompatProvider),
         (Endpoint(type="lmarena", url="http://127.0.0.1:666/v1", key=""), OpenAICompatProvider),
         (Endpoint(type="custom_d", url=DOUBAO_URL, key="k", model="doubao-x"), DoubaoProvider),
-        (Endpoint(type="custom_t", url=TSAI_URL, key="k"), TsAiProvider),
-        (Endpoint(type="custom_tsart_a", url="https://whatever.example/api", key="k"), TsAiProvider),
         (Endpoint(type="custom_x", url=OPENAI_URL, key="k", model="GPT-Image-2"), GptImageProvider),
     ],
 )
@@ -405,36 +400,6 @@ def test_gpt_image_model_match_is_case_insensitive_and_prefix_agnostic():
     ep = Endpoint(type="custom_x", url=OPENAI_URL, key="k", model="l0veyou/GPT-Image-2-16-9")
     assert isinstance(resolve_provider(ep), GptImageProvider)
     assert GptImageProvider().build(ep, text_req()).json["model"] == "l0veyou/GPT-Image-2-16-9"
-
-
-# ── TS-AI ────────────────────────────────────────────────────
-
-
-def test_tsai_text_only():
-    ep = Endpoint(type="custom_tsart", url=TSAI_URL, key="ts-1")
-    call = TsAiProvider().build(ep, text_req())
-
-    assert call.url == "https://api.tavr.top/?endpoint=image_generation"
-    assert call.headers["x-api-key"] == "ts-1"
-    assert call.json == {"prompt": "一只猫", "workflow": "rr3", "seed": -1}
-
-
-def test_tsai_with_image_switches_to_editing():
-    ep = Endpoint(type="custom_tsart", url=TSAI_URL, key="ts-1", model="rr4")
-    call = TsAiProvider().build(ep, one_image_req())
-
-    assert call.url == "https://api.tavr.top/?endpoint=image_editing"
-    assert call.json == {
-        "prompt": "换成水彩风格",
-        "workflow": "rr4",
-        "seed": -1,
-        "image": PNG_URL,
-    }
-
-
-def test_tsai_multi_image_uses_first_only():
-    ep = Endpoint(type="custom_tsart", url=TSAI_URL, key="ts-1")
-    assert TsAiProvider().build(ep, two_image_req()).json["image"] == PNG_URL
 
 
 # ── DrawRequest 契约 ─────────────────────────────────────────

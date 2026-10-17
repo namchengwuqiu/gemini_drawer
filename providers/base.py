@@ -7,7 +7,7 @@ Gemini Drawer Provider 适配层 —— 数据契约与基类
 - matches():  判断某个端点是否归自己处理（注册表按顺序取首个命中者）
 - build():    把 Endpoint + DrawRequest 翻译成一次 HttpCall（URL / headers / body）
 - fetch():    发出请求并返回图片数据列表；默认实现覆盖「一次性 POST」与「SSE 流式」
-              两种常见形态，TS-AI 这类"建任务 + 轮询"的异步 API 覆写此方法。
+              两种常见形态；"建任务 + 轮询"的异步 API 需覆写此方法。
 
 新增一种渠道类型 = 新增一个 provider 文件 + 在 providers/__init__.py 注册表登记一行。
 """

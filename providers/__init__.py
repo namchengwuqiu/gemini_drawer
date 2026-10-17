@@ -8,7 +8,6 @@ resolve_provider() 按 REGISTRY 顺序返回首个 matches() 命中的 provider�
   统一接管，再按渠道 URL 决定走 images 端点还是 chat 端点；若先匹配 OpenAI
   就会被一律当成 chat 处理，images 形态的渠道拿不到 multipart 图生图。
 - AgnesImage 必须早于 Doubao —— 两者都使用 /images/generations，但请求字段不同。
-- TsAi 放在最后 —— 其 URL 特征最宽松（endpoint=image 等），避免误吞其他渠道。
 """
 from __future__ import annotations
 
@@ -21,7 +20,6 @@ from .doubao import DoubaoProvider
 from .gemini import GeminiProvider
 from .gpt_image import GptImageProvider
 from .openai_compat import OpenAICompatProvider
-from .tsai import TsAiProvider
 
 REGISTRY: List[Type[Provider]] = [
     GptImageProvider,
@@ -29,7 +27,6 @@ REGISTRY: List[Type[Provider]] = [
     AgnesImageProvider,
     DoubaoProvider,
     GeminiProvider,
-    TsAiProvider,
 ]
 
 
@@ -92,5 +89,4 @@ __all__ = [
     "GeminiProvider",
     "GptImageProvider",
     "OpenAICompatProvider",
-    "TsAiProvider",
 ]

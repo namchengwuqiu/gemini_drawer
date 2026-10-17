@@ -16,7 +16,7 @@ BaseMultiImageDrawCommand:
 BaseVideoCommand:
     视频生成基类，仅使用标记为 is_video=True 的渠道。
 
-协议差异（Gemini / OpenAI / 豆包 / gpt-image / TS-AI）全部在 providers/ 中，
+协议差异（Gemini / OpenAI / 豆包 / gpt-image / Agnes）全部在 providers/ 中，
 端点轮询与 Key 记账在 pipeline.py 中，本模块不再关心。
 """
 import asyncio

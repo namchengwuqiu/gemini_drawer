@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.15.4
+> **Version:** 1.15.5
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -300,6 +300,8 @@ Key 错误；请求已发出但没等到成功响应时（读写超时、单端�
 
 ### 渠道协议（protocol）🆕
 
+自 v1.15.5 起移除 TS-AI 绘图（`tsai`）与视频（`tsai_video`）协议及别名，不再支持其专用建任务和轮询接口。已有这类渠道请删除，或在服务商确实提供兼容接口时修改 API 地址并选择对应的受支持协议；仅更改协议名称不能转换请求格式。其他渠道、提示词与 Key 数据保留。
+
 每个渠道用哪种请求格式，由 `protocol` 字段决定。可选值固定为市面上常见的几种：
 
 | 协议 id | 适用 | 说明 |
@@ -309,10 +311,8 @@ Key 错误；请求已发出但没等到成功响应时（读写超时、单端�
 | `images_json` | 绘图 | 豆包 seedream 及同协议中转：`/images/generations`，JSON 带 `image` / `response_format` |
 | `gemini` | 绘图 / 视频 | Google Gemini 原生 `generateContent` |
 | `agnes_image` | 绘图 | Agnes Image，参数放在 `extra_body` |
-| `tsai` | 绘图 | TS-AI 建任务 + 轮询 |
 | `seedance_video` | 视频 | 豆包 seedance：`/contents/generations/tasks` 建任务 + 轮询 |
 | `agnes_video` | 视频 | Agnes Video：`/v1/videos` 建任务 + 轮询 |
-| `tsai_video` | 视频 | TS-AI 视频：`?endpoint=video_generation` |
 
 ```text
 /渠道设置协议 gpt_image2 images_json   # 显式指定
@@ -320,7 +320,7 @@ Key 错误；请求已发出但没等到成功响应时（读写超时、单端�
 /渠道列表                              # 每个渠道下方显示「协议: xxx」或「协议: xxx(自动)」
 ```
 
-- **没写 `protocol` 的老渠道**照旧按 URL / 模型名自动识别，行为与之前完全一致；`/渠道列表` 会把识别结果标成 `(自动)`。识别不到的渠道会提示用 `/渠道设置协议` 指定。
+- **没写 `protocol` 的渠道**按 URL / 模型名自动识别当前支持的协议；`/渠道列表` 会把识别结果标成 `(自动)`。识别不到的渠道会提示用 `/渠道设置协议` 指定。
 - **显式指定后不再猜**：例如把 `grok-imagine-image-2.0` 配在 `/v1/images/generations` 上，以前只能靠"模型名不含 gpt-image 且不是 agnes"才落到豆包协议；现在直接写 `images_json` 即可，改模型名也不会串到别的协议。
 - 常见别名会自动归一：`doubao` / `seedream` → `images_json`，`openai` → `openai_chat`，`gpt-image` → `gpt_image`，`seedance` → `seedance_video`，`agnes` → `agnes_image`。
 - 协议必须与渠道类型匹配：绘图渠道只能设绘图协议，视频渠道（`/渠道设置视频 ... true`）只能设视频协议；`openai_chat` 和 `gemini` 两边通用。
@@ -455,7 +455,7 @@ Host 与 TLS 名称。本地绘图渠道需要下载本地地址时，推荐在 
            )
    ```
 
-   若该 API 是「建任务 + 轮询」式的异步接口，再覆写 `async def fetch(...)`（参考 `providers/tsai.py`）。
+   若该 API 是「建任务 + 轮询」式的异步接口，再覆写 `async def fetch(...)`，并设置 `task_timeout` 为整个任务的生成时限。
 
 2. 在 `providers/__init__.py` 的 `REGISTRY` 中登记。**顺序有语义**：`resolve_provider()`
    返回首个 `matches()` 命中的 provider，判定条件越具体的越要靠前。例如 gpt-image 必须排在
@@ -505,6 +505,7 @@ pending 会话隔离、等待提示随机取值）。测试不参与插件运行
 
 - **渠道与 Key**：渠道信息和所属 Key 在同一列表展示，可就地添加、编辑、删除或重置 Key；未匹配渠道的历史 Key 在页面底部保留管理入口。
 - **渠道**：通过弹框添加、编辑渠道，配置 API 地址、模型、图片/视频类型、协议、返回格式和启用状态，也可删除渠道。
+- **主题适配（v1.15.5）**：页面跟随主程序主题；弹框及固定标题、按钮区域叠加主题底色，修复“未来复古”主题下列表透出和滚动内容重叠的问题。
 - **提示词**：按名称或全文搜索、分页浏览，添加、修改和删除本地提示词。
 - **Key**：通过弹框添加或替换密钥，调整所属渠道、状态及错误禁用上限；重置可启用密钥并清零错误次数。渠道下添加时自动填写所属渠道，Key 较多时支持按渠道分页。
 

@@ -290,37 +290,6 @@ async def test_doubao_url_response_is_returned_as_url(mock_http, fake_keys):
     assert img == ["https://cdn.example/out.png"]
 
 
-TSAI_URL = "https://api.tavr.top/?endpoint=image"
-
-
-@pytest.mark.asyncio
-async def test_tsai_completed_without_url_never_resubmits(mock_http, fake_keys, monkeypatch):
-    """任务已完成但地址暂不可用：只查询同一任务，绝不换端点重新生成（F7）。"""
-    from gemini_drawer.providers import tsai
-
-    monkeypatch.setattr(tsai, "POLL_INTERVAL", 0.0)
-    monkeypatch.setattr(tsai, "POLL_ATTEMPTS", 2)
-
-    def handler(request):
-        if request.method == "POST":
-            return httpx.Response(200, json={"data": {"id": "t1"}})
-        return httpx.Response(200, json={"data": {"status": "completed", "result": {}}})
-
-    mock_http["handler"] = handler
-
-    img, err = await pipeline.run_drawing(
-        DrawRequest(prompt="p"),
-        [endpoint(type_="custom_tsai", url=TSAI_URL, key="k1"), second_endpoint()],
-        None,
-        _logger(),
-    )
-
-    assert img == []
-    assert "未自动切换其他端点" in err
-    assert sum(r.method == "POST" for r in mock_http["requests"]) == 1
-    assert fake_keys.calls == []   # 在途任务不记 Key 失效
-
-
 @pytest.mark.asyncio
 async def test_async_task_provider_uses_whole_task_timeout(mock_http, fake_keys, monkeypatch):
     """单次 HTTP timeout 不能当作整个任务的上限（F8）：fetch 比 call.timeout 慢仍应完成。"""
@@ -335,7 +304,7 @@ async def test_async_task_provider_uses_whole_task_timeout(mock_http, fake_keys,
             return [IMG_B64]
 
     monkeypatch.setattr(pipeline, "resolve_provider", lambda ep: SlowTaskProvider())
-    monkeypatch.setattr(pipeline, "describe_protocol", lambda ep: ("tsai", False))
+    monkeypatch.setattr(pipeline, "describe_protocol", lambda ep: ("test_task", False))
 
     img, err = await pipeline.run_drawing(
         DrawRequest(prompt="p"), [endpoint()], None, _logger(),

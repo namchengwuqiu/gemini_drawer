@@ -1,8 +1,8 @@
 """渠道 URL 的解析与分类。
 
 管理命令与 WebUI 共用这里的解析/校验逻辑，避免"命令按子串识别、页面按
-urlsplit 校验"两套规则漂移（P1-10）。分类只基于解析后的 path / query /
-hostname，不做任意子串匹配。
+urlsplit 校验"两套规则漂移（P1-10）。分类只基于解析后的 path，
+不做任意子串匹配。
 """
 from __future__ import annotations
 
@@ -14,8 +14,6 @@ import httpx
 _GEMINI_SUFFIXES = (":generateContent", ":streamGenerateContent")
 #: Gemini 生成方法名（出现在 path 最后一个冒号之后；可能带 query/fragment）
 _GEMINI_METHOD_NAMES = ("generateContent", "streamGenerateContent")
-#: TS-AI 的域名特征
-_TSAI_HOSTS = ("tsart.lat", "tavr.top")
 
 #: 分类结果（与 core/protocols.py 的协议 id 对齐）
 KIND_OPENAI_CHAT = "openai_chat"
@@ -23,7 +21,6 @@ KIND_GEMINI = "gemini"
 KIND_IMAGES = "images"
 KIND_SEEDANCE_VIDEO = "seedance_video"
 KIND_AGNES_VIDEO = "agnes_video"
-KIND_TSAI = "tsai"
 KIND_UNKNOWN = "unknown"
 
 
@@ -49,14 +46,12 @@ def with_api_key(url: str, key: str) -> str:
 
 
 def classify_channel_url(url: str) -> str:
-    """按解析后的 path / query / hostname 分类渠道 URL。"""
+    """按解析后的 path 分类渠道 URL。"""
     try:
         parts = parse_channel_url(url)
     except ChannelUrlError:
         return KIND_UNKNOWN
     path = parts.path
-    query = parts.query.lower()
-    host = (parts.hostname or "").lower()
 
     if path.rstrip("/").endswith("/v1/videos"):
         return KIND_AGNES_VIDEO
@@ -68,8 +63,6 @@ def classify_channel_url(url: str) -> str:
         return KIND_SEEDANCE_VIDEO
     if path.endswith(_GEMINI_SUFFIXES):
         return KIND_GEMINI
-    if "endpoint=" in query or any(marker in host for marker in _TSAI_HOSTS):
-        return KIND_TSAI
     return KIND_UNKNOWN
 
 

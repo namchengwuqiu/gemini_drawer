@@ -18,7 +18,6 @@ IMAGE_PROTOCOLS: Dict[str, str] = {
     "images_json": "豆包 seedream 及同协议中转；/images/generations，JSON 带 image / response_format",
     "gemini": "Google Gemini 原生 generateContent",
     "agnes_image": "Agnes Image；/images/generations，参数放在 extra_body",
-    "tsai": "TS-AI 建任务 + 轮询",
 }
 
 #: 视频渠道协议：id -> 说明
@@ -26,7 +25,6 @@ VIDEO_PROTOCOLS: Dict[str, str] = {
     "openai_chat": "OpenAI /chat/completions 兼容，从回复里提取视频",
     "seedance_video": "豆包 seedance；/contents/generations/tasks 建任务 + 轮询",
     "agnes_video": "Agnes Video；/v1/videos 建任务 + 轮询",
-    "tsai_video": "TS-AI 视频；?endpoint=video_generation 建任务 + 轮询",
     "gemini": "Google Gemini 原生 generateContent",
 }
 
@@ -45,11 +43,8 @@ PROTOCOL_ALIASES: Dict[str, str] = {
     "google": "gemini",
     "agnes": "agnes_image",
     "agnes_img": "agnes_image",
-    "tsart": "tsai",
-    "ts-ai": "tsai",
     "doubao_video": "seedance_video",
     "seedance": "seedance_video",
-    "tsai_video_generation": "tsai_video",
 }
 
 ALL_PROTOCOLS: Dict[str, str] = {**IMAGE_PROTOCOLS, **VIDEO_PROTOCOLS}

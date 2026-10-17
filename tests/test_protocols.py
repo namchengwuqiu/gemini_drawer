@@ -11,7 +11,7 @@ from gemini_drawer.core.protocols import (
     ("openai_chat", "openai_chat"), ("OpenAI", "openai_chat"), (" chat ", "openai_chat"),
     ("doubao", "images_json"), ("Seedream", "images_json"), ("gpt-image", "gpt_image"),
     ("google", "gemini"), ("agnes", "agnes_image"), ("seedance", "seedance_video"),
-    ("doubao_video", "seedance_video"), ("tsai_video", "tsai_video"),
+    ("doubao_video", "seedance_video"), ("tsai_video", None), ("tsai", None), ("tsart", None), ("ts-ai", None), ("tsai_video_generation", None),
     ("nonsense", None), ("", None), (None, None), ("   ", None),
 ])
 def test_normalize_protocol(raw, expected):
@@ -36,8 +36,8 @@ def test_shared_protocol_ids_between_image_and_video():
     ("https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks", "doubao-seedance", "seedance_video"),
     ("https://relay.example/contents/generations/tasks", "", "seedance_video"),
     ("http://host.docker.internal:4399/v1/chat/completions", "grok-imagine-video", "openai_chat"),
-    ("https://api.tavr.top/?endpoint=video_generation", "default", "tsai_video"),
-    ("https://linux.tsart.lat/api", "", "tsai_video"),
+    ("https://api.tavr.top/?endpoint=video_generation", "default", None),
+    ("https://linux.tsart.lat/api", "", None),
     ("https://generativelanguage.googleapis.com/v1beta/models/veo:generateContent", "", "gemini"),
     ("https://a.b/unknown", "", None),
 ])
@@ -52,3 +52,13 @@ def test_describe_video_protocol_prefers_explicit_and_falls_back_on_bad_value():
     assert video.describe_video_protocol(ep) == ("openai_chat", False)
     ep = {"url": "http://x/v1/chat/completions", "protocol": "nonsense"}
     assert video.describe_video_protocol(ep) == ("openai_chat", False)
+
+
+@pytest.mark.parametrize("url", [
+    "https://api.tavr.top/?endpoint=image",
+    "https://api.tsart.lat/api?endpoint=image_generation",
+    "https://relay.example/api?endpoint=image_editing",
+])
+def test_removed_tsai_image_endpoint_has_no_provider(url):
+    from gemini_drawer.providers import resolve_provider
+    assert resolve_provider({"type": "custom_tsart", "url": url, "protocol": "tsai"}) is None

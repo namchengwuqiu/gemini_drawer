@@ -84,8 +84,6 @@ async def test_invalid_agnes_channel_is_not_saved(command_factory, suffix):
     ("https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent", "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent", None, False),
     ("https://ark.example/api/v3/images/generations:doubao-seedream-4-5", "https://ark.example/api/v3/images/generations", "doubao-seedream-4-5", False),
     ("https://ark.example/api/v3/contents/generations/tasks:doubao-seedance", "https://ark.example/api/v3/contents/generations/tasks", "doubao-seedance", True),
-    ("https://api.tavr.top/?endpoint=image:rr3", "https://api.tavr.top/?endpoint=image", "rr3", False),
-    ("https://api.tavr.top/?endpoint=video_generation:default", "https://api.tavr.top/?endpoint=video_generation", "default", True),
 ])
 async def test_existing_channel_formats_are_unchanged(command_factory, suffix, url, model, is_video):
     cmd, channels = command_factory(f"/添加渠道 legacy:{suffix}")

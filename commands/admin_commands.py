@@ -38,7 +38,6 @@ from ..core.channel_url import (
     KIND_IMAGES,
     KIND_OPENAI_CHAT,
     KIND_SEEDANCE_VIDEO,
-    KIND_TSAI,
     KIND_UNKNOWN,
     classify_channel_url,
     is_gemini_suffix,
@@ -354,8 +353,7 @@ class AddChannelCommand(BaseAdminCommand):
                     "- Gemini: 以 :generateContent 结尾\n"
                     "- 图片 API（豆包/Agnes）: 包含 /images/generations\n"
                     "- 豆包视频: 包含 /contents/generations/tasks\n"
-                    "- Agnes 视频: /v1/videos，使用 agnes-video- 系列模型\n"
-                    "- TS-AI: 包含 tsart.lat 或 tavr.top 或 endpoint="
+                    "- Agnes 视频: /v1/videos，使用 agnes-video- 系列模型"
                 )
                 return True, "URL格式错误", True
 
@@ -391,10 +389,6 @@ class AddChannelCommand(BaseAdminCommand):
                     await self._send_text("❌ Gemini 格式 URL 应以 `:generateContent` 结尾，且不要附加模型名！")
                     return True, "URL格式错误", True
 
-            elif kind == KIND_TSAI:
-                if "endpoint=video" in url.lower():
-                    is_video_channel = True
-
             channel_info = {"url": url, "enabled": True, "stream": False}
             if model:
                 channel_info["model"] = model
@@ -412,10 +406,8 @@ class AddChannelCommand(BaseAdminCommand):
                 api_type = "Agnes 图片" if is_agnes_image else "豆包图片"
             elif kind == KIND_OPENAI_CHAT:
                 api_type = "OpenAI"
-            elif kind == KIND_GEMINI:
-                api_type = "Gemini"
             else:
-                api_type = "TS-AI"
+                api_type = "Gemini"
             msg = f"✅ 自定义渠道 `{name}` 添加成功！\n类型: {api_type}\n请使用 `/渠道添加key {name} <your-api-key>` 添加密钥。"
             if is_video_channel:
                 msg += "\n已自动标记为视频渠道。"

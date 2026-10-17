@@ -2,7 +2,7 @@
 Gemini Drawer 视频生成
 
 视频侧按 API 协议分流。Agnes 的创建/轮询逻辑放在 agnes_video 中；
-既有豆包、TS-AI、OpenAI 兼容与 Gemini 渠道保持原有分支。
+既有豆包、OpenAI 兼容与 Gemini 渠道保持原有分支。
 
 失败响应与已接收状态共同决定是否换渠道，与图片链路保持一致：
 
@@ -60,8 +60,6 @@ from ..utils import (
 )
 from ..utils.limits import MAX_SSE_ACCUMULATED_CHARS, MAX_VIDEO_BASE64_CHARS, MAX_VIDEO_BYTES
 
-_TSAI_VIDEO_MARKERS = ("api.tavr.top", "api.tsart.lat", "tsart.lat", "endpoint=video_generation")
-
 #: 生成阶段之后（成片下载 + 发送）需要保留的时间
 POST_GENERATION_RESERVE_SECONDS = 60.0
 #: 单个渠道至少需要这么多剩余时间才值得尝试
@@ -69,7 +67,7 @@ MIN_ENDPOINT_SECONDS = 5.0
 #: 成片下载的尝试次数（第 1 次带认证头，第 2 次不带）
 DOWNLOAD_ATTEMPTS = 2
 #: 单个渠道生成阶段的安全上限（秒）。协议自身的截止控制（Agnes 的生成总超时、
-#: TS-AI/豆包的轮询预算检查）优先，这里只兜底"持续有数据、协议内检查覆盖不到"
+#: 豆包的轮询预算检查）优先，这里只兜底"持续有数据、协议内检查覆盖不到"
 #: 的长等待；仍会被剩余预算进一步收敛（F1）。
 VIDEO_CHANNEL_SAFETY_SECONDS = 480.0
 
@@ -93,8 +91,6 @@ def detect_video_protocol(endpoint: Dict[str, Any]) -> Optional[str]:
         return "seedance_video"
     if "/chat/completions" in api_url:
         return "openai_chat"
-    if any(marker in api_url for marker in _TSAI_VIDEO_MARKERS):
-        return "tsai_video"
     if "generateContent" in api_url:
         return "gemini"
     return None
@@ -464,88 +460,6 @@ async def process_video_generation(
                     if not video_data and debug_mode:
                         logger.warning("[调试模式] 视频非流式响应未提取到数据，原始响应:")
                         logger.warning("[调试模式] 已省略上游原文，避免暴露凭据或媒体数据")
-
-        # TS-AI 视频生成
-        elif protocol == "tsai_video":
-            base_url = api_url.split("?")[0]
-            request_url = f"{base_url}?endpoint=video_generation"
-            headers["x-api-key"] = api_key
-
-            tsai_video_payload = {
-                "prompt": prompt,
-                "seed": -1
-            }
-
-            if base64_img and mime_type:
-                tsai_video_payload["mode"] = "i2v"
-                tsai_video_payload["image"] = f"data:{mime_type};base64,{base64_img}"
-            else:
-                tsai_video_payload["mode"] = "t2v"
-                tsai_video_payload["width"] = 832
-                tsai_video_payload["height"] = 480
-
-            async with httpx.AsyncClient(headers={"Accept-Encoding": "identity"}, proxy=proxy, timeout=stage_timeout(60.0), follow_redirects=True, event_hooks={"response": [state.observe]}) as client:
-                response = await _submit_request(
-                    client, request_url, headers=headers, json_payload=tsai_video_payload,
-                    stage="创建TS-AI视频任务",
-                )
-
-                try:
-                    created = response.json()
-                except ValueError as exc:
-                    raise SubmissionUncertainError(
-                        "TS-AI 视频任务提交后返回了无效 JSON，无法确认任务状态；"
-                        "为避免重复生成，不自动切换渠道"
-                    ) from exc
-                created_data = created.get("data") if isinstance(created, dict) else None
-                task_id = created_data.get("id") if isinstance(created_data, dict) else None
-                if not task_id:
-                    raise SubmissionUncertainError(
-                        "未获取到TS-AI视频任务ID；"
-                        "无法确认任务是否已创建，不自动切换渠道"
-                    )
-
-                logger.info("[视频] TS-AI任务已创建，开始查询同一任务")
-
-                poll_url = f"{base_url}?endpoint=task_status&task_id={task_id}"
-                for _ in range(120): # 最多10分钟
-                    if budget is not None and not budget.can_start(
-                        reserve=POST_GENERATION_RESERVE_SECONDS, minimum=MIN_ENDPOINT_SECONDS
-                    ):
-                        raise BudgetExpiredError(
-                            "TS-AI 视频轮询超出时间预算，已停止等待；上游任务可能仍在运行"
-                        )
-                    await asyncio.sleep(5)
-                    try:
-                        poll_resp = await request_capped(client, "GET", poll_url, headers=headers)
-                    except httpx.HTTPError as exc:
-                        # 任务已创建：查询阶段的网络错误只重试同一任务，绝不重新提交
-                        logger.warning(f"[视频] TS-AI 查询暂时失败: {type(exc).__name__}，继续查询同一任务")
-                        continue
-                    if poll_resp.status_code != 200:
-                        continue
-                    try:
-                        poll_data = poll_resp.json()
-                    except ValueError:
-                        continue
-
-                    task_data = poll_data.get("data") if isinstance(poll_data, dict) else None
-                    if not isinstance(task_data, dict):
-                        continue
-                    status = task_data.get("status")
-                    if status == "completed":
-                        result_data = task_data.get("result")
-                        if not isinstance(result_data, dict):
-                            continue
-                        video_url = result_data.get("video_url") or result_data.get("image_url")
-                        if isinstance(video_url, str) and video_url:
-                            video_data = f"url:{video_url}"
-                            break
-                        continue
-                    elif status == "failed":
-                        raise GenerationRejectedError("TS-AI视频任务明确报告生成失败")
-                else:
-                    raise SubmissionUncertainError("TS-AI视频任务轮询超时，已停止等待同一任务")
 
         # Gemini 格式
         elif protocol == "gemini":

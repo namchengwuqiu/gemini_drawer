@@ -10,6 +10,10 @@
     --maibot-primary-foreground: #fff;
     --maibot-danger: #b3261e;
     --maibot-radius: 8px;
+    /* 主题卡片可能透明；浮层需要先铺页面底色，再叠加卡片色。 */
+    --drawer-dialog-background:
+      linear-gradient(var(--maibot-surface), var(--maibot-surface)),
+      var(--maibot-background);
   }
   * {
     box-sizing: border-box;
@@ -295,7 +299,7 @@
     padding: 24px;
     max-width: calc(100% - 32px);
     color: var(--maibot-foreground);
-    background: var(--maibot-surface);
+    background: var(--drawer-dialog-background);
   }
   dialog::backdrop {
     background: rgba(0, 0, 0, 0.3);
@@ -456,13 +460,13 @@
     padding: 0;
     border: 1px solid var(--maibot-border);
     border-radius: var(--maibot-radius);
-    background: var(--maibot-surface);
+    background: var(--drawer-dialog-background);
     color: var(--maibot-foreground);
   }
   .editor-dialog .editor-heading {
     position: sticky;
     top: 0;
-    background: var(--maibot-surface);
+    background: var(--drawer-dialog-background);
     padding: 16px 24px;
     margin: 0;
     z-index: 1;
@@ -473,7 +477,7 @@
   .editor-dialog .form-actions {
     position: sticky;
     bottom: 0;
-    background: var(--maibot-surface);
+    background: var(--drawer-dialog-background);
     padding-top: 12px;
   }
   dialog::backdrop {
@@ -1151,10 +1155,8 @@
               ["images_json", "Images JSON / Seedream"],
               ["gemini", "Gemini"],
               ["agnes_image", "Agnes 图片"],
-              ["tsai", "TS-AI 图片"],
               ["seedance_video", "Seedance 视频"],
               ["agnes_video", "Agnes 视频"],
-              ["tsai_video", "TS-AI 视频"],
             ],
           });
           field("response_format", "返回格式", data.response_format || "", {
