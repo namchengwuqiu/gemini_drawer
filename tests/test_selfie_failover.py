@@ -165,11 +165,13 @@ class WaitingBody(httpx.AsyncByteStream):
 
 
 @pytest.mark.parametrize('kind', ['image', 'video_agnes', 'video_chat'])
-async def test_selfie_does_not_recreate_after_success_response(runtime, monkeypatch, kind):
+async def test_selfie_200_without_result_respects_media_type(runtime, monkeypatch, kind):
     configure(runtime, kind)
     shorten_first_timeout(monkeypatch, kind)
 
     async def handler(request):
+        if request.url.host == 'second.example' and kind == 'image':
+            return success_response(kind)
         assert request.url.host == 'first.example'
         if kind == 'video_agnes':
             if request.method == 'POST':
@@ -179,6 +181,17 @@ async def test_selfie_does_not_recreate_after_success_response(runtime, monkeypa
 
     runtime.handler = handler
     result = await invoke(runtime, kind)
+
+    if kind == 'image':
+        assert result['success'] is True
+        assert sum(r.method == 'POST' for r in runtime.requests) == 2
+        runtime.send.image.assert_awaited_once()
+        runtime.send.custom.assert_not_awaited()
+        assert runtime.http_sends == []
+        runtime.records.assert_called_once_with('second-key', True, False)
+        assert not runtime.plugin._media_is_pending('stream-1')
+        assert runtime.plugin._media_cooldown_remaining('stream-1') > 0
+        return
 
     assert result['success'] is False
     assert sum(r.method == 'POST' for r in runtime.requests) == 1

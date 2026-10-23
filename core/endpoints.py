@@ -15,6 +15,7 @@ from typing import Any, Dict, List, NamedTuple, Optional
 
 from .managers import data_manager, key_manager
 from .protocols import normalize_protocol
+from ..providers.base import Endpoint
 
 
 class ChannelFields(NamedTuple):
@@ -27,6 +28,7 @@ class ChannelFields(NamedTuple):
     stream: bool
     response_format: Optional[str]
     protocol: Optional[str]
+    timeout: Optional[float] = None
 
 
 def _optional_str(value: Any) -> Optional[str]:
@@ -49,6 +51,7 @@ def _channel_fields(channel_info: Any) -> ChannelFields:
             stream=bool(channel_info.get("stream", False)),
             response_format=_optional_str(channel_info.get("response_format")),
             protocol=normalize_protocol(channel_info.get("protocol")),
+            timeout=Endpoint.normalize_timeout(channel_info.get("timeout")),
         )
 
     if isinstance(channel_info, str) and ":" in channel_info:
@@ -85,6 +88,8 @@ def _make_endpoint(name: str, key: str, fields: ChannelFields) -> Dict[str, Any]
         endpoint["response_format"] = fields.response_format
     if fields.protocol:
         endpoint["protocol"] = fields.protocol
+    if fields.timeout is not None:
+        endpoint["timeout"] = fields.timeout
     return endpoint
 
 

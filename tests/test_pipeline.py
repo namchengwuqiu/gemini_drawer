@@ -13,6 +13,7 @@ import pytest
 from gemini_drawer.core import pipeline
 from gemini_drawer.core.budget import TimeBudget
 from gemini_drawer.providers import DrawRequest, HttpCall
+from gemini_drawer.core.errors import SubmissionUncertainError
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"x" * 32
 IMG_B64 = base64.b64encode(b"generated-image-bytes" * 80).decode()
@@ -228,6 +229,112 @@ async def test_sse_stream_accumulates_before_extracting(mock_http, fake_keys):
 
     assert img == [IMG_B64]          # 完整，未被截断
     assert err == ""
+
+
+@pytest.mark.parametrize("stream,body", [
+    (True, "data: [DONE]\n\n"),
+    (True, 'data: {"choices":[{"delta":{"content":"generation failed"}}]}\n\ndata: [DONE]\n\n'),
+    (False, '{"choices": []}'),
+    (False, '{"truncated":'),
+])
+async def test_response_without_image_tries_next_channel(mock_http, fake_keys, monkeypatch, stream, body):
+    monkeypatch.setattr(pipeline, "RETRY_DELAY", 0)
+
+    def handler(request):
+        if request.url.host == "first.example":
+            return httpx.Response(200, text=body)
+        return httpx.Response(200, json=openai_image_response())
+
+    mock_http["handler"] = handler
+    attempts = pipeline.DrawingAttempts()
+    img, err = await pipeline.run_drawing(
+        DrawRequest("p"),
+        [endpoint("custom_web2api2k", "https://first.example/v1/chat/completions", "k1", "m", stream), second_endpoint()],
+        None, _logger(), budget=TimeBudget(280, reserve_seconds=0), attempts=attempts,
+    )
+    assert img == [IMG_B64] and not err
+    assert len(mock_http["requests"]) == attempts.count == 2
+    assert fake_keys.calls == [{"key": "k2", "success": True, "force_disable": False}]
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout, httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError, asyncio.TimeoutError])
+async def test_stream_transport_failure_after_200_tries_next_channel(mock_http, fake_keys, monkeypatch, failure):
+    monkeypatch.setattr(pipeline, "RETRY_DELAY", 0)
+
+    class BrokenStream(httpx.AsyncByteStream):
+        async def __aiter__(self):
+            yield b": generating\n\n"
+            raise failure("upstream failed")
+
+    def handler(request):
+        if request.url.host == "first.example":
+            return httpx.Response(200, stream=BrokenStream())
+        return httpx.Response(200, json=openai_image_response())
+
+    mock_http["handler"] = handler
+    img, err = await pipeline.run_drawing(
+        DrawRequest("p"),
+        [endpoint("custom_web2api2k", "https://first.example/v1/chat/completions", "k1", "m", True), second_endpoint()],
+        None, _logger(),
+    )
+    assert img == [IMG_B64] and not err
+    assert len(mock_http["requests"]) == 2
+    assert fake_keys.calls == [{"key": "k2", "success": True, "force_disable": False}]
+
+
+async def test_empty_provider_result_respects_remaining_budget(mock_http, fake_keys, monkeypatch):
+    now = [0.0]
+    budget = TimeBudget(100, reserve_seconds=0, clock=lambda: now[0])
+
+    class EmptyProvider:
+        task_timeout = None
+
+        def build(self, endpoint, request):
+            return HttpCall(endpoint.url)
+
+        async def fetch(self, *args):
+            now[0] = 70.0
+            return []
+
+    monkeypatch.setattr(pipeline, "resolve_provider", lambda ep: EmptyProvider())
+    attempts = pipeline.DrawingAttempts()
+    img, err = await pipeline.run_drawing(
+        DrawRequest("p"), [endpoint(), second_endpoint()], None, _logger(), budget=budget, attempts=attempts,
+    )
+    assert not img and "剩余时间不足" in err
+    assert attempts.count == 1 and not fake_keys.calls
+
+
+async def test_empty_results_exhaust_channels_once(mock_http, fake_keys, monkeypatch):
+    monkeypatch.setattr(pipeline, "RETRY_DELAY", 0)
+    mock_http["handler"] = lambda r: httpx.Response(200, json={"choices": []})
+    attempts = pipeline.DrawingAttempts()
+    img, err = await pipeline.run_drawing(
+        DrawRequest("p"), [second_endpoint("k1"), second_endpoint("k2")], None, _logger(), attempts=attempts,
+    )
+    assert not img and "没有更多可用端点" in err and "未自动切换" not in err
+    assert len(mock_http["requests"]) == attempts.count == 2
+    assert not fake_keys.calls
+
+
+async def test_accepted_async_task_still_prevents_channel_switch(mock_http, fake_keys, monkeypatch):
+    class AcceptedTaskProvider:
+        task_timeout = 120.0
+
+        def build(self, endpoint, request):
+            return HttpCall(endpoint.url)
+
+        async def fetch(self, call, client, *args):
+            await client.post(call.url)
+            raise SubmissionUncertainError("任务结果不确定")
+
+    mock_http["handler"] = lambda r: httpx.Response(200, json={"id": "task-1"})
+    monkeypatch.setattr(pipeline, "resolve_provider", lambda ep: AcceptedTaskProvider())
+    img, err = await pipeline.run_drawing(
+        DrawRequest("p"), [endpoint(), second_endpoint()], None, _logger(),
+    )
+    assert not img and "未自动切换" in err
+    assert len(mock_http["requests"]) == 1 and not fake_keys.calls
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -27,9 +28,7 @@ from ..utils import (
     MediaTooLargeError,
     extract_all_image_data,
     extract_http_error_reason,
-    extract_text_failure_reason,
     redact_url,
-    sanitize_upstream_text,
 )
 from ..utils.limits import (
     MAX_DEBUG_SSE_LINE_CHARS,
@@ -53,6 +52,8 @@ class Endpoint:
     response_format: Optional[str] = None
     #: 渠道显式指定的协议 id（见 core/protocols.py）；None 表示按 URL / 模型名自动识别。
     protocol: Optional[str] = None
+    #: 渠道单次生成等待上限（秒）；仍受整条命令的总预算限制。
+    timeout: Optional[float] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Endpoint":
@@ -65,7 +66,18 @@ class Endpoint:
             stream=bool(data.get("stream", False)),
             response_format=data.get("response_format") or None,
             protocol=data.get("protocol") or None,
+            timeout=cls.normalize_timeout(data.get("timeout")),
         )
+
+    @staticmethod
+    def normalize_timeout(value: Any) -> Optional[float]:
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            timeout = float(value)
+        except (TypeError, ValueError):
+            return None
+        return timeout if math.isfinite(timeout) and timeout > 0 else None
 
     @property
     def model_name(self) -> str:
@@ -297,10 +309,6 @@ class Provider(ABC):
             if img_data:
                 logger.info(f"从累积内容中成功提取 {len(img_data)} 张图片数据。")
                 return img_data
-            reason = extract_text_failure_reason(pseudo_response)
-        else:
-            reason = ""
-
         if debug_sse_lines:
             logger.warning(
                 f"[调试模式] SSE流未提取到图片，累积 {len(debug_sse_lines)} 条数据:"

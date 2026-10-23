@@ -97,7 +97,7 @@ async def test_completed_video_without_url_never_recreates(wire, recover):
 
 
 @pytest.mark.parametrize('case', ['invalid_json', 'wrong_result', 'wrong_data', 'wrong_top_level'])
-async def test_image_parse_failure_preserves_accepted_state(wire, case):
+async def test_image_parse_failure_without_result_tries_next_channel(wire, case):
     def handler(request):
         if case == 'invalid_json':
             return httpx.Response(200, content=b'{"truncated":')
@@ -110,8 +110,9 @@ async def test_image_parse_failure_preserves_accepted_state(wire, case):
     wire.handler = handler
     result, error = await pipeline.run_drawing(DrawRequest('p'),
         [endpoint('gemini'), endpoint('gemini', 'second.example')], None, LOGGER)
-    assert not result and '未自动切换' in error
-    assert sum(r.method == 'POST' for r in wire.requests) == 1
+    assert not result
+    assert '没有更多可用端点' in error
+    assert len(wire.requests) == 2
     assert not wire.records
 
 

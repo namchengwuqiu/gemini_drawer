@@ -8,8 +8,8 @@ Gemini Drawer 绘图管线
 
 - 整体时间预算（core/budget.py）：预算耗尽后不再开始新的端点或请求；每次
   任务协议的 fetch 使用独立任务期限，一次性请求使用该请求的绝对期限；
-- HTTP 错误响应继续切换端点；请求已发出但未收到成功响应时，读写超时或单端点
-  等待超时也在总预算内继续轮换（可能重复生成）；已接收结果的异常不再换端点；
+- HTTP 错误响应继续切换端点；同步请求未取得图片时，空响应、解析失败、传输
+  故障及超时在总预算内继续轮换（可能重复生成）；取得图片或创建异步任务后不再换端点；
 - Key 记账通过工作线程执行，不在事件循环里做同步文件读写；记账失败只记
   警告，绝不影响本次生成结果或触发换端点。
 """
@@ -137,9 +137,13 @@ async def run_drawing(
         if attempts is not None:
             attempts.count += 1
         state = GenerationState()
+        result_received = False
         log_token = set_request_secrets(endpoint.key)
         try:
             call = provider.build(endpoint, request)
+            # 慢速网页桥接可单独配置等待上限，不影响其他渠道默认值。
+            if endpoint.timeout is not None:
+                call.timeout = endpoint.timeout
             payload = call.json if call.json is not None else call.data
             logger.info(
                 f"准备向 {endpoint.type} 端点发送请求。URL: {call.safe_url}, "
@@ -163,7 +167,8 @@ async def run_drawing(
                 # 任务阶段上限，一次性/流式协议用单次请求的 timeout。单次
                 # HTTPX timeout 只约束单次请求，流式响应持续有数据时可以被
                 # 超过，所以两者都不能省。取消只终止本地等待，不能撤回上游
-                # 已提交的任务，因此超时的处理与"提交结果不确定"一致：不换端点。
+                # 已提交的任务。同步绘图未取得图片时仍可在总预算内换端点；
+                # 异步协议已创建任务时继续保留原任务，避免重复提交。
                 fetch_cap: Optional[float] = provider.task_timeout or call.timeout
                 if budget is not None:
                     fetch_cap = budget.stage_timeout(
@@ -177,6 +182,7 @@ async def run_drawing(
                     )
                 else:
                     img_data = await provider.fetch(call, client, logger, debug_mode)
+                result_received = bool(img_data)
                 state.accepted = True
 
             if not img_data:
@@ -192,19 +198,31 @@ async def run_drawing(
             logger.warning(f"端点 {endpoint.type} 因时间预算耗尽中止: {e}")
             last_error = str(e)
             break
-        except (asyncio.TimeoutError, httpx.ReadTimeout, httpx.WriteTimeout, SubmissionUncertainError) as e:
-            if state.is_unconfirmed_timeout(e):
-                # 请求已发出但没等到成功响应。上游可能仍在生成，换端点意味着
-                # 可能重复出图与计费；但只试一个端点就失败同样不可接受，因此
-                # 在总预算内继续轮换（已接收结果的异常不走这里）。
-                last_error = f"端点 {endpoint.type} 等待响应超时，服务端结果尚未确认"
+        except (
+            asyncio.TimeoutError, httpx.ReadTimeout, httpx.WriteTimeout,
+            httpx.ReadError, httpx.WriteError, httpx.RemoteProtocolError,
+            SubmissionUncertainError,
+        ) as e:
+            if (
+                not result_received and provider.task_timeout is None
+            ) or state.is_unconfirmed_timeout(e):
+                # 同步接口的 HTTP 200 仅说明响应开始，不能证明图片已生成。
+                # 没拿到图片时继续轮换；不确定的失败不记为 Key 失效。
+                # 原上游可能仍在处理，因此回退仍可能重复生成或计费。
+                detail = (
+                    "等待响应超时，未取得可用图片"
+                    if isinstance(e, asyncio.TimeoutError) else describe_error(e)
+                )
+                last_error = f"端点 {endpoint.type}: {detail}"
                 if i + 1 >= len(endpoint_list):
                     last_error += "；没有更多可用端点"
+                    logger.warning(last_error)
                     break
                 if budget is not None and not budget.can_start(
                     reserve=POST_GENERATION_RESERVE_SECONDS, minimum=MIN_ENDPOINT_SECONDS
                 ):
                     last_error += "；剩余时间不足，未继续尝试"
+                    logger.warning(last_error)
                     break
                 logger.warning(f"{last_error}；继续尝试下一个端点")
                 await asyncio.sleep(RETRY_DELAY)
