@@ -28,6 +28,7 @@ DataManager (配置数据管理器):
     - data_manager: DataManager 的单例实例
 """
 import json
+from collections import Counter
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
@@ -692,9 +693,17 @@ class DataManager:
         show_restricted: bool = False,
     ) -> Dict[str, str]:
         """返回本地词库 + 只读大香蕉词库的运行时合并视图。"""
+        prompts, _ = self._effective_prompt_catalog(include_banana, show_restricted)
+        return prompts
+
+    def _effective_prompt_catalog(
+        self, include_banana: bool, show_restricted: bool,
+    ) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """同时保留大香蕉原始键到合并后名称的映射，供短名称解析使用。"""
         merged = dict(self.get_prompts())
+        banana_names: Dict[str, str] = {}
         if not include_banana:
-            return merged
+            return merged, banana_names
 
         for name, prompt in self.get_banana_prompts(show_restricted=show_restricted).items():
             target_name = name
@@ -706,7 +715,56 @@ class DataManager:
                     target_name = f"{name}{suffix}{counter}"
                     counter += 1
             merged[target_name] = prompt
-        return merged
+            banana_names[name] = target_name
+        return merged, banana_names
+
+    def get_banana_prompt_aliases(self, show_restricted: bool = False) -> Dict[str, str]:
+        """返回原始键到可调用短名称的映射；同名词条全部追加阿拉伯数字。"""
+        entries = self.get_banana_prompt_entries(show_restricted=True)
+        titles = {
+            name: str(entry.get("source_title") or name.rsplit("/", 1)[-1]).strip()
+            for name, entry in entries.items()
+        }
+        counts = Counter(titles.values())
+        # 先保留真实标题和完整名称，避免“举猫猫”的编号占用已有的“举猫猫1”。
+        all_prompts, _ = self._effective_prompt_catalog(True, True)
+        local_names = set(self.get_prompts())
+        reserved = set(all_prompts) | set(titles.values())
+        used = set()
+        aliases: Dict[str, str] = {}
+        # 使用完整键排序，远端调整列表顺序、切换过滤开关均不改变编号。
+        for name in sorted(entries):
+            title = titles[name]
+            alias = title
+            if counts[title] > 1 or title in local_names or (title in all_prompts and title != name):
+                number = 1
+                while f"{title}{number}" in reserved or f"{title}{number}" in used:
+                    number += 1
+                alias = f"{title}{number}"
+            used.add(alias)
+            if show_restricted or not entries[name].get("restricted", False):
+                aliases[name] = alias
+        return aliases
+
+    def get_prompt_matches(
+        self, name: str, include_banana: bool = True, show_restricted: bool = False,
+    ) -> Dict[str, str]:
+        """完整名称优先，其次解析短名称；未编号的重名标题返回所有候选。"""
+        prompts, banana_names = self._effective_prompt_catalog(include_banana, show_restricted)
+        if name in prompts:
+            return {name: prompts[name]}
+        if not include_banana:
+            return {}
+        aliases = self.get_banana_prompt_aliases(show_restricted)
+        for original, alias in aliases.items():
+            if name == alias:
+                return {alias: prompts[banana_names[original]]}
+        entries = self.get_banana_prompt_entries(show_restricted)
+        return {
+            alias: prompts[banana_names[original]]
+            for original, alias in aliases.items()
+            if name == str(entries[original].get("source_title") or original.rsplit("/", 1)[-1]).strip()
+        }
 
     def _migrate_from_toml(self):
         config_path = self.plugin_dir / "config.toml"

@@ -100,11 +100,13 @@ class DrawerWebUI:
             data, keys = self._snapshot()
             if kind == "banana":
                 banana, entries = self._banana_entries()
+                aliases = self.data.get_banana_prompt_aliases(show_restricted=True)
                 rows = []
                 for name, entry in entries.items():
-                    if search.casefold() not in (name + " " + json.dumps(entry, ensure_ascii=False)).casefold():
+                    alias = aliases[name]
+                    if search.casefold() not in (alias + " " + name + " " + json.dumps(entry, ensure_ascii=False)).casefold():
                         continue
-                    rows.append({"id": name, "name": entry.get("source_title") or name,
+                    rows.append({"id": name, "name": alias,
                                  "section_title": entry.get("section_title") or "未分类",
                                  "preview": entry["content"][:160], "length": len(entry["content"]),
                                  "restricted": bool(entry.get("restricted", False))})
@@ -186,8 +188,10 @@ class DrawerWebUI:
                 if record_id not in entries:
                     raise ValueError("词条已更新或不存在，请刷新词库列表。")
                 entry = entries[record_id]
+                alias = self.data.get_banana_prompt_aliases(show_restricted=True)[record_id]
                 result = {"id": record_id, "readonly": True,
                           "payload": {"text": entry["content"], "source_title": entry.get("source_title") or record_id,
+                                      "command": f"/+{alias}",
                                       "section_title": entry.get("section_title") or "未分类",
                                       "prompt_id": str(entry.get("prompt_id") or ""),
                                       "restricted": bool(entry.get("restricted", False))}}

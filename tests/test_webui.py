@@ -277,6 +277,23 @@ def test_banana_readonly_listing_search_and_full_detail(store):
     assert [path.read_bytes() for path in (data.data_file, data.banana_file, keys.keys_file, config)] == before
 
 
+def test_banana_page_shows_callable_numbered_names(store):
+    web, data, _, _ = store
+    data.save_banana_data({"prompts": {
+        "大香蕉/B/举猫猫": {"content": "second", "source_title": "举猫猫"},
+        "大香蕉/A/举猫猫": {"content": "first", "source_title": "举猫猫"},
+    }})
+    before = data.banana_file.read_bytes()
+    result = web.list_records("banana", search="举猫猫2")
+    assert result["total"] == 1
+    row = result["rows"][0]
+    assert row["name"] == "举猫猫2" and row["id"] == "大香蕉/B/举猫猫"
+    detail = web.detail("banana", row["id"])
+    assert detail["payload"]["command"] == "/+举猫猫2"
+    assert data.get_prompt_matches(row["name"]) == {row["name"]: "second"}
+    assert data.banana_file.read_bytes() == before
+
+
 @pytest.mark.parametrize("operation", ["save", "delete", "reset"])
 def test_banana_mutations_are_rejected_without_changing_files(store, operation):
     web, data, keys, config = store

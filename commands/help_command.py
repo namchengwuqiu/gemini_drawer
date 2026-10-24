@@ -63,7 +63,8 @@ class HelpCommand(CtxSendMixin, BaseCommand):
         if banana_enabled:
             user_text += "\n\n【大香蕉扩展词库】\n"
             user_text += f"▪️ 当前可用 {len(banana_prompts)} 条"
-            user_text += "\n▪️ 搜索结果可直接用 `/+ 完整名称` 调用"
+            user_text += "\n▪️ 使用 `/+名称` 调用；同名词条自动编号，如 `/+名称1`、`/+名称2`"
+            user_text += "\n▪️ 名称与管理页一致，也支持 `/+ 完整名称`"
         else:
             user_text += "\n\n【大香蕉扩展词库】\n▪️ 当前未启用"
 

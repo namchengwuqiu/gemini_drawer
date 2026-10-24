@@ -89,21 +89,29 @@ class UniversalPromptCommand(BaseDrawCommand):
         logger.info(f"[Universal] 收到指令: {msg}")
         
         match = re.search(r"(?:^|[\s\]])/\+\s*(.+?)(?:$|\s*\[)", msg)
-        if not match: return False, None, False
+        if not match:
+            return False, None, False
         
         cmd_name = match.group(1).strip()
-        prompts = data_manager.get_effective_prompts(
+        prompts = data_manager.get_prompt_matches(
+            cmd_name,
             include_banana=self.get_config("behavior.enable_banana_prompts", True),
             show_restricted=self.get_config("behavior.show_restricted", False),
         )
         
-        if cmd_name not in prompts:
+        if not prompts:
             logger.info(f"[Universal] 未找到 Prompt: {cmd_name}")
-            await self.send_text(f"❌ 未找到指令: {cmd_name}\n请使用 `/添加提示词 {cmd_name}:内容` 添加。")
+            await self.send_text(f"❌ 未找到指令: {cmd_name}\n请在绘图管理页查看可用名称；同名词条请带上末尾数字。")
             return True, f"未找到指令: {cmd_name}", False
+
+        if len(prompts) > 1:
+            choices = "\n".join(f"▪️ /+{name}" for name in list(prompts)[:20])
+            more = f"\n还有 {len(prompts) - 20} 条，请在绘图管理页查看。" if len(prompts) > 20 else ""
+            await self.send_text(f"找到多个同名词条，请使用编号名称：\n{choices}{more}")
+            return True, "提示词同名，请选择编号", True
             
+        cmd_name, self.current_prompt_content = next(iter(prompts.items()))
         logger.info(f"[Universal] 找到 Prompt: {cmd_name}，准备执行。")
-        self.current_prompt_content = prompts[cmd_name]
         return await super().execute()
 
     async def get_prompt(self) -> Optional[str]:
