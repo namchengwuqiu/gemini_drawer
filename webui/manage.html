@@ -541,6 +541,12 @@
     <span id="error-text"></span
     ><button class="maibot-button" id="retry">重试</button>
   </div>
+  <nav id="channel-filter" class="tabs" aria-label="渠道类型">
+    <button class="maibot-button" data-media="all">全部渠道</button>
+    <button class="maibot-button" data-media="image">图片渠道</button>
+    <button class="maibot-button" data-media="video">视频渠道</button>
+  </nav>
+  <p id="channel-order-hint" class="muted">图片和视频分别按请求顺序调用，互不影响。</p>
   <div class="toolbar">
     <form id="search-form" class="search">
       <input
@@ -641,6 +647,7 @@
       banana: "大香蕉词库",
     };
     let kind = "channels",
+      mediaType = "all",
       search = "",
       page = 1,
       pages = 1,
@@ -727,7 +734,7 @@
       $("fields").replaceChildren();
       Object.keys(inputs).forEach((name) => delete inputs[name]);
     }
-    async function navigate(nextKind, nextSearch, nextPage) {
+    async function navigate(nextKind, nextSearch, nextPage, nextMedia = mediaType) {
       if (busy || !(await mayDiscard())) return;
       setBusy(true);
       try {
@@ -735,6 +742,7 @@
           kind: nextKind,
           search: nextSearch,
           page: nextPage,
+          media_type: nextMedia,
         });
       } catch (error) {
         showError(error);
@@ -752,7 +760,7 @@
       setBusy(true);
       $("error").hidden = true;
       try {
-        const result = await call("query", "list", { kind, search, page });
+        const result = await call("query", "list", { kind, search, page, media_type: mediaType });
         page = result.page;
         pages = result.pages;
         Object.entries(result.counts).forEach(
@@ -762,7 +770,7 @@
           `共 ${result.total} 条${search ? "匹配记录" : ""}`;
         $("page-info").textContent = `${page} / ${pages}`;
         renderRows(result.rows);
-        renderUnassigned(result.unassigned);
+        renderUnassigned(mediaType === "all" ? result.unassigned : null);
         if (kind === "banana") {
           $("banana-meta").textContent =
             `只读词库 · 本地同步：${result.banana.synced_at} · 云端版本：${result.banana.remote_last_updated}`;
@@ -824,6 +832,8 @@
         if (kind === "channels") {
           row.className = "channel-heading";
           cells[0].append(text("div", record.url, "subline"));
+          cells[0].append(text("div", record.request_order == null
+            ? "请求顺序：默认" : `请求顺序：${record.request_order}`, "subline"));
           cells[1].append(
             text("div", record.model || "未指定模型"),
             text(
@@ -1044,6 +1054,8 @@
       input.required = !!options.required;
       input.readOnly = !!options.readonly;
       if (options.maxLength) input.maxLength = options.maxLength;
+      if (options.min !== undefined) input.min = options.min;
+      if (options.max !== undefined) input.max = options.max;
       if (options.type === "number") input.step = "1";
       if (options.hint) {
         const hint = text("small", options.hint);
@@ -1090,7 +1102,8 @@
           : {
               id: "",
               version: "",
-              payload: editKind === "keys" ? { type: presetChannel } : {},
+              payload: editKind === "keys" ? { type: presetChannel }
+                : editKind === "channels" ? { is_video: mediaType === "video" } : {},
               has_key: false,
             };
         closeEditor();
@@ -1151,6 +1164,12 @@
             maxLength: 4000,
           });
           field("model", "模型（可选）", data.model, { maxLength: 200 });
+          field("request_order", "请求顺序（可选）", data.request_order, {
+            type: "number",
+            min: 1,
+            max: 2147483647,
+            hint: "数字越小越先请求；已设置的渠道优先于未设置的渠道。同值或留空保持原顺序，清空可恢复默认。",
+          });
           field("protocol", "请求协议", data.protocol || "", {
             options: [
               ["", "自动识别"],
@@ -1188,6 +1207,7 @@
             "model",
             "protocol",
             "response_format",
+            "request_order",
             "enabled",
             "is_video",
             "stream",
@@ -1271,6 +1291,7 @@
             model: value("model"),
             protocol: value("protocol"),
             response_format: value("response_format"),
+            request_order: value("request_order") === "" ? null : Number(value("request_order")),
             enabled: inputs.enabled.checked,
             is_video: inputs.is_video.checked,
             stream: inputs.stream.checked,
@@ -1413,12 +1434,20 @@
         $("save").click();
       }
     });
+    document.querySelectorAll("[data-media]").forEach((button) => {
+      button.onclick = () => navigate("channels", search, 1, button.dataset.media);
+    });
     window.maibot.ready
       .then(() => {
         const state = window.maibot.page.state || {};
         kind = ["prompts", "banana"].includes(state.kind)
           ? state.kind
           : "channels";
+        mediaType = ["image", "video"].includes(state.media_type) ? state.media_type : "all";
+        $("channel-filter").hidden = kind !== "channels";
+        $("channel-order-hint").hidden = kind !== "channels";
+        document.querySelectorAll("[data-media]").forEach((button) =>
+          button.setAttribute("aria-pressed", String(button.dataset.media === mediaType)));
         search = typeof state.search === "string" ? state.search : "";
         page = Number.isInteger(state.page) && state.page > 0 ? state.page : 1;
         $("search").value = search;

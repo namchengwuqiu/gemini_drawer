@@ -312,3 +312,50 @@ def test_banana_missing_and_corrupt_file_are_distinguished(store):
     with pytest.raises(ValueError, match="JSON 格式"):
         web.list_records("banana")
     assert data.banana_file.read_text() == '{"prompts":'
+
+
+def test_channel_request_order_save_list_clear_and_runtime(store, monkeypatch):
+    from gemini_drawer.core import endpoints
+    web, data, keys, _ = store
+    monkeypatch.setattr(endpoints, "data_manager", data)
+    monkeypatch.setattr(endpoints, "key_manager", keys)
+    web.change("channels", "save", "preferred", "", {
+        "url": "https://example.com/v1/images/generations", "key": "preferred-key", "request_order": 1})
+    assert endpoints.build_drawing_endpoints()[0]["type"] == "custom_preferred"
+    assert next(row for row in web.list_records("channels")["rows"] if row["id"] == "preferred")["request_order"] == 1
+    assert json.loads(data.data_file.read_text())["channels"]["preferred"]["request_order"] == 1
+    detail = web.detail("channels", "preferred")
+    web.change("channels", "save", "preferred", detail["version"], {"request_order": None})
+    assert "request_order" not in data.get_channels()["preferred"]
+    assert endpoints.build_drawing_endpoints()[0]["type"] == "custom_google"
+
+
+@pytest.mark.parametrize("invalid", [True, 0, -1, 1.5, "1", {}, [], 2147483648])
+def test_channel_request_order_invalid_does_not_write(store, invalid):
+    web, data, _, _ = store
+    before = data.data_file.read_bytes()
+    detail = web.detail("channels", "google")
+    with pytest.raises(ValueError, match="请求顺序"):
+        web.change("channels", "save", "google", detail["version"], {"request_order": invalid})
+    assert data.data_file.read_bytes() == before
+
+
+def test_channel_media_filter_before_pagination_and_with_search(store):
+    web, data, _, _ = store
+    data.data["channels"] = {
+        **{f"image-{i}": {"url": "https://example.com/v1/images/generations"} for i in range(25)},
+        **{f"video-{i}": {"url": "https://example.com/video", "is_video": True} for i in range(23)},
+        "legacy": "https://example.com/v1/images/generations:sk-legacy",
+    }
+    data.save_data()
+    images = web.list_records("channels", media_type="image", page=2)
+    assert images["total"] == 26 and len(images["rows"]) == 6
+    assert all(not row["is_video"] for row in images["rows"])
+    videos = web.list_records("channels", media_type="video", page=2)
+    assert videos["total"] == 23 and len(videos["rows"]) == 3
+    assert all(row["is_video"] for row in videos["rows"])
+    assert web.list_records("channels", media_type="video", search="image")["total"] == 0
+    assert web.list_records("channels")["total"] == 49
+    assert web.list_records("prompts", media_type="video")["total"] == 1
+    with pytest.raises(ValueError, match="渠道类型"):
+        web.list_records("channels", media_type="invalid")

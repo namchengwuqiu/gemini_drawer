@@ -245,10 +245,41 @@ def test_is_admin_compares_as_string():
 
 
 def test_message_user_id_extraction():
-    class UserInfo: user_id = 12345
-    class MsgInfo: user_info = UserInfo()
-    class Msg: message_info = MsgInfo()
+    class UserInfo:
+        user_id = 12345
+    class MsgInfo:
+        user_info = UserInfo()
+    class Msg:
+        message_info = MsgInfo()
 
     assert message_user_id(Msg()) == "12345"
     assert message_user_id(object()) is None
     assert message_user_id(None) is None
+
+
+@pytest.mark.parametrize("video", [False, True])
+def test_request_order_prioritizes_all_keys_and_preserves_defaults(wire, video):
+    channels = {
+        name: {"url": OPENAI, "key": f"inline-{name}", "is_video": video, **extra}
+        for name, extra in [("a", {}), ("b", {"request_order": 2}),
+                            ("c", {"request_order": 1}), ("d", {"request_order": 2})]
+    }
+    wire(channels, [key(f"managed-{name}", name) for name in channels])
+    build = ep_mod.build_video_endpoints if video else ep_mod.build_drawing_endpoints
+    result = [e["key"] for e in build()]
+    assert result[:2] == ["inline-c", "managed-c"]
+    assert result[-2:] == ["inline-a", "managed-a"]
+    assert result[2:6] == (["inline-b", "managed-b", "inline-d", "managed-d"] if video else
+                           ["inline-b", "inline-d", "managed-b", "managed-d"])
+    for channel in channels.values():
+        channel.pop("request_order", None)
+    assert [e["key"] for e in build()] == (
+        [f"{kind}-{name}" for name in channels for kind in ("inline", "managed")] if video else
+        [f"{kind}-{name}" for kind in ("inline", "managed") for name in channels])
+
+
+@pytest.mark.parametrize("invalid", [True, 0, -1, 1.5, "1", {}, 2147483648])
+def test_invalid_stored_request_order_uses_original_order(wire, invalid):
+    wire({"a": {"url": OPENAI, "key": "a"},
+          "b": {"url": OPENAI, "key": "b", "request_order": invalid}})
+    assert [e["key"] for e in ep_mod.build_drawing_endpoints()] == ["a", "b"]

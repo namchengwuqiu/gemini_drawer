@@ -350,7 +350,7 @@ class _SelfieActionBase(_DrawActionMixin, BaseAction):
                         "task_name": model_name,
                         "request_type": self.polish_request_type,
                         "temperature": 0.5,
-                        "max_tokens": 512,
+                        "max_tokens": 4096,
                     }
                     try:
                         # SDK 2.8+ 将 model 定义为具体模型名，任务配置名（如 replyer）

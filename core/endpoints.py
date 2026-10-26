@@ -93,10 +93,24 @@ def _make_endpoint(name: str, key: str, fields: ChannelFields) -> Dict[str, Any]
     return endpoint
 
 
+def _order_endpoints(
+    endpoints: List[Dict[str, Any]], channels: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """显式顺序优先；稳定排序保留同值、未设置渠道及其 Key 的原顺序。"""
+    def order(endpoint):
+        channel = channels.get(endpoint["type"][len("custom_"):])
+        value = channel.get("request_order") if isinstance(channel, dict) else None
+        if type(value) is int and 1 <= value <= 2147483647:
+            return (0, value)
+        return (1, 0)
+
+    return sorted(endpoints, key=order)
+
+
 def build_drawing_endpoints() -> List[Dict[str, Any]]:
     """构建绘图端点列表（跳过标记为视频的渠道）。
 
-    顺序即失败转移顺序，与重构前保持一致：
+    未设置请求顺序时，失败转移顺序与重构前保持一致：
     先是所有渠道里内联的 Key（按渠道顺序），再是 KeyManager 里的 Key（按 keys.json 顺序）。
     """
     channels = data_manager.get_channels()
@@ -122,14 +136,15 @@ def build_drawing_endpoints() -> List[Dict[str, Any]]:
             continue
         endpoints.append(_make_endpoint(channel_name, key_info["value"], fields))
 
-    return endpoints
+    return _order_endpoints(endpoints, channels)
 
 
 def build_video_endpoints(logger=None) -> List[Dict[str, Any]]:
     """构建视频生成端点列表（只取标记为视频的渠道）。"""
     endpoints: List[Dict[str, Any]] = []
 
-    for name, channel_info in data_manager.get_channels().items():
+    channels = data_manager.get_channels()
+    for name, channel_info in channels.items():
         if not isinstance(channel_info, dict):
             continue
         fields = _channel_fields(channel_info)
@@ -148,4 +163,4 @@ def build_video_endpoints(logger=None) -> List[Dict[str, Any]]:
                 f"[视频] 渠道 '{name}' 已启用但未找到有效Key (检查了 key_manager 和 data.json)"
             )
 
-    return endpoints
+    return _order_endpoints(endpoints, channels)

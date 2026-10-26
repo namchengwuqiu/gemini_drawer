@@ -34,6 +34,10 @@
               "type": "string",
               "max_length": 120
             },
+            "media_type": {
+              "type": "string",
+              "choices": ["all", "image", "video"]
+            },
             "unassigned": {
               "type": "boolean"
             }

@@ -93,7 +93,9 @@ class DrawerWebUI:
         raise ValueError("不支持的数据类型。")
 
     def list_records(self, kind: str, search: str = "", page: int = 1,
-                     channel: str = "", unassigned: bool = False) -> Dict[str, Any]:
+                     channel: str = "", unassigned: bool = False, media_type: str = "all") -> Dict[str, Any]:
+        if media_type not in ("all", "image", "video"):
+            raise ValueError("渠道类型只支持全部、图片或视频。")
         if type(page) is not int or page < 1:
             raise ValueError("页码必须是正整数。")
         with self.data.lock, self.keys.lock:
@@ -136,7 +138,9 @@ class DrawerWebUI:
                 row = {"id": name, "version": _version(kind, raw)}
                 if kind == "channels":
                     info = _channel(raw)
-                    row.update(name=name, model=info.get("model", ""), enabled=info.get("enabled", True),
+                    if media_type != "all" and bool(info.get("is_video", False)) != (media_type == "video"):
+                        continue
+                    row.update(request_order=info.get("request_order"), name=name, model=info.get("model", ""), enabled=info.get("enabled", True),
                                is_video=info.get("is_video", False), protocol=info.get("protocol", "auto"))
                     url = str(info.get("url", ""))
                     parsed = urlsplit(url)
@@ -326,6 +330,12 @@ class DrawerWebUI:
                 raise ValueError(f"{field} 必须是文本。")
             if field in info and not info[field].strip():
                 info.pop(field)
+        if "request_order" in info:
+            order = info["request_order"]
+            if order is None or order == "":
+                info.pop("request_order")
+            elif type(order) is not int or not 1 <= order <= 2147483647:
+                raise ValueError("请求顺序必须是 1–2147483647 的整数，留空使用默认顺序。")
         if "protocol" in info:
             protocol = normalize_protocol(info["protocol"])
             choices = VIDEO_PROTOCOLS if info.get("is_video", False) else IMAGE_PROTOCOLS

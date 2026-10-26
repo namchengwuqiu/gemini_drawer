@@ -364,9 +364,9 @@ class GeminiDrawerPlugin(MaiBotPlugin):
 
     @API("drawer_list", description="读取绘图管理页面的分页数据", version="1")
     async def drawer_list(self, kind: str, search: str = "", page: int = 1,
-                          channel: str = "", unassigned: bool = False) -> dict[str, Any]:
+                          channel: str = "", unassigned: bool = False, media_type: str = "all") -> dict[str, Any]:
         return await self._webui_call(self._webui.list_records, kind=kind, search=search, page=page,
-                                      channel=channel, unassigned=unassigned)
+                                      channel=channel, unassigned=unassigned, media_type=media_type)
 
     @API("drawer_detail", description="读取单条绘图数据；Key 不返回明文", version="1")
     async def drawer_detail(self, kind: str, record_id: str) -> dict[str, Any]:
