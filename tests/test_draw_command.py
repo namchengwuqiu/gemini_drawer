@@ -343,21 +343,27 @@ async def test_multi_image_succeeds_and_uses_hybrid_send(wire):
     assert [p.get("text") for p in parts if "text" in p] == ["Image 1:", "Image 2:", "Prompt: 融合"]
 
 
-async def test_real_multi_command_sends_only_typed_prompt_and_both_images(wire, monkeypatch):
-    """使用真实 /多图 解析器，检查实际 chat 请求中的提示词与两张参考图。"""
+@pytest.mark.parametrize('command_text', ['/多图两个人贴贴', '/多图+贴贴'])
+async def test_real_multi_command_sends_only_typed_prompt_and_both_images(wire, monkeypatch, tmp_path, command_text):
+    """使用真实 /多图 解析器，检查自定义/预设提示词与两张参考图的实际请求。"""
     import json
     from unittest.mock import AsyncMock
+    from gemini_drawer.commands import draw_commands
     from gemini_drawer.commands.draw_commands import MultiImageDrawCommand
     from gemini_drawer.core import host_bridge
+    from gemini_drawer.core.managers import DataManager
     from gemini_drawer.plugin import CompatMessage
 
     jpeg = b'\xff\xd8' + b'j' * 300
+    manager = DataManager(tmp_path / 'data.json')
+    manager.add_prompt('贴贴', '两个人贴贴')
+    monkeypatch.setattr(draw_commands, 'data_manager', manager)
     command = make_cmd(MultiImageDrawCommand)
     command.message = CompatMessage({
         'message_id': 'current-command', 'session_id': 'stream-1', 'user_id': '456',
-        'processed_plain_text': '/多图两个人贴贴\n [图片：蓝发角色的自动描述] [图片：黑白发角色的自动描述]',
+        'processed_plain_text': command_text + '\n [图片：蓝发角色的自动描述] [图片：黑白发角色的自动描述]',
         'raw_message': [
-            {'type': 'text', 'data': '/多图两个人贴贴\n'},
+            {'type': 'text', 'data': command_text + '\n'},
             {'type': 'image', 'data': '[图片：蓝发角色的自动描述]', 'hash': 'a' * 64},
             {'type': 'image', 'data': '[图片：黑白发角色的自动描述]', 'hash': 'b' * 64},
         ],
@@ -382,6 +388,29 @@ async def test_real_multi_command_sends_only_typed_prompt_and_both_images(wire, 
         'data:image/png;base64,' + PNG_B64,
         'data:image/jpeg;base64,' + base64.b64encode(jpeg).decode(),
     ]
+
+
+@pytest.mark.parametrize('image_count', [0, 1])
+async def test_named_multi_command_still_requires_two_images(wire, monkeypatch, tmp_path, image_count):
+    from gemini_drawer.commands import draw_commands
+    from gemini_drawer.core.managers import DataManager
+    from gemini_drawer.plugin import CompatMessage
+
+    manager = DataManager(tmp_path / 'data.json')
+    manager.add_prompt('贴贴', '两个人贴贴')
+    monkeypatch.setattr(draw_commands, 'data_manager', manager)
+    command = make_cmd(draw_commands.MultiImageDrawCommand)
+    command.message = CompatMessage({
+        'session_id': 'stream-1', 'user_id': '456',
+        'raw_message': [
+            {'type': 'text', 'data': '/多图+贴贴'},
+            *[{'type': 'image', 'data': PNG_B64} for _ in range(image_count)],
+        ],
+    })
+
+    assert await command.execute() == (True, '参考图不满足要求', True)
+    assert any('至少提供2张图片' in text for text in command.sent_texts)
+    assert wire['requests'] == []
 
 
 @pytest.mark.parametrize('cached', [False, True])

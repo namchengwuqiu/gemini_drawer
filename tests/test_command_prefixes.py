@@ -35,7 +35,7 @@ def _message(text: str) -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("text", ["/随机", "/随机绘图 猫", "＃绘图 猫", "/多图 a b", "/bnn x", "/+风格"])
+@pytest.mark.parametrize("text", ["/随机", "/随机绘图 猫", "＃绘图 猫", "/多图 a b", "/多图+风格", "/bnn x", "/+风格"])
 def test_command_messages_are_excluded_from_actions(text):
     assert is_command_message(_message(text)) is True
 

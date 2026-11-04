@@ -21,6 +21,11 @@ UniversalPromptCommand (/+ 指令名):
     - 使用管理员预先配置的提示词预设进行绘图
     - 支持动态添加新的绘图风格
 
+MultiImageDrawCommand (/多图):
+    多图生图命令
+    - 命令格式：/多图 <自定义提示词> 或 /多图+<预设名称>
+    - 需要至少两张参考图，预设名称沿用 /+ 的查找规则
+
 每个命令通过重写 get_prompt() 方法来定义如何解析用户输入并生成提示词。
 """
 import re
@@ -67,7 +72,8 @@ class TextToImageCommand(BaseDrawCommand):
     async def get_prompt(self) -> Optional[str]:
         msg = self.message.raw_message
         match = re.search(r"(?:^|\s)/绘图\s*(.*)", msg, re.DOTALL)
-        if not match: return None
+        if not match:
+            return None
         prompt = match.group(1).strip()
         
         if not prompt:
@@ -119,7 +125,7 @@ class UniversalPromptCommand(BaseDrawCommand):
 
 class MultiImageDrawCommand(BaseMultiImageDrawCommand):
     command_name: str = "gemini_multi_image_draw"
-    command_description: str = "多图生图：根据至少2张图片和提示词生成图片"
+    command_description: str = "多图生图：根据至少2张图片生成图片，支持 /多图 描述词 或 /多图+预设名称"
     command_pattern: str = r".*/多图.*"
 
     async def get_prompt(self) -> Optional[str]:
@@ -135,9 +141,33 @@ class MultiImageDrawCommand(BaseMultiImageDrawCommand):
         prompt_text = cleaned_message[command_pos + len(command_pattern):].strip()
         
         if not prompt_text:
-            await self.send_text("❌ 请输入提示词！\n例如：`/多图 融合这两张图`")
+            await self.send_text("❌ 请输入提示词！\n例如：`/多图 融合这两张图` 或 `/多图+预设名称`")
             return None
-            
+
+        if prompt_text.startswith("+"):
+            cmd_name = prompt_text[1:].strip()
+            if not cmd_name:
+                await self.send_text("❌ 请输入预设名称！\n例如：`/多图+预设名称`，需配合至少2张图片使用。")
+                return None
+
+            prompts = data_manager.get_prompt_matches(
+                cmd_name,
+                include_banana=self.get_config("behavior.enable_banana_prompts", True),
+                show_restricted=self.get_config("behavior.show_restricted", False),
+            )
+            if not prompts:
+                await self.send_text(f"❌ 未找到提示词: {cmd_name}\n请在绘图管理页查看可用名称；同名词条请带上末尾数字。")
+                return None
+
+            if len(prompts) > 1:
+                choices = "\n".join(f"▪️ /多图+{name}" for name in list(prompts)[:20])
+                more = f"\n还有 {len(prompts) - 20} 条，请在绘图管理页查看。" if len(prompts) > 20 else ""
+                await self.send_text(f"找到多个同名词条，请使用编号名称：\n{choices}{more}")
+                return None
+
+            cmd_name, prompt_text = next(iter(prompts.items()))
+            logger.info(f"[多图] 使用预设提示词: {cmd_name}")
+
         return prompt_text
 
 

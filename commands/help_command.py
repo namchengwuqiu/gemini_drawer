@@ -51,6 +51,7 @@ class HelpCommand(CtxSendMixin, BaseCommand):
         user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片\n"
         user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图\n"
         user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用\n"
+        user_text += "▪️ /多图+{预设名称}: 使用本地或大香蕉提示词，需配合至少2张图片使用\n"
         user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图\n"
         user_text += "▪️ /图生视频 {描述词}: 图生视频，需配合图片使用\n"
         user_text += "▪️ /文生视频 {描述词}: 文生视频，只需文字描述\n\n"

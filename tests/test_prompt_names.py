@@ -1,4 +1,4 @@
-"""大香蕉短名称、重名编号与 /+ 命令的实际解析行为。"""
+"""大香蕉短名称、重名编号与 /+、/多图+ 命令的实际解析行为。"""
 import json
 import re
 from unittest.mock import AsyncMock
@@ -117,6 +117,94 @@ async def test_command_resolves_short_name_before_drawing(names, monkeypatch, me
     assert await command.execute() == (True, "绘图成功", True)
     assert await command.get_prompt() == "hold a cat"
     drawing.assert_awaited_once()
+
+
+def multi_command(text, config=None):
+    command = draw_commands.MultiImageDrawCommand(
+        message=CompatMessage({
+            'session_id': 'stream-1', 'user_id': '456',
+            'processed_plain_text': text + ' [图片：自动描述]',
+            'raw_message': [
+                {'type': 'text', 'data': text},
+                {'type': 'image', 'data': '[图片：自动描述]', 'hash': 'a' * 64},
+            ],
+        }),
+        plugin_config=config or {},
+    )
+    command.send_text = AsyncMock(return_value=True)
+    return command
+
+
+@pytest.mark.parametrize('text', [
+    '/多图+贴贴', '/多图+ 贴贴', '/多图 +贴贴', '/多图 + 贴贴',
+    '/多图+大香蕉/动漫 SFW/贴贴', '[CQ:at,qq=123] /多图+贴贴 [CQ:image,file=a]',
+])
+async def test_multi_command_resolves_banana_names_without_image_descriptions(names, monkeypatch, text):
+    banana(names, {'大香蕉/动漫 SFW/贴贴': {'content': 'two people together', 'source_title': '贴贴'}})
+    monkeypatch.setattr(draw_commands, 'data_manager', names)
+    command = multi_command(text)
+
+    assert re.search(command.command_pattern, text)
+    assert await command.get_prompt() == 'two people together'
+    command.send_text.assert_not_awaited()
+
+
+async def test_multi_command_local_preset_wins_and_preserves_multiline_content(names, monkeypatch):
+    names.add_prompt('贴贴', '第一张图的人物\n和第二张图的人物一起合影[保留细节]')
+    banana(names, {'大香蕉/A/贴贴': {'content': 'remote', 'source_title': '贴贴'}})
+    monkeypatch.setattr(draw_commands, 'data_manager', names)
+
+    assert await multi_command('/多图+贴贴').get_prompt() == '第一张图的人物\n和第二张图的人物一起合影[保留细节]'
+    assert await multi_command('/多图+贴贴1').get_prompt() == 'remote'
+
+
+async def test_multi_command_lists_numbered_choices_and_resolves_selection(names, monkeypatch):
+    banana(names, {
+        '大香蕉/A/贴贴': {'content': 'first', 'source_title': '贴贴'},
+        '大香蕉/B/贴贴': {'content': 'second', 'source_title': '贴贴'},
+    })
+    monkeypatch.setattr(draw_commands, 'data_manager', names)
+    command = multi_command('/多图+贴贴')
+    command.collect_images = AsyncMock()
+
+    assert await command.execute() == (True, '无效的Prompt', True)
+    notice = command.send_text.await_args.args[0]
+    assert '/多图+贴贴1' in notice and '/多图+贴贴2' in notice
+    command.collect_images.assert_not_awaited()
+    assert await multi_command('/多图+贴贴2').get_prompt() == 'second'
+
+
+@pytest.mark.parametrize('text,error', [
+    ('/多图+', '请输入预设名称'),
+    ('/多图 +  ', '请输入预设名称'),
+    ('/多图+不存在', '未找到提示词: 不存在'),
+    ('/多图+贴贴 再加一顶帽子', '未找到提示词: 贴贴 再加一顶帽子'),
+])
+async def test_invalid_multi_preset_stops_before_collecting_images(names, monkeypatch, text, error):
+    names.add_prompt('贴贴', 'local')
+    monkeypatch.setattr(draw_commands, 'data_manager', names)
+    command = multi_command(text)
+    command.collect_images = AsyncMock()
+
+    assert await command.execute() == (True, '无效的Prompt', True)
+    command.send_text.assert_awaited_once()
+    assert error in command.send_text.await_args.args[0]
+    command.collect_images.assert_not_awaited()
+
+
+@pytest.mark.parametrize('behavior,name,expected', [
+    ({'enable_banana_prompts': False}, '贴贴', None),
+    ({'enable_banana_prompts': False}, '本地', 'local'),
+    ({'show_restricted': False}, '贴贴', None),
+    ({'show_restricted': True}, '贴贴', 'remote'),
+])
+async def test_multi_preset_obeys_banana_and_restricted_settings(names, monkeypatch, behavior, name, expected):
+    names.add_prompt('本地', 'local')
+    banana(names, {'大香蕉/A/贴贴': {'content': 'remote', 'source_title': '贴贴', 'restricted': True}})
+    monkeypatch.setattr(draw_commands, 'data_manager', names)
+    command = multi_command('/多图+' + name, {'behavior': behavior})
+
+    assert await command.get_prompt() == expected
 
 
 async def test_command_lists_numbered_choices_and_uses_selected_number(names, monkeypatch):

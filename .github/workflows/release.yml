@@ -55,6 +55,48 @@ jobs:
               raise SystemExit('The plugin ID must remain namchengwuqiu.gemini_drawer.')
           if manifest.get('version') != version:
               raise SystemExit(f'Tag {tag} does not match manifest version {manifest.get("version")}.')
+
+          def marketplace_version(value, field):
+              if not isinstance(value, str) or re.fullmatch(r'\d+\.\d+\.\d+', value) is None:
+                  raise SystemExit(f'{field} must use a three-part version.')
+              parts = tuple(map(int, value.split('.')))
+              if any(part in (99, 999) for part in parts[:2]):
+                  raise SystemExit(f'{field} cannot use 99 or 999 in the major or minor version.')
+              return parts
+
+          marketplace_version(version, 'version')
+          host = manifest.get('host_application')
+          if not isinstance(host, dict):
+              raise SystemExit('host_application must declare min_version.')
+          minimum = marketplace_version(host.get('min_version'), 'host_application.min_version')
+          if 'max_version' in host:
+              maximum = marketplace_version(host['max_version'], 'host_application.max_version')
+              if maximum < minimum:
+                  raise SystemExit('host_application.max_version cannot be lower than min_version.')
+          # Marketplace version restrictions do not apply to SDK ranges; the host checks compatibility.
+          if not isinstance(manifest.get('sdk'), dict):
+              raise SystemExit('Manifest v2 must declare sdk.')
+          author = manifest.get('author')
+          if not isinstance(author, dict) or any(
+              not isinstance(author.get(field), str) or not author[field].strip()
+              for field in ('name', 'url')
+          ):
+              raise SystemExit('author must contain non-empty name and url.')
+          urls = manifest.get('urls')
+          repository = urls.get('repository') if isinstance(urls, dict) else None
+          if not isinstance(repository, str) or re.fullmatch(
+              r'https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+/?', repository
+          ) is None:
+              raise SystemExit('urls.repository must be an HTTPS GitHub repository URL.')
+          capabilities = manifest.get('capabilities')
+          if not isinstance(capabilities, list) or any(
+              not isinstance(capability, str) or not capability.strip()
+              for capability in capabilities
+          ):
+              raise SystemExit('capabilities must be a list of non-empty strings.')
+          if Path('config.toml').exists():
+              raise SystemExit('Published source must not contain config.toml in the repository root.')
+
           for filename in ('plugin.py', 'LICENSE', 'README.md'):
               if not Path(filename).is_file():
                   raise SystemExit(f'Missing required plugin file: {filename}')
