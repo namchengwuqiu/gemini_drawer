@@ -6,10 +6,10 @@ Gemini Drawer 绘图管线
 
 协议差异全部下沉到 providers/，本模块只负责编排与容错：
 
-- 整体时间预算（core/budget.py）：预算耗尽后不再开始新的端点或请求；每次
+- 图片实际入口按固定端点快照累加各自额度建立外层保护期限；每次
   任务协议的 fetch 使用独立任务期限，一次性请求使用该请求的绝对期限；
 - HTTP 错误响应继续切换端点；同步请求未取得图片时，空响应、解析失败、传输
-  故障及超时在总预算内继续轮换（可能重复生成）；取得图片或创建异步任务后不再换端点；
+  故障及超时按各渠道独立额度继续轮换（可能重复生成）；取得图片或创建异步任务后不再换端点；
 - Key 记账通过工作线程执行，不在事件循环里做同步文件读写；记账失败只记
   警告，绝不影响本次生成结果或触发换端点。
 """
@@ -53,6 +53,16 @@ UNCERTAIN_SUBMISSION_SUFFIX = "；上游可能已接收本次请求，为避免�
 @dataclass
 class DrawingAttempts:
     count: int = 0
+
+
+def endpoint_wait_seconds(endpoint: Endpoint) -> float:
+    """显式渠道额度优先，否则沿用协议默认等待上限。"""
+    if endpoint.timeout is not None:
+        return endpoint.timeout
+    provider = resolve_provider(endpoint)
+    if provider is None:
+        return 0.0
+    return provider.task_timeout or provider.build(endpoint, DrawRequest(prompt="")).timeout
 
 
 async def _record(endpoint: Endpoint, success: bool, force_disable: bool = False) -> None:
@@ -131,7 +141,8 @@ async def run_drawing(
 
         logger.info(
             f"尝试第 {i + 1}/{len(endpoint_list)} 个端点: {endpoint.type} "
-            f"({redact_url(endpoint.url)}) [协议: {protocol}{'' if explicit else '(自动)'}]"
+            f"({redact_url(endpoint.url)}) [协议: {protocol}{'' if explicit else '(自动)'}] "
+            f"[等待上限: {endpoint_wait_seconds(endpoint):g}秒]"
         )
 
         if attempts is not None:
@@ -151,7 +162,7 @@ async def run_drawing(
             )
 
             timeout = call.timeout
-            if budget is not None:
+            if budget is not None and budget.drawing_endpoints is None:
                 timeout = budget.stage_timeout(
                     call.timeout, reserve=POST_GENERATION_RESERVE_SECONDS
                 )
@@ -169,8 +180,8 @@ async def run_drawing(
                 # 超过，所以两者都不能省。取消只终止本地等待，不能撤回上游
                 # 已提交的任务。同步绘图未取得图片时仍可在总预算内换端点；
                 # 异步协议已创建任务时继续保留原任务，避免重复提交。
-                fetch_cap: Optional[float] = provider.task_timeout or call.timeout
-                if budget is not None:
+                fetch_cap: Optional[float] = endpoint.timeout or provider.task_timeout or call.timeout
+                if budget is not None and budget.drawing_endpoints is None:
                     fetch_cap = budget.stage_timeout(
                         fetch_cap if fetch_cap is not None else call.timeout,
                         reserve=POST_GENERATION_RESERVE_SECONDS,

@@ -383,8 +383,8 @@ class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
 
         start_time = datetime.now()
         status_msg_start_time = time.time()
-        # 整体时间预算：宿主 RPC 超时后不会再取消插件侧任务，预算耗尽时
-        # 必须停止生成与发送（见 core/budget.py）。
+        # 图片入口按本次端点快照累加完整等待额度，另留前后处理时间；
+        # 到达外层保护期限后停止生成与发送（见 core/budget.py）。
         budget = current_budget() or TimeBudget.from_rpc_timeout_ms(DRAW_COMMAND_TIMEOUT_MS)
 
         prompt = await self.get_prompt()
@@ -415,7 +415,7 @@ class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
             mime_types=[get_image_mime_type(img) for img in images],
         )
 
-        endpoints = build_drawing_endpoints()
+        endpoints = budget.drawing_endpoints if budget.drawing_endpoints is not None else build_drawing_endpoints()
         if not endpoints:
             await self._send_text("❌ 未配置任何API密钥或端点。")
             return True, "无可用密钥或端点", True

@@ -1,5 +1,6 @@
 from typing import Any, List
 from maibot_sdk import Field, PluginConfigBase
+from pydantic import field_validator
 
 
 #: 插件展示名（帮助文案、转发节点昵称等统一使用这一处，避免各处硬编码漂移）
@@ -35,10 +36,17 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.15.9", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.15.9", description="配置版本",
+    version: str = Field(default="1.15.10", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.15.10", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def normalize_display_version(cls, value: Any) -> str:
+        # 宿主升级配置会保留普通字段旧值；只读展示版本必须随插件更新。
+        # config_version 仍交给宿主处理，不能在校验时覆盖配置迁移标记。
+        return str(cls.model_fields["version"].default)
 
 
 class GeneralConfig(PluginConfigBase):
@@ -48,18 +56,16 @@ class GeneralConfig(PluginConfigBase):
 
     channel_setup_guide: str = Field(
         default=(
-            "绘图 API 渠道不在 config.toml 里填写，可在 WebUI 侧栏“插件扩展 → Gemini 绘图管理”中管理渠道和 Key，也可使用聊天指令：\n"
-            "1. 添加 Google 官方渠道：/添加渠道 google:https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent\n"
-            "2. 添加第三方 OpenAI 兼容渠道：/添加渠道 渠道名:https://api.example.com/v1/chat/completions:模型名\n"
-            "3. 添加 Agnes 图片：/添加渠道 agnes图片:https://apihub.agnes-ai.com/v1/images/generations:agnes-image-2.5-flash\n"
-            "4. 添加 Agnes 视频：/添加渠道 agnes视频:https://apihub.agnes-ai.com/v1/videos:agnes-video-2.5-flash（自动标记视频渠道）\n"
-            "5. 添加渠道 Key：/渠道添加key 渠道名 your-api-key\n"
-            "6. 查看或启停渠道：/渠道列表、/启用渠道 渠道名、/禁用渠道 渠道名"
+            "推荐在 WebUI 侧栏“插件扩展 → Gemini 绘图管理”中配置绘图渠道和 Key。\n"
+            "1. 在“渠道与 Key”页面添加渠道，填写 API 地址、模型，并选择图片或视频用途。\n"
+            "2. 在渠道下添加 Key；编辑渠道可设置协议、流式、请求顺序及等待上限。\n"
+            "3. 在管理页面查看、编辑、启用或禁用渠道，并管理所属 Key。\n"
+            "如需通过聊天操作，也可使用 /添加渠道、/渠道添加key、/渠道列表 等管理员指令。"
         ),
         description="绘图API渠道配置说明",
         json_schema_extra=ui(
             "绘图渠道配置说明",
-            "只读说明。绘图 API 地址和 Key 可通过插件管理页面或聊天指令写入对应 JSON 数据文件，不写入 config.toml。",
+            "推荐入口：WebUI 侧栏“插件扩展 → Gemini 绘图管理”。在管理页面配置渠道和 Key，此处为只读说明。",
             disabled=True,
             **{"x-widget": "textarea", "rows": 8},
         ),

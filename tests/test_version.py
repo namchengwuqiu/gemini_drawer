@@ -61,6 +61,17 @@ def test_readme_version_matches_manifest():
     assert f"> **Version:** {get_plugin_version()}" in readme
 
 
+def test_existing_config_display_version_tracks_release_without_rewriting_upgrade_marker():
+    from gemini_drawer.config import PluginSectionConfig
+
+    config = PluginSectionConfig.model_validate({
+        "version": "1.12.1", "config_version": "1.15.9", "enabled": False,
+    })
+    assert config.version == get_plugin_version()
+    assert config.config_version == "1.15.9"
+    assert config.enabled is False
+
+
 def test_missing_manifest_falls_back(monkeypatch, tmp_path):
     monkeypatch.setattr(
         "gemini_drawer.utils.version._MANIFEST_PATH", tmp_path / "nope.json"

@@ -5,8 +5,9 @@
 移除等待对象并返回错误，不会向插件侧发送取消；插件若继续生成并发送，就会出现
 "宿主已报失败、图片仍然发出"的事故。
 
-因此一次完整流程（参考图获取 → 生成 → 结果下载 → 媒体发送）共享同一个
-deadline：
+图片每个端点独立计时；外层保护期限按本次固定端点列表的完整等待额度相加，
+另加前置处理、下载与发送时间。视频仍使用固定 RPC 时限。以下公共预算接口
+用于外层保护，以及视频/显式调用方提供的整体期限：
 
 - 预算 = RPC 上限 − 宿主返回余量，给宿主超时返回与收尾留时间；
   ``remaining`` 返回的就是**已扣除余量**的可用时间，``can_start`` /
@@ -18,7 +19,7 @@ deadline：
   持续有数据的流式响应、异步任务轮询等长等待阶段需要额外的绝对截止控制。
 
 注意：``asyncio.wait_for`` 之类的取消只终止本地等待，不能撤回上游已提交的
-任务。预算耗尽同样要遵守 core/errors.py 的提交状态分类：不自动换端点重试。
+任务。同步图片尚未取得结果时可在渠道超时后轮换；异步任务已创建后保留原任务保护。
 """
 from __future__ import annotations
 
@@ -39,7 +40,8 @@ MIN_STAGE_SECONDS = 5.0
 
 #: 宿主对图片命令/工具的 RPC 超时（毫秒）。组件注册（plugin.py）与命令层
 #: 建立预算共用这一处定义，避免两边漂移。
-DRAW_COMMAND_TIMEOUT_MS = 300_000
+# 宿主只接受静态 RPC 上限。图片实际期限按本次各渠道完整额度相加计算。
+DRAW_COMMAND_TIMEOUT_MS = 2_147_483_647
 #: 宿主对视频命令/工具的 RPC 超时（毫秒）
 VIDEO_COMMAND_TIMEOUT_MS = 600_000
 #: 视频流程给宿主返回与收尾预留的余量（秒）
@@ -67,7 +69,7 @@ class MediaDeliveryUncertain(str):
 class TimeBudget:
     """一次命令/工具流程的整体时间预算。"""
 
-    __slots__ = ("_clock", "_deadline", "_reserve", "media_sent", "media_delivery_pending")
+    __slots__ = ("_clock", "_deadline", "_reserve", "media_sent", "media_delivery_pending", "drawing_endpoints")
 
     def __init__(
         self,
@@ -81,6 +83,26 @@ class TimeBudget:
         self._deadline = clock() + max(0.0, float(total_seconds))
         self.media_sent = False
         self.media_delivery_pending = False
+        self.drawing_endpoints = None
+
+    @classmethod
+    def for_drawing(cls) -> "TimeBudget":
+        """固定本次渠道快照，保护期限覆盖所有渠道额度，不分摊额度。"""
+        from .endpoints import build_drawing_endpoints
+        from .pipeline import endpoint_wait_seconds
+        from ..providers import Endpoint
+
+        endpoints = build_drawing_endpoints()
+        # 前置取图/润色留 180 秒，结果下载/发送与收尾另留 300 秒。
+        total = 180.0 + 300.0 + HOST_RETURN_MARGIN_SECONDS + sum(
+            endpoint_wait_seconds(Endpoint.from_dict(endpoint)) + 2.0
+            for endpoint in endpoints
+        )
+        if total * 1000 > DRAW_COMMAND_TIMEOUT_MS:
+            raise ValueError("渠道等待时间合计超过宿主 RPC 支持范围，请降低渠道等待上限")
+        budget = cls(total)
+        budget.drawing_endpoints = endpoints
+        return budget
 
     @classmethod
     def from_rpc_timeout_ms(
@@ -138,10 +160,16 @@ def budgeted_entry(timeout_ms: int, *, reserve: float = HOST_RETURN_MARGIN_SECON
     def decorate(func):
         @wraps(func)
         async def wrapped(self, *args, **kwargs):
-            budget = current_budget() or TimeBudget.from_rpc_timeout_ms(
-                getattr(self, "rpc_timeout_ms", timeout_ms),
-                reserve_seconds=getattr(self, "budget_reserve_seconds", reserve),
-            )
+            budget = current_budget()
+            if budget is None:
+                effective_timeout = getattr(self, "rpc_timeout_ms", timeout_ms)
+                if effective_timeout == DRAW_COMMAND_TIMEOUT_MS:
+                    budget = await asyncio.to_thread(TimeBudget.for_drawing)
+                else:
+                    budget = TimeBudget.from_rpc_timeout_ms(
+                        effective_timeout,
+                        reserve_seconds=getattr(self, "budget_reserve_seconds", reserve),
+                    )
             token = _active_budget.set(budget)
             try:
                 return await budget.run(lambda: func(self, *args, **kwargs))

@@ -143,7 +143,8 @@ class _DrawActionMixin:
         )
         return await run_drawing(
             request=request,
-            endpoints=build_drawing_endpoints(),
+            endpoints=(budget.drawing_endpoints if budget is not None and budget.drawing_endpoints is not None
+                       else build_drawing_endpoints()),
             proxy=self._proxy(),
             logger=logger,
             debug_mode=self.get_config("behavior.debug_mode", False),

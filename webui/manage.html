@@ -1056,7 +1056,7 @@
       if (options.maxLength) input.maxLength = options.maxLength;
       if (options.min !== undefined) input.min = options.min;
       if (options.max !== undefined) input.max = options.max;
-      if (options.type === "number") input.step = "1";
+      if (options.type === "number") input.step = options.step || "1";
       if (options.hint) {
         const hint = text("small", options.hint);
         hint.id = input.id + "-hint";
@@ -1164,6 +1164,10 @@
             maxLength: 4000,
           });
           field("model", "模型（可选）", data.model, { maxLength: 200 });
+          field("timeout", "等待上限（秒，可选）", data.timeout, {
+            type: "number", min: 0.001, max: 86400, step: "any",
+            hint: "图片渠道独立计时，前一个渠道耗时不会扣减本渠道额度。留空使用协议默认值。视频仍受整体时限约束。",
+          });
           field("request_order", "请求顺序（可选）", data.request_order, {
             type: "number",
             min: 1,
@@ -1208,6 +1212,7 @@
             "protocol",
             "response_format",
             "request_order",
+            "timeout",
             "enabled",
             "is_video",
             "stream",
@@ -1292,6 +1297,7 @@
             protocol: value("protocol"),
             response_format: value("response_format"),
             request_order: value("request_order") === "" ? null : Number(value("request_order")),
+            timeout: value("timeout") === "" ? null : Number(value("timeout")),
             enabled: inputs.enabled.checked,
             is_video: inputs.is_video.checked,
             stream: inputs.stream.checked,

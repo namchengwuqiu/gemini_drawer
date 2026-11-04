@@ -143,6 +143,8 @@ def wire(monkeypatch):
         base_commands, "build_drawing_endpoints",
         lambda: [{"type": "custom_g", "url": GEMINI_URL, "key": "k1", "model": None, "stream": False}],
     )
+    from gemini_drawer.core import endpoints
+    monkeypatch.setattr(endpoints, "build_drawing_endpoints", lambda: base_commands.build_drawing_endpoints())
     monkeypatch.setattr(pipeline, "key_manager", type("K", (), {"record_key_usage": lambda *a, **k: None})())
 
     real_client = httpx.AsyncClient
@@ -481,7 +483,7 @@ async def test_images_are_not_sent_after_budget_expires_during_download(wire, mo
     )
 
     async def slow_download(url, proxy, *, timeout=60.0, max_bytes=None):
-        clock_state["now"] += 300.0  # 下载期间宿主 RPC 已超时
+        clock_state["now"] += budget_module.current_budget().remaining + 1.0  # 下载期间本次保护期限耗尽
         return PNG
 
     monkeypatch.setattr(base_commands, "download_image", slow_download)

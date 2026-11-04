@@ -359,3 +359,15 @@ def test_channel_media_filter_before_pagination_and_with_search(store):
     assert web.list_records("prompts", media_type="video")["total"] == 1
     with pytest.raises(ValueError, match="渠道类型"):
         web.list_records("channels", media_type="invalid")
+
+
+def test_channel_wait_limit_save_clear_and_validation(store):
+    web, data, _, _ = store
+    for timeout in (240, 0.5, None):
+        detail = web.detail('channels', 'google')
+        web.change('channels', 'save', 'google', detail['version'], {'timeout': timeout})
+        assert data.get_channels()['google'].get('timeout') == timeout
+    for timeout in (0, -1, True, '240', float('inf'), float('nan')):
+        detail = web.detail('channels', 'google')
+        with pytest.raises(ValueError, match='等待上限'):
+            web.change('channels', 'save', 'google', detail['version'], {'timeout': timeout})

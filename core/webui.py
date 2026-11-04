@@ -330,6 +330,12 @@ class DrawerWebUI:
                 raise ValueError(f"{field} 必须是文本。")
             if field in info and not info[field].strip():
                 info.pop(field)
+        if "timeout" in info:
+            timeout = info["timeout"]
+            if timeout is None or timeout == "":
+                info.pop("timeout")
+            elif type(timeout) not in (int, float) or not 0 < timeout <= 86400:
+                raise ValueError("等待上限必须是大于 0 且不超过 86400 的秒数，留空使用协议默认值。")
         if "request_order" in info:
             order = info["request_order"]
             if order is None or order == "":

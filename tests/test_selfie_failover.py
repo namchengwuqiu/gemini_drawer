@@ -206,7 +206,7 @@ async def test_selfie_200_without_result_respects_media_type(runtime, monkeypatc
 
 @pytest.mark.parametrize('kind', ['image', 'video_agnes', 'video_chat'])
 @pytest.mark.parametrize('no_backup', [True, False])
-async def test_selfie_timeout_stops_without_backup_or_remaining_budget(runtime, monkeypatch, kind, no_backup):
+async def test_selfie_timeout_respects_independent_image_and_overall_video_limits(runtime, monkeypatch, kind, no_backup):
     configure(runtime, kind, backup=not no_backup)
     clock = {'now': 0.0}
     monkeypatch.setattr(TimeBudget, 'from_rpc_timeout_ms', classmethod(
@@ -223,7 +223,8 @@ async def test_selfie_timeout_stops_without_backup_or_remaining_budget(runtime, 
     result = await invoke(runtime, kind)
 
     assert result['success'] is False
-    assert len(runtime.requests) == 1
+    # 图片端点超时后继续使用备用端点的独立额度；视频仍受整体期限限制。
+    assert len(runtime.requests) == (2 if kind == 'image' and not no_backup else 1)
     runtime.send.image.assert_not_awaited()
     runtime.send.custom.assert_not_awaited()
     if result['success'] is False:
