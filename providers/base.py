@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from ..core.errors import (UpstreamHTTPError, SubmissionUncertainError, GenerationRejectedError, safe_model_rejection)
+from ..core.image_size import normalize_image_size
 from ..utils.http import read_body_capped as _read_body_capped, iter_sse_lines
 from ..utils import (
     MediaTooLargeError,
@@ -54,6 +55,8 @@ class Endpoint:
     protocol: Optional[str] = None
     #: 渠道单次生成等待上限（秒）；仍受整条命令的总预算限制。
     timeout: Optional[float] = None
+    #: 图片输出档位；None 表示沿用适配器默认行为。
+    image_size: Optional[str] = None
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Endpoint":
@@ -67,6 +70,7 @@ class Endpoint:
             response_format=data.get("response_format") or None,
             protocol=data.get("protocol") or None,
             timeout=cls.normalize_timeout(data.get("timeout")),
+            image_size=normalize_image_size(data.get("image_size")),
         )
 
     @staticmethod

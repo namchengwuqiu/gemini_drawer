@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from ..core.image_size import chat_image_size_mode, web_gemini_model_for_size
 from .base import DrawRequest, Endpoint, HttpCall, Provider
 
 DEFAULT_MODEL = "gemini-pro-vision"
@@ -38,11 +39,24 @@ def build_chat_completions_call(
     if endpoint.key:
         headers["Authorization"] = f"Bearer {endpoint.key}"
 
-    payload = {
+    payload: Dict[str, Any] = {
         "model": endpoint.model_name or default_model,
         "messages": [{"role": "user", "content": content}],
         "stream": stream,
     }
+
+    if size := endpoint.image_size:
+        mode = chat_image_size_mode(endpoint.model_name)
+        image_config = {"image_size": size}
+        if mode == "google_extra_body":
+            payload["extra_body"] = {"google": {"image_config": image_config}}
+        elif mode == "model_suffix":
+            payload["model"] = web_gemini_model_for_size(endpoint.model_name, size)
+            if size == "1K":
+                payload["image_config"] = image_config
+        else:
+            # 兼容采用 OpenRouter 风格字段的 Chat 中转；实际档位由上游决定。
+            payload["image_config"] = image_config
 
     return HttpCall(
         url=endpoint.url,

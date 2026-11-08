@@ -27,7 +27,7 @@ class DoubaoProvider(Provider):
             "model": endpoint.model_name or DEFAULT_MODEL,
             "prompt": request.prompt,
             "response_format": endpoint.response_format or DEFAULT_RESPONSE_FORMAT,
-            "size": "2k",
+            "size": endpoint.image_size or "2k",
             "stream": False,
             "watermark": False,
         }

@@ -45,6 +45,12 @@ class GeminiProvider(Provider):
             ],
         }
 
+        if endpoint.image_size:
+            payload["generationConfig"] = {
+                "responseModalities": ["TEXT", "IMAGE"],
+                "imageConfig": {"imageSize": endpoint.image_size},
+            }
+
         stream = self.wants_stream(endpoint)
         return HttpCall(
             url=with_api_key(endpoint.url, endpoint.key),

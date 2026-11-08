@@ -371,3 +371,100 @@ def test_channel_wait_limit_save_clear_and_validation(store):
         detail = web.detail('channels', 'google')
         with pytest.raises(ValueError, match='等待上限'):
             web.change('channels', 'save', 'google', detail['version'], {'timeout': timeout})
+
+
+@pytest.mark.parametrize(("channel", "size", "expected", "defaults"), [
+    (
+        {"url": "https://example.com/v1beta/models/gemini-3.1-flash-image:generateContent"}, "2k",
+        {"generationConfig": {"responseModalities": ["TEXT", "IMAGE"], "imageConfig": {"imageSize": "2K"}}},
+        {},
+    ),
+    (
+        {"url": "https://example.com/v1/chat/completions", "model": "gemini-3.1-flash-image"}, "2k",
+        {"extra_body": {"google": {"image_config": {"image_size": "2K"}}}},
+        {"model": "gemini-3.1-flash-image"},
+    ),
+    (
+        {"url": "https://example.com/v1/chat/completions", "model": "gemini/gemini-nano-banana-2.1-4k"}, "2k",
+        {"model": "gemini/gemini-nano-banana-2.1-2k"},
+        {"model": "gemini/gemini-nano-banana-2.1-4k"},
+    ),
+    (
+        {"url": "https://example.com/v1/chat/completions", "model": "gemini-nano-banana-2.1-4k"}, "1k",
+        {"model": "gemini-nano-banana-2.1", "image_config": {"image_size": "1K"}},
+        {"model": "gemini-nano-banana-2.1-4k"},
+    ),
+    (
+        {"url": "https://example.com/v1/chat/completions", "model": "third-party-model"}, "2k",
+        {"image_config": {"image_size": "2K"}},
+        {"model": "third-party-model"},
+    ),
+    (
+        {"url": "https://example.com/v1/chat/completions", "model": "gpt-image-2"}, "2k",
+        {"image_config": {"image_size": "2K"}},
+        {"model": "gpt-image-2"},
+    ),
+    (
+        {"url": "https://example.com/v1/images/generations", "model": "gpt-image-2"}, "4k",
+        {"size": "3840x2160"},
+        {"size": "auto"},
+    ),
+    (
+        {"url": "https://example.com/v1/images/generations", "model": "doubao-seedream-4-5-251128"}, "4k",
+        {"size": "4K"},
+        {"size": "2k"},
+    ),
+    (
+        {"url": "https://example.com/v1/images/generations", "model": "agnes-image-2.5-flash"}, "1k",
+        {"size": "1K"},
+        {"size": "2K"},
+    ),
+])
+def test_channel_image_size_save_request_and_clear(store, monkeypatch, channel, size, expected, defaults):
+    from gemini_drawer.core import endpoints
+    from gemini_drawer.providers import DrawRequest, Endpoint, resolve_provider
+
+    web, data, keys, _ = store
+    monkeypatch.setattr(endpoints, "data_manager", data)
+    monkeypatch.setattr(endpoints, "key_manager", keys)
+    web.change("channels", "save", "drawing", "", {**channel, "key": "inline-test-key", "image_size": size})
+    keys.add_keys(["managed-test-key"], "drawing")
+    row = next(row for row in web.list_records("channels")["rows"] if row["id"] == "drawing")
+    assert row["image_size"] == size.upper()
+    detail = web.detail("channels", "drawing")
+    assert detail["payload"]["image_size"] == size.upper()
+
+    def bodies():
+        items = [ep for ep in endpoints.build_drawing_endpoints() if ep["type"] == "custom_drawing"]
+        assert len(items) == 2
+        for ep in items:
+            endpoint = Endpoint.from_dict(ep)
+            provider = resolve_provider(endpoint)
+            for request in (DrawRequest(prompt="画一只猫"),
+                            DrawRequest(prompt="画一只猫", images=[b"png"], mime_types=["image/png"])):
+                call = provider.build(endpoint, request)
+                yield call.data if call.files else call.json
+
+    for body in bodies():
+        assert {key: body[key] for key in expected} == expected
+    web.change("channels", "save", "drawing", detail["version"], {"image_size": ""})
+    assert "image_size" not in data.get_channels()["drawing"]
+    for body in bodies():
+        assert {key: body[key] for key in defaults} == defaults
+        assert not (expected.keys() - defaults.keys()) & body.keys()
+
+
+@pytest.mark.parametrize(("patch", "message"), [
+    ({"image_size": "8K"}, "只支持 1K"),
+    ({"image_size": "2K", "is_video": True}, "仅适用于图片渠道"),
+])
+def test_invalid_channel_image_size_does_not_write(store, patch, message):
+    web, data, _, _ = store
+    before = data.data_file.read_bytes()
+    with pytest.raises(ValueError, match=message):
+        web.change("channels", "save", "invalid", "", {
+            "url": "https://example.com/v1/chat/completions",
+            "model": "gemini-3.1-flash-image",
+            **patch,
+        })
+    assert data.data_file.read_bytes() == before

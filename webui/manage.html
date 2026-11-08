@@ -842,6 +842,8 @@
               "subline",
             ),
           );
+          if (record.image_size)
+            cells[1].append(text("div", `分辨率：${record.image_size}`, "subline"));
           cells[2].append(
             text(
               "span",
@@ -1186,6 +1188,15 @@
               ["agnes_video", "Agnes 视频"],
             ],
           });
+          const sizeField = field("image_size", "图片分辨率", String(data.image_size ?? "").trim().toUpperCase(), {
+            options: [
+              ["", "渠道默认"],
+              ["1K", "1K"],
+              ["2K", "2K"],
+              ["4K", "4K"],
+            ],
+            hint: "实际尺寸由上游决定；留在渠道默认可保持原来的出图行为。",
+          });
           field("response_format", "返回格式", data.response_format || "", {
             options: [
               ["", "由渠道决定"],
@@ -1205,12 +1216,18 @@
               ? "已配置。留空保留原 Key，输入新值替换。"
               : "推荐在渠道下添加独立 Key，支持多 Key。",
           });
+          const updateSizeField = () => {
+            sizeField.disabled = sizeField.parentElement.hidden = inputs.is_video.checked;
+          };
+          inputs.is_video.addEventListener("input", updateSizeField);
+          updateSizeField();
           if (detail.has_key) toggles([["clear_key", "清除原内联 Key", false]]);
           const known = [
             "url",
             "model",
             "protocol",
             "response_format",
+            "image_size",
             "request_order",
             "timeout",
             "enabled",
@@ -1296,6 +1313,7 @@
             model: value("model"),
             protocol: value("protocol"),
             response_format: value("response_format"),
+            image_size: inputs.image_size.disabled ? "" : value("image_size"),
             request_order: value("request_order") === "" ? null : Number(value("request_order")),
             timeout: value("timeout") === "" ? null : Number(value("timeout")),
             enabled: inputs.enabled.checked,

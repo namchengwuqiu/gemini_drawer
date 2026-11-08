@@ -16,8 +16,11 @@ PNG = b"fake-png-image"
 JPG = b"fake-jpeg-image"
 
 
-def endpoint(url=URL, model=MODEL, stream=False):
-    return Endpoint(type="custom_agnes", url=url, model=model, key="test-key", stream=stream)
+def endpoint(url=URL, model=MODEL, stream=False, response_format=None):
+    return Endpoint(
+        type="custom_agnes", url=url, model=model, key="test-key", stream=stream,
+        response_format=response_format,
+    )
 
 
 @pytest.mark.parametrize("url,model,expected", [
@@ -88,18 +91,27 @@ def test_agnes_defaults_and_stream_setting():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("data,result", [
-    ({"url": "https://cdn.example/image.png", "b64_json": None}, "https://cdn.example/image.png"),
-    ({"url": None, "b64_json": "aW1hZ2U="}, "aW1hZ2U="),
+@pytest.mark.parametrize("response_format,data,result", [
+    ("url", {"url": "https://cdn.example/image.png", "b64_json": None}, "https://cdn.example/image.png"),
+    ("b64_json", {"url": None, "b64_json": "aW1hZ2U="}, "aW1hZ2U="),
 ])
-async def test_agnes_image_uses_existing_url_and_base64_parser(data, result):
-    provider = resolve_provider(endpoint())
-    call = provider.build(endpoint(), DrawRequest(prompt="p", images=[PNG], mime_types=["image/png"]))
+@pytest.mark.parametrize("has_reference", [False, True])
+async def test_agnes_image_requests_and_extracts_selected_format(response_format, data, result, has_reference):
+    ep = endpoint(response_format=response_format)
+    provider = resolve_provider(ep)
+    request = DrawRequest(prompt="p", images=[PNG], mime_types=["image/png"]) if has_reference else DrawRequest(prompt="p")
+    call = provider.build(ep, request)
     requests = []
 
     def handler(request):
         requests.append(request)
-        assert json.loads(request.content) == call.json
+        body = json.loads(request.content)
+        assert body["extra_body"]["response_format"] == response_format
+        assert "response_format" not in body
+        if response_format == "b64_json" and not has_reference:
+            assert body["return_base64"] is True
+        else:
+            assert "return_base64" not in body
         return httpx.Response(200, json={"created": 1780000000, "data": [data]})
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:

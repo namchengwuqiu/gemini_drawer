@@ -14,6 +14,7 @@ from .channel_url import (
     classify_channel_url,
     parse_channel_url,
 )
+from .image_size import normalize_image_size
 from .managers import DataManager, KeyManager
 from .protocols import IMAGE_PROTOCOLS, VIDEO_PROTOCOLS, normalize_protocol
 
@@ -142,6 +143,8 @@ class DrawerWebUI:
                         continue
                     row.update(request_order=info.get("request_order"), name=name, model=info.get("model", ""), enabled=info.get("enabled", True),
                                is_video=info.get("is_video", False), protocol=info.get("protocol", "auto"))
+                    if not row["is_video"] and (image_size := normalize_image_size(info.get("image_size"))):
+                        row["image_size"] = image_size
                     url = str(info.get("url", ""))
                     parsed = urlsplit(url)
                     row["url"] = f"{parsed.scheme}://{parsed.netloc.rsplit('@', 1)[-1]}{parsed.path}" if parsed.scheme else ""
@@ -348,6 +351,15 @@ class DrawerWebUI:
             if protocol not in choices:
                 raise ValueError("所选协议与图片/视频渠道类型不匹配。")
             info["protocol"] = protocol
+        if "image_size" in info:
+            value = info.pop("image_size")
+            if value is not None and not (isinstance(value, str) and not value.strip()):
+                size = normalize_image_size(value)
+                if not size:
+                    raise ValueError("图片分辨率只支持 1K、2K 或 4K，留空使用渠道默认。")
+                if info.get("is_video"):
+                    raise ValueError("图片分辨率仅适用于图片渠道。")
+                info["image_size"] = size
         if info.get("response_format") not in {None, "url", "b64_json"}:
             raise ValueError("返回格式只支持 url 或 b64_json。")
         # 与 /添加渠道 共用同一套 URL 分类：本次提交带了 URL、却无法识别渠道类型、

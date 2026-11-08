@@ -22,6 +22,9 @@ from .openai_compat import build_chat_completions_call
 
 DEFAULT_MODEL = "gpt-image-2"
 
+# Images API 需要像素宽高。4K 采用 UHD，避免超过 GPT Image 的 3840 像素长边上限。
+_IMAGE_DIMENSIONS = {"1K": "1024x1024", "2K": "2048x2048", "4K": "3840x2160"}
+
 #: URL 里带这个片段就用 chat 形态
 _CHAT_COMPLETIONS_MARKER = "/chat/completions"
 
@@ -97,7 +100,11 @@ class GptImageProvider(Provider):
 
     def _build_images(self, endpoint: Endpoint, request: DrawRequest) -> HttpCall:
         base = _images_base(endpoint.url)
-        model = endpoint.model_name or DEFAULT_MODEL
+        fields = {
+            "model": endpoint.model_name or DEFAULT_MODEL,
+            "prompt": request.prompt,
+            "size": _IMAGE_DIMENSIONS[endpoint.image_size] if endpoint.image_size else "auto",
+        }
 
         if not request.has_image:
             return HttpCall(
@@ -106,7 +113,7 @@ class GptImageProvider(Provider):
                     "Content-Type": "application/json",
                     "Authorization": f"Bearer {endpoint.key}",
                 },
-                json={"model": model, "prompt": request.prompt, "size": "auto"},
+                json=fields,
                 timeout=self.timeout,
             )
 
@@ -117,6 +124,6 @@ class GptImageProvider(Provider):
             url=f"{base}/v1/images/edits",
             headers={"Authorization": f"Bearer {endpoint.key}"},
             files={"image": (f"input.{ext}", io.BytesIO(request.first_image), mime)},
-            data={"model": model, "prompt": request.prompt, "size": "auto"},
+            data=fields,
             timeout=self.timeout,
         )
