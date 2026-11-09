@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.15.12
+> **Version:** 1.15.13
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -185,6 +185,7 @@ Key 错误。同步绘图尚未取得图片时，空响应、解析失败、断�
 
 - `admin_only_mode` (布尔值, 默认 `false`): 管理员专用模式，开启后仅管理员可使用绘图功能（**指令与 Action 同时受限**）。
 - `auto_recall_status` (布尔值, 默认 `true`): 是否自动撤回绘图过程中的状态提示消息。
+- 绘图指令的生成失败和图片未发送提示会在约 6 秒后撤回。撤回需要 QQ 适配器返回该提示的消息 ID，且不受 `auto_recall_status` 影响。
 - `success_notify_poke` (布尔值, 默认 `true`): 生成成功后使用戳一戳通知用户。
 - `reply_with_image` (布尔值, 默认 `true`): 以回复触发消息的方式发送图片（开启后自动跳过成功通知）。
 - `debug_mode` (布尔值, 默认 `false`): 开启额外排查日志；图片/视频响应原文和敏感凭据不会直接回显。
@@ -396,6 +397,7 @@ Key 错误。同步绘图尚未取得图片时，空响应、解析失败、断�
 HTTPS→HTTP 的降级跳转直接拒绝；直连会在发送请求前校验并固定连接 IP，同时保留原始
 Host 与 TLS 名称。本地绘图渠道需要下载本地地址时，推荐在 `behavior.media_host_allowlist`
 填写可信主机；`behavior.allow_private_media_hosts` 则是允许所有主机的全局开关。
+下载地址解析到非公网 IP 而被拒绝时，日志会显示目标主机名，可据此确认需要放行的媒体主机。
 
 全新安装时，`behavior.media_host_allowlist` 默认包含 QQ 头像域名 `q1.qlogo.cn`，
 用于兼容代理 fake-IP 环境下的头像下载。已有配置中显式填写的允许列表（包括空列表）会保留。

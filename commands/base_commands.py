@@ -45,12 +45,13 @@ from ..core.image_source import download_avatar, extract_source_image
 from ..core.guards import evaluate_access, message_user_id
 from ..core.pipeline import DrawingAttempts, run_drawing
 from ..providers import DrawRequest
-from ..utils import convert_if_gif, download_image, get_image_mime_type
+from ..utils import convert_if_gif, download_image, get_image_mime_type, interpret_send_result
 
 logger = get_plugin_logger("plugin.gemini_drawer")
 
 #: 参考图获取阶段的超时上限（会被整体预算进一步收敛）
 REFERENCE_IMAGE_TIMEOUT_SECONDS = 120.0
+FAILURE_NOTICE_RECALL_DELAY_SECONDS = 6.0
 
 
 def _consume_task_result(task: "asyncio.Task[Any]") -> None:
@@ -70,11 +71,14 @@ class CtxSendMixin:
     """
 
     async def _send_text(self, text: str, **kwargs: Any) -> bool:
+        return interpret_send_result(await self._send_text_result(text, **kwargs))
+
+    async def _send_text_result(self, text: str, **kwargs: Any) -> Any:
         ctx = getattr(self, "ctx", None)
         stream_id = self._get_stream_id() if hasattr(self, "_get_stream_id") else ""
         if callable(getattr(getattr(ctx, "send", None), "text", None)) and stream_id:
             try:
-                return bool(await ctx.send.text(str(text), stream_id, **kwargs))
+                return await ctx.send.text(str(text), stream_id, **kwargs)
             except Exception as e:
                 logger.warning(f"ctx.send.text 发送确认失败: {type(e).__name__}，不重复发送")
                 return False
@@ -238,11 +242,15 @@ class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
                 resp = await self.ctx.api.call(
                     "adapter.napcat.message.delete_msg", message_id=str(mid)
                 )
-                if resp is not None and not (isinstance(resp, dict) and resp.get("success") is False):
+                if isinstance(resp, dict) and ("status" in resp or "retcode" in resp):
+                    succeeded = resp.get("status") == "ok" and resp.get("retcode") == 0
+                else:
+                    succeeded = resp is True or (isinstance(resp, dict) and resp.get("success") is True)
+                if succeeded:
                     recalled_count += 1
                     logger.debug(f"成功撤回消息: {mid}")
                 else:
-                    logger.debug(f"撤回消息未成功: {mid}")
+                    logger.warning(f"撤回消息未成功: {mid}")
             except Exception as e:
                 logger.warning(f"撤回消息失败 {mid}: {e}")
         return recalled_count
@@ -438,7 +446,7 @@ class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
             if not budget.can_start(minimum=5.0):
                 # 宿主 RPC 随时可能超时；期限耗尽后不得再开始发送。
                 logger.warning("时间预算耗尽，已生成但不再发送图片")
-                await self._send_text("❌ 生成耗时超出本次处理预算，图片未发送，请重试。")
+                await self._send_failure_notice("❌ 生成耗时超出本次处理预算，图片未发送，请重试。")
                 return True, "生成超时未发送", True
             logger.info(f"绘图成功，耗时 {elapsed:.2f}s")
             try:
@@ -447,21 +455,29 @@ class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
                 logger.error(f"图片发送未确认: {type(e).__name__}")
                 if isinstance(e, (TimeoutError, BudgetExpiredError)):
                     raise
-                await self._send_text("❌ 图片发送未确认，请勿立即重复操作。")
+                await self._send_failure_notice("❌ 图片发送未确认，请勿立即重复操作。")
                 return False, "图片发送未确认", True
             await self._recall_status_messages(status_msg_start_time)
             return True, "绘图成功", True
 
         fail_msg = f"❌ 生成失败 ({elapsed:.2f}s, {attempts.count}次尝试)\n最终错误: {last_error}"
-        fail_msg_send_time = time.time()
-        await self._send_text(fail_msg)
-        self._schedule_delayed_recall(fail_msg_send_time, fail_msg)
+        await self._send_failure_notice(fail_msg)
         await self._recall_status_messages(status_msg_start_time)
         return True, "所有尝试均失败", True
 
-    def _schedule_delayed_recall(self, fail_msg_send_time: float, fail_msg: str) -> None:
-        """失败消息的延迟撤回交给插件统一管理，卸载时可取消（P1-5）。"""
-        task = asyncio.create_task(self._delayed_recall_fail_message(fail_msg_send_time, fail_msg))
+    async def _send_failure_notice(self, text: str) -> None:
+        """只按本次发送的 QQ 回执撤回，避免按历史消息的内容猜测 ID。"""
+        result = await self._send_text_result(text, return_details=True)
+        if not interpret_send_result(result):
+            return
+
+        message_id = str(result.get("message_id") or "").strip() if isinstance(result, dict) else ""
+        digits = message_id.removeprefix("-")
+        if not digits.isascii() or not digits.isdecimal() or not digits.lstrip("0"):
+            logger.warning("绘图失败提示未取得有效的 QQ 消息 ID，无法自动撤回")
+            return
+
+        task = asyncio.create_task(self._delayed_recall_fail_message(message_id))
         plugin = getattr(self, "plugin", None)
         tracker = getattr(plugin, "track_background_task", None)
         if tracker is not None:
@@ -582,21 +598,9 @@ class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
             getattr(msg, 'time', getattr(msg, 'timestamp', 0)),
         )
 
-    async def _delayed_recall_fail_message(self, fail_msg_send_time: float, fail_msg_content: str) -> None:
-        try:
-            await asyncio.sleep(6)
-            messages = await self._iter_recent_bot_messages(fail_msg_send_time - 2, limit=10)
-            for msg in messages:
-                content, msg_id, msg_time = self._message_fields(msg)
-                if not content.startswith("❌ 生成失败"):
-                    continue
-                if float(msg_time) < fail_msg_send_time - 2:
-                    continue
-                if msg_id and not str(msg_id).startswith('send_api_'):
-                    await self._safe_recall([str(msg_id)])
-                    return
-        except Exception:
-            pass
+    async def _delayed_recall_fail_message(self, message_id: str) -> None:
+        await asyncio.sleep(FAILURE_NOTICE_RECALL_DELAY_SECONDS)
+        await self._safe_recall([message_id])
 
     #: 需要在绘图结束后自动撤回的状态提示前缀
     STATUS_PREFIXES = ("戳一戳", "✅ ", "🎨")

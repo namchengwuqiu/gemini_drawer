@@ -7,6 +7,7 @@ import base64
 import importlib.util
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -223,6 +224,58 @@ async def test_generation_failure_reports_reason_to_user(wire):
 
     assert reason == "所有尝试均失败"
     assert any("生成失败" in t and "SAFETY" in t for t in cmd.sent_texts)
+
+
+@pytest.mark.parametrize("failed_download", [False, True], ids=["generation", "download"])
+async def test_draw_failure_notice_recalls_only_its_platform_message(wire, monkeypatch, failed_download):
+    cmd = make_cmd()
+    tasks = []
+    cmd.plugin = type("TaskTracker", (), {"track_background_task": staticmethod(tasks.append)})()
+    cmd.ctx.send.text = AsyncMock(return_value={"sent": True, "message_id": "-345"})
+    cmd.ctx.message.get_by_time_in_chat = AsyncMock()
+    monkeypatch.setattr(base_commands, "FAILURE_NOTICE_RECALL_DELAY_SECONDS", 0)
+    if failed_download:
+        wire["handler"] = lambda r: httpx.Response(
+            200, json={"data": [{"url": "https://cdn.example/out.png"}]}
+        )
+        download = AsyncMock(return_value=None)
+        monkeypatch.setattr(base_commands, "download_image", download)
+        expected_text = "❌ 图片发送未确认"
+        expected_result = (False, "图片发送未确认", True)
+    else:
+        wire["handler"] = lambda r: httpx.Response(200, json={"promptFeedback": {"blockReason": "SAFETY"}})
+        expected_text = "❌ 生成失败"
+        expected_result = (True, "所有尝试均失败", True)
+
+    assert await cmd.execute() == expected_result
+    if failed_download:
+        download.assert_awaited_once()
+    assert cmd.ctx.hybrid_calls == []
+    assert cmd.ctx.send.text.await_count == 1
+    args, kwargs = cmd.ctx.send.text.await_args
+    assert args[0].startswith(expected_text) and args[1] == "stream-1"
+    assert kwargs == {"return_details": True}
+    assert len(tasks) == 1
+    await tasks[0]
+    assert [kw for name, kw in cmd.ctx.api_calls if name == "adapter.napcat.message.delete_msg"] == [
+        {"message_id": "-345"}
+    ]
+    cmd.ctx.message.get_by_time_in_chat.assert_not_awaited()
+
+
+@pytest.mark.parametrize("receipt", [True, {"sent": False, "message_id": "345"},
+                                     {"sent": True, "message_id": "send_api_345"}])
+async def test_draw_failure_without_confirmed_platform_id_does_not_recall(receipt):
+    cmd = make_cmd()
+    cmd.ctx.send.text = AsyncMock(return_value=receipt)
+    cmd.ctx.message.get_by_time_in_chat = AsyncMock()
+    cmd.plugin = type("TaskTracker", (), {"track_background_task": staticmethod(pytest.fail)})()
+
+    await cmd._send_failure_notice("❌ 生成失败")
+
+    cmd.ctx.send.text.assert_awaited_once_with("❌ 生成失败", "stream-1", return_details=True)
+    cmd.ctx.message.get_by_time_in_chat.assert_not_awaited()
+    assert cmd.ctx.api_calls == []
 
 
 async def test_unconfirmed_timeout_rotates_to_next_endpoint(wire, monkeypatch):

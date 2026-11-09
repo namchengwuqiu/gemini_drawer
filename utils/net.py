@@ -189,7 +189,7 @@ async def ensure_url_allowed(
         raise DownloadNotAllowedError("代理媒体下载需要显式配置 media_host_allowlist；无法本地验证代理目的地址")
     addresses = await resolve_addresses(host)
     if any(_is_private_address(address) for address in addresses):
-        raise DownloadNotAllowedError("媒体主机解析到非公网地址，已按策略拒绝下载")
+        raise DownloadNotAllowedError(f"媒体主机解析到非公网地址，已按策略拒绝下载（主机: {host!r}）")
     return parts
 
 
