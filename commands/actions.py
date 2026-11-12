@@ -157,6 +157,8 @@ class _DrawActionMixin:
         proxy = self._proxy()
         sent_count = 0
         for raw in img_data:
+            if self.action_data.get("single_image_only") and sent_count:
+                break
             if budget is not None and not budget.can_start(minimum=5.0):
                 logger.warning("时间预算耗尽，剩余图片不再发送")
                 break
@@ -246,7 +248,7 @@ class ImageGenerateAction(_DrawActionMixin, BaseAction):
         try:
             # 有图则走图生图
             images = []
-            if self.action_message:
+            if self.action_message and self.action_data.get("use_source_image", True):
                 try:
                     # 参考图获取同样受整体预算约束（F1）；预算耗尽时取消本次生成。
                     timeout = REFERENCE_IMAGE_TIMEOUT_SECONDS

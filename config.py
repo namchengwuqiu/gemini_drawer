@@ -1,6 +1,7 @@
 from typing import Any, List
 from maibot_sdk import Field, PluginConfigBase
 from pydantic import field_validator
+from zoneinfo import ZoneInfo
 
 
 #: 插件展示名（帮助文案、转发节点昵称等统一使用这一处，避免各处硬编码漂移）
@@ -36,8 +37,8 @@ class PluginSectionConfig(PluginConfigBase):
 
     name: str = Field(default="gemini_drawer", description="插件名称",
                       json_schema_extra=ui("插件名称", disabled=True))
-    version: str = Field(default="1.15.13", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
-    config_version: str = Field(default="1.15.13", description="配置版本",
+    version: str = Field(default="1.16.0", description="插件版本", json_schema_extra=ui("插件版本", disabled=True))
+    config_version: str = Field(default="1.16.0", description="配置版本",
                                 json_schema_extra=ui("配置版本", disabled=True))
     enabled: bool = Field(default=True, description="是否启用插件", json_schema_extra=ui("启用插件"))
 
@@ -338,6 +339,27 @@ class WaitNoticeConfig(PluginConfigBase):
     )
 
 
+class AutonomousConfig(PluginConfigBase):
+    __ui_label__ = "自主绘图"
+    __ui_icon__ = "image"
+    __ui_order__ = 7
+
+    enabled: bool = Field(default=False, description="允许麦麦自主决定绘图", json_schema_extra=ui("启用自主绘图"))
+    daily_limit: int = Field(default=2, ge=0, le=100, description="每会话每日主动绘图提交上限（失败也计次）", json_schema_extra=ui("每会话每日次数"))
+    global_daily_limit: int = Field(default=8, ge=0, le=1000, description="所有会话每日主动绘图提交总上限", json_schema_extra=ui("每日总次数"))
+    cooldown_seconds: int = Field(default=3600, ge=90, le=86400, description="同会话两次主动绘图提交的最短间隔秒数", json_schema_extra=ui("主动绘图间隔（秒）"))
+    timezone: str = Field(default="Asia/Shanghai", description="每日额度重置时区", json_schema_extra=ui("额度时区"))
+
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except (KeyError, ValueError) as exc:
+            raise ValueError("请输入有效的 IANA 时区，例如 Asia/Shanghai") from exc
+        return value
+
+
 class GeminiDrawerConfig(PluginConfigBase):
     plugin: PluginSectionConfig = Field(default_factory=PluginSectionConfig)
     general: GeneralConfig = Field(default_factory=GeneralConfig)
@@ -346,3 +368,4 @@ class GeminiDrawerConfig(PluginConfigBase):
     api: ApiConfig = Field(default_factory=ApiConfig)
     behavior: BehaviorConfig = Field(default_factory=BehaviorConfig)
     wait_notice: WaitNoticeConfig = Field(default_factory=WaitNoticeConfig)
+    autonomous: AutonomousConfig = Field(default_factory=AutonomousConfig)

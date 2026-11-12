@@ -1,6 +1,6 @@
 # Gemini 绘图插件
 
-> **Version:** 1.15.13
+> **Version:** 1.16.0
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -17,9 +17,35 @@
 - **回复图片模式** 🆕：生成的图片以回复触发消息的方式发送，更直观的用户反馈。
 - **管理员专用模式** 🆕：可限制仅管理员使用绘图功能。
 - **自然语言交互** 🆕：支持直接通过"帮我画个猫"等自然语言请求触发绘图，并在媒体真正发送后才报告完成。
+- **自主绘图（v1.16.0）**：可由 Bot 自行选择基于自身人设底图作画或自由创作，提供独立的持久化额度与冷却。
 - **视频生成功能** 🎬：支持图生视频和文生视频，根据图片和描述生成视频，还有自然语言生成自拍视频。
 
 ---
+
+
+## 自主绘图
+
+开启 `[autonomous].enabled = true` 后，麦麦在普通聊天及现有生活/静默主动任务唤醒时，可自主选择 `gemini_autonomous_draw`，不必等待用户请求或先征求意见；也可以选择文字或沉默。此功能复用现有主动任务的时间、白名单和免打扰规则，不额外建立定时发图任务。
+
+- `mode = "self"`：使用 `assets/` 下已配置的自拍底图，沿用人物身份与画风约束，可自行构思服装、动作和生活场景；需要启用自拍并准备底图。
+- `mode = "free"`：根据麦麦自行构思的 `prompt` 进行文生图，不读取当前聊天图片或自拍底图。
+- 一次最多发送一张，复用媒体生成中保护、共享冷却及同轮回复/重复媒体过滤；用户明确要求时仍走原有绘图和自拍工具。
+- `daily_limit` 默认每会话每天 2 次；`global_daily_limit` 默认所有会话每天总共 8 次；`cooldown_seconds` 默认主动提交至少间隔 3600 秒（可设 90–86400 秒）。任一每日额度设为 0 即暂停主动绘图。
+- 每日按 `timezone`（默认 `Asia/Shanghai`）重置；提交前原子保存到外部数据目录 `autonomous_quota.json`，失败、中断也计次，重载/重启不清空次数或冷却，不自动重试。记录损坏或无法保存时只暂停自主绘图。
+- 默认关闭，在插件配置页「自主绘图」开启后生效；主动绘图仍受绘图总开关、群黑名单、管理员模式限制。
+
+配置示例：
+
+```toml
+[autonomous]
+enabled = true
+daily_limit = 2
+global_daily_limit = 8
+cooldown_seconds = 3600
+timezone = "Asia/Shanghai"
+```
+
+`self` 模式还需开启 `selfie.enable`，并将 `selfie.reference_image_path` 指定的底图放入插件 `assets/` 目录；`free` 模式只需要可用的图片渠道。
 
 ## 安装
 
@@ -43,7 +69,7 @@ pip install -r requirements.txt
 
 ## 自然语言交互 🆕
 
-本插件提供 `gemini_generate_image`、`gemini_selfie`、`gemini_selfie_video` 三个原生 Tool，允许 Bot 理解自然语言的绘图、自拍和自拍视频请求。
+本插件提供 `gemini_generate_image`、`gemini_selfie`、`gemini_selfie_video`、`gemini_autonomous_draw` 四个原生 Tool，支持自然语言绘图、自拍、自拍视频及自主绘图。
 
 **触发示例**:
 - "帮我画一只戴眼镜的猫"

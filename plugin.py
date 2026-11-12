@@ -5,6 +5,7 @@ import json
 import math
 import random
 import time
+from copy import deepcopy
 import httpx
 from maibot_sdk import API, Command, HookHandler, MaiBotPlugin, Tool
 from maibot_sdk.types import ErrorPolicy, HookMode, HookOrder
@@ -13,6 +14,8 @@ from maibot_sdk.context import PluginContext
 from .config import GeminiDrawerConfig
 from .core.budget import DRAW_COMMAND_TIMEOUT_MS, VIDEO_COMMAND_TIMEOUT_MS, MediaDeliveryUncertain
 from .core.managers import data_manager, key_manager
+from .core.autonomous import AutonomousQuota
+from .core.guards import evaluate_access
 from .core.webui import DrawerWebUI
 from .utils import configure_policy
 from .utils.version import get_plugin_version
@@ -275,7 +278,7 @@ def to_compat_message(message: Any) -> Any:
 class GeminiDrawerPlugin(MaiBotPlugin):
     config_model = GeminiDrawerConfig
 
-    _MEDIA_TOOLS = frozenset({"gemini_generate_image", "gemini_selfie", "gemini_selfie_video"})
+    _MEDIA_TOOLS = frozenset({"gemini_generate_image", "gemini_selfie", "gemini_selfie_video", "gemini_autonomous_draw"})
     _REPLY_GUARD_TEXT = (
         "媒体仍在生成或发送中。禁止声称图片/视频已经发送、已经拍好或让用户查收；"
         "只能说明正在准备并请对方稍等。只有在工具明确返回发送成功后，才可以使用完成时态。"
@@ -289,6 +292,7 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         # 上一次成功发出媒体的时间戳。图片发完后对话循环不会停，下一轮 Planner
         # 常常还在处理同一条用户消息，于是又拍一张——pending 那时已经清零，拦不住。
         self._media_last_sent_at: dict[str, float] = {}
+        self._autonomous_quota: Optional[AutonomousQuota] = None
         self._video_delivery_uncertain_until: dict[str, float] = {}
         self._video_failure_until: dict[str, float] = {}
         self._video_guard_path: Optional[Path] = None
@@ -546,6 +550,9 @@ class GeminiDrawerPlugin(MaiBotPlugin):
             self.ctx.logger.warning(f"[GeminiDrawer] 历史数据迁移失败: {e}")
 
         await self._load_video_guards(data_manager.data_dir / "video_retry_guard.json")
+        self._autonomous_quota = AutonomousQuota(data_manager.data_dir / "autonomous_quota.json")
+        if self._autonomous_quota.error:
+            self.ctx.logger.error("[GeminiDrawer] 主动绘图记录读取失败，已暂停主动绘图")
 
         # 初始化自拍目录
         try:
@@ -724,7 +731,73 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         tool_call = item.get("tool_call")
         if not isinstance(tool_call, dict):
             return ""
-        return str(tool_call.get("func_name") or "").strip()
+        return str(tool_call.get("func_name") or "").strip().rsplit(".", 1)[-1]
+
+    def _autonomous_blocked(self, stream_id: str) -> str:
+        if not stream_id:
+            return "无法确定目标会话，本次未提交。"
+        if not self.config.plugin.enabled or not self.config.general.enable_gemini_drawer or not self.config.autonomous.enabled:
+            return "自主绘图未开启。"
+        if self._autonomous_quota is None:
+            return "主动绘图记录尚未初始化，本次未提交。"
+        if self._media_is_pending(stream_id) or self._media_cooldown_remaining(stream_id) > 0:
+            return "当前有媒体正在生成或刚刚发送，请继续自然聊天。"
+        return self._autonomous_quota.blocked(stream_id, self.config.autonomous, time.time())
+
+    @HookHandler(
+        "maisaka.planner.before_request",
+        name="gemini_drawer_autonomous_context",
+        description="在聊天和主动任务决策时提供自主绘图选项；额度不足时隐藏工具",
+        mode=HookMode.BLOCKING,
+        order=HookOrder.LATE,
+        error_policy=ErrorPolicy.SKIP,
+    )
+    async def autonomous_planner_context(self, **kwargs: Any) -> dict[str, Any]:
+        definitions = kwargs.get("tool_definitions")
+        if not isinstance(definitions, list):
+            return {"action": "continue"}
+
+        def is_autonomous(item):
+            if not isinstance(item, dict):
+                return False
+            function = item.get("function")
+            name = function.get("name") if isinstance(function, dict) else item.get("name")
+            return str(name or "").rsplit(".", 1)[-1] == "gemini_autonomous_draw"
+
+        if not any(is_autonomous(item) for item in definitions):
+            return {"action": "continue"}
+        sid = str(kwargs.get("session_id") or kwargs.get("stream_id") or "").strip()
+        if self._autonomous_blocked(sid):
+            kwargs["tool_definitions"] = [item for item in definitions if not is_autonomous(item)]
+            return {"action": "continue", "modified_kwargs": kwargs}
+
+        note = (
+            "【自主绘图】你可以把画图当成一种自主表达：结合当前人设、情绪、生活状态、记忆与话题，"
+            "自己判断是否值得用 gemini_autonomous_draw 分享一张图，不需要先征求对方是否想看。"
+            "画自己、自己的穿搭或生活场景时选择 mode=self，使用你的人设底图保持身份与画风；"
+            "画风景、动物、幻想、插画或其他灵感时选择 mode=free，自行构思具体画面。"
+            "普通聊天与已有的主动唤醒任务都可选择绘图，也可以只聊天或保持沉默。"
+            "不要每次都画，不要为同一张图的夸奖、同一话题或无人回应反复生成，不要自动重试失败任务。"
+            "用户明确要求绘图或自拍时使用原来的 gemini_generate_image / gemini_selfie 工具。"
+            "尊重当前会话的免打扰、休息、隐私与停止联系要求。每次最多一张；同轮不要调用 reply 或其他媒体工具，"
+            "只有工具明确返回发送成功后才可说已发出。"
+        )
+        if not self.config.selfie.enable:
+            note += "当前人设绘图未开启，只能选择 mode=free。"
+        items = kwargs.get("items")
+        if not isinstance(items, list):
+            return {"action": "continue"}
+        items = deepcopy(items)
+        for item in reversed(items):
+            if not isinstance(item, dict) or item.get("item_type") != "SystemMessageItem":
+                continue
+            parts = item.get("parts")
+            if not isinstance(parts, list):
+                continue
+            parts.append({"type": "text", "text": note})
+            kwargs["items"] = items
+            return {"action": "continue", "modified_kwargs": kwargs}
+        return {"action": "continue"}
 
     @HookHandler(
         "maisaka.planner.after_response",
@@ -1139,6 +1212,67 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         return await self._run_command(BananaPromptSearchCommand, stream_id, message, kwargs.get("matched_groups"))
 
     # ── AI Tools ──
+
+    @Tool(
+        "gemini_autonomous_draw",
+        description=(
+            "自主决定画一张图并发送到当前会话。适用于你想表达情绪、分享生活画面或创作灵感，"
+            "无需用户明确要求，也无需先询问。mode=self 用已配置的人设底图画自己（保持身份与画风）；"
+            "mode=free 完全根据 prompt 创作，不使用聊天图片。prompt 由你完整构思。"
+            "不要把普通聊天变成频繁发图；同一话题、收到夸奖或无人回应时不要重复生成。"
+            "有独立的每日额度和冷却，失败也计次，拒绝或失败后继续聊天或沉默，禁止自动重试或改用其他工具绕过。"
+            "用户明确要求绘图时使用原有绘图/自拍工具。一次最多一张；同轮不要调用 reply 或其他媒体工具，"
+            "必须等本工具成功返回后才能说图片已经发送。"
+        ),
+        parameters={
+            "prompt": {"type": "string", "description": "自主构思的完整画面：主体、动作、服装、场景、风格与氛围", "required": True},
+            "mode": {"type": "string", "enum": ["self", "free"], "description": "self 使用自身人设底图；free 自由创作", "required": True},
+        },
+        timeout_ms=DRAW_COMMAND_TIMEOUT_MS,
+    )
+    async def handle_autonomous_draw(self, prompt: str = "", mode: str = "", stream_id: str = "", **kwargs: Any) -> dict[str, Any]:
+        sid = str(stream_id or kwargs.get("chat_id") or "").strip()
+
+        def reject(reason):
+            return {"name": "gemini_autonomous_draw", "success": False, "content": reason + " 本次没有发送图片；不要自动重试或换工具绕过，请自然聊天或保持沉默。", "error": reason, "retryable": False}
+
+        if mode not in {"self", "free"} or not isinstance(prompt, str) or not prompt.strip():
+            return reject("需要有效的 mode（self/free）和完整的画面描述。")
+        reason = self._autonomous_blocked(sid)
+        if reason:
+            return reject(reason)
+        config_data = self.get_plugin_config_data()
+
+        def get_config(key, default=None):
+            section, field = key.split(".", 1)
+            return config_data.get(section, {}).get(field, default)
+
+        decision = evaluate_access(get_config, group_id=kwargs.get("group_id"), user_id=kwargs.get("user_id"))
+        if not decision.allowed:
+            return reject(decision.reason)
+        if self.config.behavior.admin_only_mode and not kwargs.get("user_id"):
+            return reject("管理员模式下无法确认用户身份。")
+        if mode == "self":
+            if not self.config.selfie.enable:
+                return reject("人设绘图未开启。")
+            reference = Path(__file__).parent / "assets" / self.config.selfie.reference_image_path
+            if not reference.is_file():
+                return reject("未找到人设底图。")
+        reason = await self._autonomous_quota.reserve(sid, self.config.autonomous, time.time())
+        if reason:
+            return reject(reason)
+        action_cls = SelfieGenerateAction if mode == "self" else ImageGenerateAction
+        action_data = {"requested_action": prompt.strip()} if mode == "self" else {"prompt": prompt.strip(), "use_source_image": False}
+        action_data["single_image_only"] = True
+        try:
+            result = await self._run_media_tool("gemini_autonomous_draw", action_cls, sid, "selfie" if mode == "self" else "image", action_data, **kwargs)
+        except Exception as exc:
+            self._get_logger().error("[GeminiDrawer] 主动绘图执行异常: %s", type(exc).__name__)
+            return {"name": "gemini_autonomous_draw", "success": False, "content": "本次主动绘图未确认发送成功，请勿声称已经发出。不要自动重试或改用其他工具，请自然聊天或保持沉默。", "error": "主动绘图执行异常", "retryable": False}
+        result["retryable"] = False
+        if not result.get("success"):
+            result["content"] = str(result.get("content") or "") + " 主动绘图本次已结束，禁止自动重试或改用其他绘图工具；请自然聊天或保持沉默。"
+        return result
 
     @Tool(
         "gemini_generate_image",

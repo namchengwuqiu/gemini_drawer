@@ -19,3 +19,6 @@ images/
 
 # Ignore plan file
 修改计划.text
+
+# Host-generated configuration backups can contain credentials
+config_back/
