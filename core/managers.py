@@ -35,7 +35,6 @@ from pathlib import Path
 from threading import RLock
 from typing import List, Tuple, Optional, Dict, Any
 from .host_bridge import get_plugin_logger
-from ..utils import save_config_file
 
 logger = get_plugin_logger("plugin.gemini_drawer.managers")
 
@@ -46,6 +45,8 @@ def _serialized(refresh: bool = False):
         @wraps(method)
         def wrapped(self, *args, **kwargs):
             with self.lock:
+                if self.data_dir is None:
+                    raise RuntimeError("插件数据目录尚未由宿主初始化")
                 if refresh:
                     if isinstance(self, KeyManager):
                         self.config = self._load_config()
@@ -54,61 +55,6 @@ def _serialized(refresh: bool = False):
                 return method(self, *args, **kwargs)
         return wrapped
     return decorate
-
-
-def _get_external_data_dir() -> Path:
-    """获取插件外部数据目录，将数据存储在插件目录之外，
-    避免 WebUI 更新插件时因删除整个插件目录导致数据丢失。
-    
-    支持两种部署方式:
-    
-    Docker 部署 (docker-compose.yml):
-        /MaiMBot/              (WORKDIR)
-        ├── plugins/gemini_drawer/  <- 挂载自 data/MaiMBot/plugins/
-        └── data/                   <- 挂载自 data/MaiMBot/
-            └── gemini_drawer/      <- 外部数据目录
-    
-    直接部署:
-        data/MaiMBot/
-        ├── plugins/gemini_drawer/  <- 插件代码
-        └── gemini_drawer/          <- 外部数据目录
-    """
-    plugin_dir = Path(__file__).parent.parent  # .../plugins/gemini_drawer
-    plugins_parent = plugin_dir.parent.parent  # Docker: /MaiMBot/  Host: data/MaiMBot/
-    
-    # Docker 环境: plugins/ 和 data/ 是同级目录，都在 /MaiMBot/ 下
-    # 检测方式: 如果 parent 下有 data/ 子目录且它不是当前插件的 data/
-    data_subdir = plugins_parent / "data"
-    if data_subdir.is_dir() and data_subdir != plugin_dir / "data":
-        external_dir = data_subdir / "gemini_drawer"
-    else:
-        # 直接部署: plugins/ 在 data/MaiMBot/ 下
-        external_dir = plugins_parent / "gemini_drawer"
-    
-    external_dir.mkdir(parents=True, exist_ok=True)
-    return external_dir
-
-
-def _migrate_internal_file(internal_file: Path, external_file: Path) -> bool:
-    """将插件内部数据文件迁移到外部目录
-    
-    如果外部文件不存在且内部文件存在，则复制数据。
-    迁移完成后保留内部文件作为备份（不删除）。
-    
-    Returns:
-        True 如果执行了迁移
-    """
-    if external_file.exists() or not internal_file.exists():
-        return False
-    
-    try:
-        import shutil
-        shutil.copy2(internal_file, external_file)
-        logger.info(f"已迁移数据文件: {internal_file.name} -> {external_file}")
-        return True
-    except Exception as e:
-        logger.error(f"迁移数据文件失败 {internal_file.name}: {e}")
-        return False
 
 
 def _file_stamp(path: Path) -> Optional[Tuple[float, int]]:
@@ -182,108 +128,12 @@ def _normalize_data_config(raw: Any) -> Dict[str, Any]:
 class KeyManager:
     def __init__(self, keys_file_path: Path = None):
         self.lock = RLock()
-        if keys_file_path is None:
-            self.plugin_dir = Path(__file__).parent.parent
-            self.data_dir = _get_external_data_dir()
-            self.keys_file = self.data_dir / "keys.json"
-            # 从插件内部旧路径迁移数据
-            internal_keys = self.plugin_dir / "data" / "keys.json"
-            _migrate_internal_file(internal_keys, self.keys_file)
-        else:
-            self.keys_file = keys_file_path
-            self.plugin_dir = self.keys_file.parent.parent
-
+        self.plugin_dir = Path(__file__).parent.parent
+        self.data_dir = keys_file_path.parent if keys_file_path is not None else None
+        self.keys_file = keys_file_path
         #: 最近一次读取失败的原因；非 None 时拒绝覆盖写入，直到文件恢复
         self._load_error: Optional[str] = None
-        self.config = self._load_config()
-        self._migrated = False
-
-    def ensure_migrated(self) -> None:
-        """执行一次性的历史数据迁移。
-
-        迁移会写文件，因此不放在 __init__ 里——否则仅仅 import 本模块就会
-        产生副作用，单元测试也无法安全导入。由 plugin.on_load() 调用。
-        """
-        if self._migrated:
-            return
-        self._migrated = True
-        self._migrate_legacy_data()
-
-    def _migrate_legacy_data(self):
-        migrated = False
-        old_keys_file = self.plugin_dir / "keys.json"
-        if old_keys_file.exists() and old_keys_file != self.keys_file:
-            try:
-                with open(old_keys_file, 'r', encoding='utf-8') as f:
-                    old_data = json.load(f)
-                    old_keys = old_data.get('keys', []) if isinstance(old_data, dict) else []
-                    if not isinstance(old_keys, list):
-                        old_keys = []
-                    if old_keys:
-                        current_keys = {k['value'] for k in self.config.get('keys', [])}
-                        for k in old_keys:
-                            if not isinstance(k, dict) or not isinstance(k.get('value'), str) or not k['value']:
-                                continue
-                            if k['value'] not in current_keys:
-                                if 'type' not in k:
-                                    k['type'] = 'bailili' if k['value'].startswith('sk-') else 'google'
-                                self.config['keys'].append(k)
-                                migrated = True
-                old_keys_file.rename(old_keys_file.with_suffix('.json.bak'))
-                logger.info("已迁移旧的 keys.json 数据")
-            except Exception as e:
-                logger.error(f"迁移旧 keys.json 失败: {e}")
-
-        config_path = self.plugin_dir / "config.toml"
-        if config_path.exists():
-            try:
-                import toml
-                with open(config_path, 'r', encoding='utf-8') as f:
-                    config_data = toml.load(f)
-                
-                channels = config_data.get("channels", {})
-                config_changed = False
-                
-                for name, info in channels.items():
-                    key_to_migrate = None
-                    if isinstance(info, str):
-                        if ":" in info:
-                            possible_url, possible_key = info.rsplit(":", 1)
-                            is_key = True
-                            if '/' in possible_key: is_key = False
-                            elif possible_key in ['generateContent', 'streamGenerateContent']: is_key = False
-                            elif len(possible_key) < 10 and not possible_key.startswith('sk-'):
-                                if possible_url.lower() in ['http', 'https']: is_key = False
-                            
-                            if is_key:
-                                url = possible_url
-                                key = possible_key
-                                key_to_migrate = key
-                                channels[name] = {"url": url, "enabled": True}
-                                config_changed = True
-                            else:
-                                channels[name] = {"url": info, "enabled": True}
-                                config_changed = True
-                                
-                    elif isinstance(info, dict):
-                        if "key" in info:
-                            key_to_migrate = info.pop("key")
-                            config_changed = True
-                    
-                    if key_to_migrate:
-                        self.add_keys([key_to_migrate], name)
-                        migrated = True
-                        logger.info(f"已迁移渠道 {name} 的 Key")
-
-                if config_changed:
-                    save_config_file(config_path, config_data)
-                    logger.info("已从 config.toml 移除 Key")
-
-            except Exception as e:
-                logger.error(f"迁移 config.toml 数据失败: {e}")
-
-        if migrated:
-            self.save_config(self.config)
+        self.config = self._load_config() if keys_file_path is not None else {"keys": [], "current_index": 0}
 
     def _load_config(self) -> Dict[str, Any]:
         if not self.keys_file.exists():
@@ -455,87 +305,13 @@ class DataManager:
         self._banana_count_stamp: Optional[Tuple[float, int]] = None
         self._banana_count_flag: Optional[bool] = None
 
-        if data_file_path is None:
-            self.plugin_dir = Path(__file__).parent.parent
-            self.data_dir = _get_external_data_dir()
-            self.data_file = self.data_dir / "data.json"
-            self.banana_file = self.data_dir / "banana_prompts.json"
-            # 从插件内部旧路径迁移数据
-            internal_data = self.plugin_dir / "data" / "data.json"
-            _migrate_internal_file(internal_data, self.data_file)
-        else:
-            self.data_file = data_file_path
-            self.banana_file = self.data_file.parent / "banana_prompts.json"
-            self.plugin_dir = self.data_file.parent.parent
-            
+        self.plugin_dir = Path(__file__).parent.parent
+        self.data_dir = data_file_path.parent if data_file_path is not None else None
+        self.data_file = data_file_path
+        self.banana_file = self.data_dir / "banana_prompts.json" if self.data_dir is not None else None
         #: 最近一次读取失败的原因；非 None 时拒绝覆盖写入，直到文件恢复
         self._load_error: Optional[str] = None
-        self.data = self._load_data()
-        self._migrated = False
-
-    def ensure_migrated(self) -> None:
-        """执行一次性的历史数据迁移（写文件，故不放在 __init__）。"""
-        if self._migrated:
-            return
-        self._migrated = True
-        self._migrate_from_root()
-        self._migrate_from_toml()
-
-    def _migrate_from_root(self):
-        """迁移根目录下的 data.json/data.js 到 data/data.json"""
-        migrated = False
-        
-        # 检查可能的旧文件名称
-        possible_files = ["data.json", "data.js", "data.json.bak"]
-        
-        for filename in possible_files:
-            root_file = self.plugin_dir / filename
-            if not root_file.exists():
-                continue
-                
-            if root_file.resolve() == self.data_file.resolve():
-                continue
-                
-            try:
-                # 尝试读取旧文件
-                content = {}
-                with open(root_file, 'r', encoding='utf-8') as f:
-                    content = json.load(f)
-                
-                if not content:
-                    continue
-
-                # 合并数据
-                changed = False
-                
-                # 迁移 Prompts
-                if "prompts" in content:
-                    for name, prompt in content["prompts"].items():
-                        if name not in self.data.get("prompts", {}):
-                            self.add_prompt(name, prompt)
-                            changed = True
-                            
-                # 迁移 Channels
-                if "channels" in content:
-                    for name, info in content["channels"].items():
-                        if name not in self.data.get("channels", {}):
-                            self.add_channel(name, info)
-                            changed = True
-                            
-                if changed:
-                    migrated = True
-                    logger.info(f"已从 {filename} 迁移数据")
-                
-                # 备份旧文件
-                backup_path = root_file.with_suffix(root_file.suffix + ".migrated")
-                root_file.rename(backup_path)
-                logger.info(f"已将 {filename} 重命名为 {backup_path.name}")
-                
-            except Exception as e:
-                logger.error(f"迁移 {filename} 数据失败: {e}")
-
-        if migrated:
-            self.save_data()
+        self.data = self._load_data() if data_file_path is not None else {"prompts": {}, "channels": {}}
 
     def _load_data(self) -> Dict[str, Any]:
         if not self.data_file.exists():
@@ -765,90 +541,6 @@ class DataManager:
             for original, alias in aliases.items()
             if name == str(entries[original].get("source_title") or original.rsplit("/", 1)[-1]).strip()
         }
-
-    def _migrate_from_toml(self):
-        config_path = self.plugin_dir / "config.toml"
-        if not config_path.exists():
-            return
-
-        try:
-            import toml
-            with open(config_path, 'r', encoding='utf-8') as f:
-                config_data = toml.load(f)
-            
-            data_changed = False
-            config_changed = False
-            
-            # Migrate Prompts
-            if "prompts" in config_data:
-                for name, prompt in config_data["prompts"].items():
-                    if name not in self.data["prompts"]:
-                        self.data["prompts"][name] = prompt
-                        data_changed = True
-                del config_data["prompts"]
-                config_changed = True
-
-            # Migrate Channels
-            if "channels" in config_data:
-                for name, info in config_data["channels"].items():
-                    if name not in self.data["channels"]:
-                        self.data["channels"][name] = info
-                        data_changed = True
-                del config_data["channels"]
-                config_changed = True
-
-            api_config = config_data.get("api")
-            if isinstance(api_config, dict):
-                channels = self.data.setdefault("channels", {})
-                legacy_fields = [
-                    "enable_google",
-                    "api_url",
-                    "enable_lmarena",
-                    "lmarena_api_url",
-                    "lmarena_api_key",
-                    "lmarena_model_name",
-                ]
-
-                google_url = str(api_config.get("api_url") or "").strip()
-                google_enabled = bool(api_config.get("enable_google", True))
-                if google_url and "google" not in channels:
-                    channels["google"] = {"url": google_url, "enabled": google_enabled, "stream": False}
-                    data_changed = True
-
-                lmarena_url = str(api_config.get("lmarena_api_url") or "").strip()
-                lmarena_key = str(api_config.get("lmarena_api_key") or "").strip()
-                lmarena_model = str(api_config.get("lmarena_model_name") or "").strip()
-                lmarena_enabled = bool(api_config.get("enable_lmarena", False))
-                is_placeholder_lmarena = lmarena_url in {"", "http://xxx:666/v1/chat/completions"}
-                if lmarena_url and not is_placeholder_lmarena:
-                    if "lmarena" not in channels:
-                        channel_info: Dict[str, Any] = {
-                            "url": lmarena_url,
-                            "enabled": lmarena_enabled,
-                            "stream": True,
-                        }
-                        if lmarena_model:
-                            channel_info["model"] = lmarena_model
-                        channels["lmarena"] = channel_info
-                        data_changed = True
-                    if lmarena_key:
-                        added_count, _ = key_manager.add_keys([lmarena_key], "lmarena")
-                        data_changed = data_changed or added_count > 0
-
-                for field_name in legacy_fields:
-                    if field_name in api_config:
-                        del api_config[field_name]
-                        config_changed = True
-
-            if data_changed:
-                self.save_data()
-            if config_changed:
-                save_config_file(config_path, config_data)
-            if data_changed or config_changed:
-                logger.info("Successfully migrated legacy config.toml data")
-
-        except Exception as e:
-            logger.error(f"Migration from TOML failed: {e}")
 
     @_serialized()
     def get_prompts(self) -> Dict[str, str]:

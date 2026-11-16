@@ -1,4 +1,4 @@
-from typing import Any, Tuple, Optional, Type
+from typing import Any, Mapping, Tuple, Optional, Type
 from pathlib import Path
 import asyncio
 import json
@@ -14,6 +14,7 @@ from maibot_sdk.context import PluginContext
 from .config import GeminiDrawerConfig
 from .core.budget import DRAW_COMMAND_TIMEOUT_MS, VIDEO_COMMAND_TIMEOUT_MS, MediaDeliveryUncertain
 from .core.managers import data_manager, key_manager
+from .core.storage import initialize_storage, migrate_legacy_config
 from .core.autonomous import AutonomousQuota
 from .core.guards import evaluate_access
 from .core.webui import DrawerWebUI
@@ -298,6 +299,8 @@ class GeminiDrawerPlugin(MaiBotPlugin):
         self._video_guard_path: Optional[Path] = None
         self._video_guard_load_error = False
         self._video_guard_lock = asyncio.Lock()
+        self._storage_root: Optional[Path] = None
+        self._storage_ready = False
         self._webui = DrawerWebUI(data_manager, key_manager)
         self._banana_update_task: Optional[asyncio.Task] = None
         self._banana_update_state: dict[str, Any] = {"job_id": "", "status": "idle", "message": ""}
@@ -537,18 +540,23 @@ class GeminiDrawerPlugin(MaiBotPlugin):
 
     def _set_context(self, ctx: PluginContext) -> None:
         super()._set_context(ctx)
+        self._storage_root = Path(ctx.paths.data_dir)
         # 将上下文注入到全局兼容层持有者中，确保 legacy api 能顺利获取上下文
         from maibot_sdk.compat import _context_holder
         _context_holder.set_context(ctx)
 
-    async def on_load(self) -> None:
-        # 历史数据迁移（旧版 keys.json / data.json / config.toml → 外部数据目录）
-        try:
-            key_manager.ensure_migrated()
-            data_manager.ensure_migrated()
-        except Exception as e:
-            self.ctx.logger.warning(f"[GeminiDrawer] 历史数据迁移失败: {e}")
+    def normalize_plugin_config(self, config_data: Optional[Mapping[str, Any]]) -> Tuple[dict[str, Any], bool]:
+        # 先验证普通配置。校验失败时保留原 TOML 和数据，不能开始迁移。
+        normalized, changed = super().normalize_plugin_config(config_data)
+        if self._storage_root is not None and not self._storage_ready:
+            initialize_storage(self._storage_root, Path(__file__).parent, key_manager, data_manager)
+            self._storage_ready = True
+        migrated = migrate_legacy_config(
+            config_data or {}, key_manager, data_manager, Path(__file__).parent / "config.toml"
+        )
+        return normalized, changed or migrated
 
+    async def on_load(self) -> None:
         await self._load_video_guards(data_manager.data_dir / "video_retry_guard.json")
         self._autonomous_quota = AutonomousQuota(data_manager.data_dir / "autonomous_quota.json")
         if self._autonomous_quota.error:

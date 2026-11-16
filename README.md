@@ -1,6 +1,8 @@
 # Gemini 绘图插件
 
-> **Version:** 1.16.0
+> **Version:** 1.16.1
+
+升级要求：MaiBot 1.4.4–1.4.5（必须包含“配置先迁移、后重建”修复），SDK 2.23.0 或更高版本。
 
 本插件基于 Google的Gemini 系列模型，提供强大的图片二次创作能力。它可以根据用户提供的图片和指定的风格指令，生成一张全新的图片，更新日志在[CHANGELOG.md](https://github.com/namchengwuqiu/gemini_drawer/blob/main/CHANGELOG.md)中查看。
 
@@ -242,7 +244,7 @@ Key 错误。同步绘图尚未取得图片时，空响应、解析失败、断�
 
 本仓库 Docker 部署已将同一数据目录挂载为 `/MaiMBot/data`，可设置 `api.video_shared_dir = "/MaiMBot/data/gemini_drawer/video_outbox"`。单独部署的 SnowLuma / NapCat 也必须能读到该路径，否则不能使用共享文件模式。
 
-旧版本 `config.toml` 中的 `api_url`、`enable_google`、`lmarena_api_*` 会在插件加载时自动迁移到渠道数据，并从配置文件中移除。
+旧版本 `config.toml` 中的渠道、Key、提示词及 `api_url`、`enable_google`、`lmarena_api_*` 会在宿主配置归一化阶段迁移，成功保存后才清理旧字段。迁移前保留原始字节备份 `config.toml.pre-migration.bak`（包含凭据，请勿发布）；迁移或校验失败会停止升级并保留原 TOML，新位置已有的同名渠道、提示词和 Key 状态优先。
 
 ### NapCat HTTP 服务器配置 🆕
 
@@ -284,7 +286,7 @@ Key 错误。同步绘图尚未取得图片时，空响应、解析失败、断�
 生成时，底图会作为图生图参考发送给绘图端点。为减少角色漂移，建议保留默认的 `base_prompt` 和 `polish_template` 身份约束；如需补充人物设定，请追加确定的外观信息，不要删除“保持同一人物”和“保持原始画风”等约束。底图清晰、正脸、遮挡少时，人物一致性通常更稳定，但最终效果仍取决于所用图像模型的参考图遵循能力。
 
 ### 自定义渠道配置
-自定义渠道的配置数据存储于 `gemini_drawer/data.json` 中，建议使用管理员指令进行管理。
+自定义渠道的配置数据存储于 SDK 分配的插件数据目录的 `data.json` 中，建议使用管理员指令进行管理。
 
 **支持的 URL 格式 (严格校验)**：
 
@@ -415,8 +417,8 @@ Key 错误。同步绘图尚未取得图片时，空响应、解析失败、断�
 ### 4. 数据存储
 
 插件将所有提示词（prompts）和渠道（channels）配置存储在插件数据目录的 `data.json` 文件中
-（Docker 部署为 `/MaiMBot/data/gemini_drawer/data.json`；直接部署为 `data/MaiMBot/gemini_drawer/data.json`）。
-这个文件在首次运行时会自动创建，如果之前有 `config.toml` 配置，也会自动迁移数据。
+（使用 `ctx.paths.data_dir`，默认主实例路径为 `/MaiMBot/data/plugins/namchengwuqiu.gemini_drawer/data.json`；其他 Bot 使用各自独立的数据目录）。
+首次绑定数据目录时自动复制当前 Bot 旧 `data/gemini_drawer/` 中的渠道、Key、大香蕉词库、视频防重记录和主动绘图额度；原文件保留，已有目标文件不覆盖。迁移标记 `.legacy-storage-migrated.json` 防止后续重启重新导入旧数据。原始部署还兼容插件源码中的历史 JSON 文件，其他 Bot 不会导入共享源码中的旧数据。旧 TOML 在默认值补齐和字段清理前完成迁移。
 
 **下载地址策略**：图片与视频的下载目标会先校验 scheme、主机与 DNS 解析结果，并逐跳校验重定向；
 默认拒绝内网、回环与链路本地地址（防 SSRF）。重定向到其他站点时会移除请求里的认证头，
@@ -466,7 +468,7 @@ Host 与 TLS 名称。本地绘图渠道需要下载本地地址时，推荐在 
 - **删除**: `/删除提示词 水彩画` (即时生效)
 - **使用**: `/+水彩画`
 
-如果需要手动批量添加，可以编辑 `data/data.json` 。
+如果需要手动批量添加，可以编辑当前 Bot 的插件数据目录中的 `data.json`。
 
 ---
 
@@ -574,7 +576,7 @@ pending 会话隔离、等待提示随机取值）。测试不参与插件运行
 - **提示词**：按名称或全文搜索、分页浏览，添加、修改和删除本地提示词。
 - **Key**：通过弹框添加或替换密钥，调整所属渠道、状态及错误禁用上限；重置可启用密钥并清零错误次数。渠道下添加时自动填写所属渠道，Key 较多时支持按渠道分页。
 
-页面直接读取插件当前使用的外部数据目录，渠道和提示词保存到 `data.json`，Key 保存到 `keys.json`。这些操作不迁移数据，也不会把业务数据写入 `config.toml`。Docker 部署下，数据仍位于 `/MaiMBot/data/gemini_drawer/`（本项目宿主机对应 `data/MaiMBot/gemini_drawer/`）。
+页面直接读取插件当前使用的外部数据目录，渠道和提示词保存到 `data.json`，Key 保存到 `keys.json`。这些操作不迁移数据，也不会把业务数据写入 `config.toml`。Docker 主实例默认位于 `/MaiMBot/data/plugins/namchengwuqiu.gemini_drawer/`（本项目宿主机对应 `data/MaiMBot/plugins/namchengwuqiu.gemini_drawer/`）。
 
 Key 默认遮盖且不回显明文，编辑时留空表示保留旧密钥。编辑保存会保留最新使用统计和未修改的额外字段；记录发生编辑冲突时页面保留输入并提示重新打开。删除渠道会保留其 Key，便于之后恢复渠道或重新分配。渠道和提示词的名称作为引用标识，编辑时保持原名称。
 

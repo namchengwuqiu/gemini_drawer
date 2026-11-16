@@ -4,6 +4,7 @@ data/*
 
 # Ignore configuration file with sensitive keys
 config.toml
+/config.toml.pre-migration.bak
 
 # Ignore Python cache files
 __pycache__/
