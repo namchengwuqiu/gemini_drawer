@@ -411,7 +411,8 @@ async def test_real_multi_command_sends_only_typed_prompt_and_both_images(wire, 
 
     jpeg = b'\xff\xd8' + b'j' * 300
     manager = DataManager(tmp_path / 'data.json')
-    manager.add_prompt('贴贴', '两个人贴贴')
+    preset = '让图一和图二的角色贴贴'
+    manager.add_prompt('贴贴', preset)
     monkeypatch.setattr(draw_commands, 'data_manager', manager)
     command = make_cmd(MultiImageDrawCommand)
     command.message = CompatMessage({
@@ -436,8 +437,9 @@ async def test_real_multi_command_sends_only_typed_prompt_and_both_images(wire, 
     assert reason == '绘图成功'
     assert len(wire['requests']) == 1
     content = json.loads(wire['requests'][0].content)['messages'][0]['content']
+    expected_prompt = preset if command_text.startswith('/多图+') else '两个人贴贴'
     assert [part['text'] for part in content if part['type'] == 'text'] == [
-        'Prompt: 两个人贴贴', 'Image 1:', 'Image 2:',
+        f'Prompt: {expected_prompt}', 'Image 1:', 'Image 2:',
     ]
     assert [part['image_url']['url'] for part in content if part['type'] == 'image_url'] == [
         'data:image/png;base64,' + PNG_B64,
@@ -452,7 +454,7 @@ async def test_named_multi_command_still_requires_two_images(wire, monkeypatch, 
     from gemini_drawer.plugin import CompatMessage
 
     manager = DataManager(tmp_path / 'data.json')
-    manager.add_prompt('贴贴', '两个人贴贴')
+    manager.add_prompt('贴贴', '让图一和图二的角色贴贴')
     monkeypatch.setattr(draw_commands, 'data_manager', manager)
     command = make_cmd(draw_commands.MultiImageDrawCommand)
     command.message = CompatMessage({
@@ -466,6 +468,39 @@ async def test_named_multi_command_still_requires_two_images(wire, monkeypatch, 
     assert await command.execute() == (True, '参考图不满足要求', True)
     assert any('至少提供2张图片' in text for text in command.sent_texts)
     assert wire['requests'] == []
+
+
+@pytest.mark.parametrize("has_single_image_preset", [True, False])
+async def test_random_draw_skips_multi_image_presets(wire, monkeypatch, tmp_path, has_single_image_preset):
+    import json
+    from gemini_drawer.commands import draw_commands
+    from gemini_drawer.core.managers import DataManager
+    from gemini_drawer.plugin import CompatMessage
+
+    manager = DataManager(tmp_path / "data.json")
+    manager.add_prompt("本地合影", "用两张参考图中的角色合影")
+    manager.save_banana_data({"prompts": {"大香蕉/动漫 SFW/三人比心": "图一、图二、图三的角色一起比心"}})
+    if has_single_image_preset:
+        manager.add_prompt("单图预设", "让图一角色和另一位人物一起合影")
+    monkeypatch.setattr(draw_commands, "data_manager", manager)
+    command = make_cmd(draw_commands.RandomPromptDrawCommand)
+    command.message = CompatMessage({
+        "session_id": "stream-1", "user_id": "456",
+        "raw_message": [{"type": "text", "data": "/随机"}, {"type": "image", "data": PNG_B64}],
+    })
+
+    if not has_single_image_preset:
+        assert await command.execute() == (True, "无单图预设", True)
+        assert any("/多图+" in text for text in command.sent_texts)
+        assert wire["requests"] == []
+        return
+
+    assert await command.execute() == (True, "绘图成功", True)
+    assert command.get_image_caption() == "🎲 单图预设"
+    assert len(wire["requests"]) == 1
+    parts = json.loads(wire["requests"][0].content)["contents"][0]["parts"]
+    assert [part["text"] for part in parts if "text" in part] == ["让图一角色和另一位人物一起合影"]
+    assert len([part for part in parts if "inline_data" in part or "inlineData" in part]) == 1
 
 
 @pytest.mark.parametrize('cached', [False, True])

@@ -140,28 +140,30 @@ def multi_command(text, config=None):
     '/多图+大香蕉/动漫 SFW/贴贴', '[CQ:at,qq=123] /多图+贴贴 [CQ:image,file=a]',
 ])
 async def test_multi_command_resolves_banana_names_without_image_descriptions(names, monkeypatch, text):
-    banana(names, {'大香蕉/动漫 SFW/贴贴': {'content': 'two people together', 'source_title': '贴贴'}})
+    prompt = 'Draw the characters from Image 1 and Image 2 together.'
+    banana(names, {'大香蕉/动漫 SFW/贴贴': {'content': prompt, 'source_title': '贴贴'}})
     monkeypatch.setattr(draw_commands, 'data_manager', names)
     command = multi_command(text)
 
     assert re.search(command.command_pattern, text)
-    assert await command.get_prompt() == 'two people together'
+    assert await command.get_prompt() == prompt
     command.send_text.assert_not_awaited()
 
 
 async def test_multi_command_local_preset_wins_and_preserves_multiline_content(names, monkeypatch):
     names.add_prompt('贴贴', '第一张图的人物\n和第二张图的人物一起合影[保留细节]')
-    banana(names, {'大香蕉/A/贴贴': {'content': 'remote', 'source_title': '贴贴'}})
+    banana(names, {'大香蕉/A/贴贴': {'content': '让图一和图二的角色合影', 'source_title': '贴贴'}})
     monkeypatch.setattr(draw_commands, 'data_manager', names)
 
     assert await multi_command('/多图+贴贴').get_prompt() == '第一张图的人物\n和第二张图的人物一起合影[保留细节]'
-    assert await multi_command('/多图+贴贴1').get_prompt() == 'remote'
+    assert await multi_command('/多图+贴贴1').get_prompt() == '让图一和图二的角色合影'
 
 
 async def test_multi_command_lists_numbered_choices_and_resolves_selection(names, monkeypatch):
     banana(names, {
-        '大香蕉/A/贴贴': {'content': 'first', 'source_title': '贴贴'},
-        '大香蕉/B/贴贴': {'content': 'second', 'source_title': '贴贴'},
+        '大香蕉/A/贴贴': {'content': '画两个人贴贴', 'source_title': '贴贴'},
+        '大香蕉/B/贴贴': {'content': '图一和图二的角色相拥', 'source_title': '贴贴'},
+        '大香蕉/C/贴贴': {'content': '把两张参考图拼成一张图', 'source_title': '贴贴'},
     })
     monkeypatch.setattr(draw_commands, 'data_manager', names)
     command = multi_command('/多图+贴贴')
@@ -169,9 +171,26 @@ async def test_multi_command_lists_numbered_choices_and_resolves_selection(names
 
     assert await command.execute() == (True, '无效的Prompt', True)
     notice = command.send_text.await_args.args[0]
-    assert '/多图+贴贴1' in notice and '/多图+贴贴2' in notice
+    assert '/多图+贴贴1' not in notice
+    assert '/多图+贴贴2' in notice and '/多图+贴贴3' in notice
     command.collect_images.assert_not_awaited()
-    assert await multi_command('/多图+贴贴2').get_prompt() == 'second'
+    assert await multi_command('/多图+贴贴2').get_prompt() == '图一和图二的角色相拥'
+
+
+@pytest.mark.parametrize('name', ['本地', '贴贴1', '大香蕉/A/贴贴'])
+async def test_multi_command_rejects_single_image_presets_before_collecting_images(names, monkeypatch, name):
+    names.add_prompt('本地', '只参考图一的角色')
+    banana(names, {
+        '大香蕉/A/贴贴': {'content': '画两个人贴贴', 'source_title': '贴贴'},
+        '大香蕉/B/贴贴': {'content': '让图一和图二的角色贴贴', 'source_title': '贴贴'},
+    })
+    monkeypatch.setattr(draw_commands, 'data_manager', names)
+    command = multi_command('/多图+' + name)
+    command.collect_images = AsyncMock()
+
+    assert await command.execute() == (True, '无效的Prompt', True)
+    assert f'/+{name}' in command.send_text.await_args.args[0]
+    command.collect_images.assert_not_awaited()
 
 
 @pytest.mark.parametrize('text,error', [
@@ -194,13 +213,13 @@ async def test_invalid_multi_preset_stops_before_collecting_images(names, monkey
 
 @pytest.mark.parametrize('behavior,name,expected', [
     ({'enable_banana_prompts': False}, '贴贴', None),
-    ({'enable_banana_prompts': False}, '本地', 'local'),
+    ({'enable_banana_prompts': False}, '本地', '用两张参考图中的人物合影'),
     ({'show_restricted': False}, '贴贴', None),
-    ({'show_restricted': True}, '贴贴', 'remote'),
+    ({'show_restricted': True}, '贴贴', '让图一和图二的角色贴贴'),
 ])
 async def test_multi_preset_obeys_banana_and_restricted_settings(names, monkeypatch, behavior, name, expected):
-    names.add_prompt('本地', 'local')
-    banana(names, {'大香蕉/A/贴贴': {'content': 'remote', 'source_title': '贴贴', 'restricted': True}})
+    names.add_prompt('本地', '用两张参考图中的人物合影')
+    banana(names, {'大香蕉/A/贴贴': {'content': '让图一和图二的角色贴贴', 'source_title': '贴贴', 'restricted': True}})
     monkeypatch.setattr(draw_commands, 'data_manager', names)
     command = multi_command('/多图+' + name, {'behavior': behavior})
 

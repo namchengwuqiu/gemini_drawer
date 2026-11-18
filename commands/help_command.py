@@ -51,8 +51,8 @@ class HelpCommand(CtxSendMixin, BaseCommand):
         user_text += "▪️ /绘图 {描述词}: 文生图，根据文字描述生成图片\n"
         user_text += "▪️ /bnn {prompt}: 使用你的自定义prompt进行绘图\n"
         user_text += "▪️ /多图 {prompt}: 多图生图，需配合至少2张图片使用\n"
-        user_text += "▪️ /多图+{预设名称}: 使用本地或大香蕉提示词，需配合至少2张图片使用\n"
-        user_text += "▪️ /随机 或 /随机绘图: 随机抽取预设风格进行绘图\n"
+        user_text += "▪️ /多图+{预设名称}: 仅调用识别为多图的预设，需配合至少2张图片使用\n"
+        user_text += "▪️ /随机 或 /随机绘图: 随机抽取单图预设，跳过明确需要多张参考图的词条\n"
         user_text += "▪️ /图生视频 {描述词}: 图生视频，需配合图片使用\n"
         user_text += "▪️ /文生视频 {描述词}: 文生视频，只需文字描述\n\n"
         user_text += "【使用方法】\n"
@@ -64,7 +64,7 @@ class HelpCommand(CtxSendMixin, BaseCommand):
         if banana_enabled:
             user_text += "\n\n【大香蕉扩展词库】\n"
             user_text += f"▪️ 当前可用 {len(banana_prompts)} 条"
-            user_text += "\n▪️ 使用 `/+名称` 调用；同名词条自动编号，如 `/+名称1`、`/+名称2`"
+            user_text += "\n▪️ 单图用 `/+名称`，多图用 `/多图+名称`；同名词条自动编号"
             user_text += "\n▪️ 名称与管理页一致，也支持 `/+ 完整名称`"
         else:
             user_text += "\n\n【大香蕉扩展词库】\n▪️ 当前未启用"

@@ -24,15 +24,17 @@ UniversalPromptCommand (/+ 指令名):
 MultiImageDrawCommand (/多图):
     多图生图命令
     - 命令格式：/多图 <自定义提示词> 或 /多图+<预设名称>
-    - 需要至少两张参考图，预设名称沿用 /+ 的查找规则
+    - 需要至少两张参考图，预设仅限已识别为多图的词条
 
 每个命令通过重写 get_prompt() 方法来定义如何解析用户输入并生成提示词。
 """
-import re
+import asyncio
 import random
+import re
 from typing import Tuple, Optional
 from .base_commands import BaseDrawCommand, BaseMultiImageDrawCommand, BaseVideoCommand
 from ..core.managers import data_manager
+from ..core.prompt_references import minimum_reference_images
 from ..utils import logger
 
 #: 这些前缀由专门的 Command 处理，Action 不应重复触发，工具描述也由它生成。
@@ -125,7 +127,7 @@ class UniversalPromptCommand(BaseDrawCommand):
 
 class MultiImageDrawCommand(BaseMultiImageDrawCommand):
     command_name: str = "gemini_multi_image_draw"
-    command_description: str = "多图生图：根据至少2张图片生成图片，支持 /多图 描述词 或 /多图+预设名称"
+    command_description: str = "多图生图：至少附2张图，使用 /多图 描述词 或 /多图+多图预设名称"
     command_pattern: str = r".*/多图.*"
 
     async def get_prompt(self) -> Optional[str]:
@@ -159,13 +161,24 @@ class MultiImageDrawCommand(BaseMultiImageDrawCommand):
                 await self.send_text(f"❌ 未找到提示词: {cmd_name}\n请在绘图管理页查看可用名称；同名词条请带上末尾数字。")
                 return None
 
-            if len(prompts) > 1:
-                choices = "\n".join(f"▪️ /多图+{name}" for name in list(prompts)[:20])
-                more = f"\n还有 {len(prompts) - 20} 条，请在绘图管理页查看。" if len(prompts) > 20 else ""
-                await self.send_text(f"找到多个同名词条，请使用编号名称：\n{choices}{more}")
+            multi_prompts = {
+                name: content for name, content in prompts.items()
+                if isinstance(content, str) and minimum_reference_images(content) > 1
+            }
+            if not multi_prompts:
+                await self.send_text(
+                    f"❌ 「{cmd_name}」未被识别为多图预设。请用 `/+{cmd_name}` 调用，"
+                    "或用 `/多图 描述词` 自定义多图绘图。"
+                )
                 return None
 
-            cmd_name, prompt_text = next(iter(prompts.items()))
+            if len(prompts) > 1:
+                choices = "\n".join(f"▪️ /多图+{name}" for name in list(multi_prompts)[:20])
+                more = f"\n还有 {len(multi_prompts) - 20} 条，请在绘图管理页查看。" if len(multi_prompts) > 20 else ""
+                await self.send_text(f"存在同名词条，请使用编号选择多图预设：\n{choices}{more}")
+                return None
+
+            cmd_name, prompt_text = next(iter(multi_prompts.items()))
             logger.info(f"[多图] 使用预设提示词: {cmd_name}")
 
         return prompt_text
@@ -174,7 +187,7 @@ class MultiImageDrawCommand(BaseMultiImageDrawCommand):
 class RandomPromptDrawCommand(BaseDrawCommand):
     """随机绘图命令 - 从预设中随机选择一个提示词进行绘图"""
     command_name: str = "gemini_random_draw"
-    command_description: str = "随机绘图：从预设风格中随机抽取一个进行绘图"
+    command_description: str = "随机绘图：随机抽取单图预设，跳过明确需要多张参考图的提示词"
     command_pattern: str = r".*(?:^|\s)/随机(?:绘图)?(?:$|\s).*"
 
     def __init__(self, *args, **kwargs):
@@ -192,9 +205,16 @@ class RandomPromptDrawCommand(BaseDrawCommand):
             await self.send_text("❌ 当前没有任何预设提示词！\n请先使用 `/添加提示词` 添加。")
             return True, "无预设", True
         
-        # 随机选择一个提示词
-        self.selected_prompt_name = random.choice(list(prompts.keys()))
-        self.selected_prompt_content = prompts[self.selected_prompt_name]
+        # 首次使用时要扫描整套词库，放到线程里避免阻塞其他命令。
+        eligible = await asyncio.to_thread(
+            lambda: [(name, prompt) for name, prompt in prompts.items()
+                     if isinstance(prompt, str) and prompt.strip() and minimum_reference_images(prompt) == 1]
+        )
+        if not eligible:
+            await self.send_text("❌ 当前没有可用于单图随机绘图的预设。多图预设请用 `/多图+名称`，并附上参考图。")
+            return True, "无单图预设", True
+
+        self.selected_prompt_name, self.selected_prompt_content = random.choice(eligible)
         
         logger.info(f"[Random] 随机选中提示词: {self.selected_prompt_name}")
         

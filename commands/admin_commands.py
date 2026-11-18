@@ -44,6 +44,7 @@ from ..core.channel_url import (
     split_url_and_model,
 )
 from ..core.managers import key_manager, data_manager
+from ..core.prompt_references import minimum_reference_images
 from ..core.protocols import (
     IMAGE_PROTOCOLS, PROTOCOL_AUTO_WORDS, VIDEO_PROTOCOLS,
     normalize_protocol, protocol_choices_text,
@@ -838,7 +839,7 @@ class BananaPromptSearchCommand(BaseAdminCommand):
             content = str(entry.get("content") or "")
             haystack = f"{key}\n{title}\n{section}\n{content}".lower()
             if keyword_lower in haystack:
-                matches.append((key, section, title, bool(entry.get("restricted", False))))
+                matches.append((key, content, bool(entry.get("restricted", False))))
 
         if not matches:
             await self._send_text(f"❌ 未找到包含 `{keyword}` 的大香蕉提示词。")
@@ -846,9 +847,13 @@ class BananaPromptSearchCommand(BaseAdminCommand):
 
         limit = 20
         lines = [f"🍌 大香蕉提示词搜索：`{keyword}`，命中 {len(matches)} 条，显示前 {min(limit, len(matches))} 条："]
-        for key, section, title, restricted in matches[:limit]:
+        for key, content, restricted in matches[:limit]:
             restricted_mark = " [restricted]" if restricted else ""
-            lines.append(f"▪️ /+ {key}{restricted_mark}")
+            minimum_images = minimum_reference_images(content)
+            if minimum_images > 1:
+                lines.append(f"▪️ /多图+{key}（至少 {minimum_images} 张参考图）{restricted_mark}")
+            else:
+                lines.append(f"▪️ /+ {key}{restricted_mark}")
 
         if len(matches) > limit:
             lines.append(f"\n还有 {len(matches) - limit} 条未显示，请换更精确的关键词。")

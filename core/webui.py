@@ -16,6 +16,7 @@ from .channel_url import (
 )
 from .image_size import normalize_image_size
 from .managers import DataManager, KeyManager
+from .prompt_references import minimum_reference_images
 from .protocols import IMAGE_PROTOCOLS, VIDEO_PROTOCOLS, normalize_protocol
 
 
@@ -109,11 +110,14 @@ class DrawerWebUI:
                     alias = aliases[name]
                     if search.casefold() not in (alias + " " + name + " " + json.dumps(entry, ensure_ascii=False)).casefold():
                         continue
+                    content = entry["content"]
                     rows.append({"id": name, "name": alias,
                                  "section_title": entry.get("section_title") or "未分类",
-                                 "preview": entry["content"][:160], "length": len(entry["content"]),
+                                 "preview": content[:160], "length": len(content),
                                  "restricted": bool(entry.get("restricted", False))})
                 result = self._page(rows, page, data, keys)
+                for row in result["rows"]:
+                    row["minimum_reference_images"] = minimum_reference_images(entries[row["id"]]["content"])
                 result["banana"] = {"synced_at": str(banana.get("synced_at") or "尚未同步"),
                                     "remote_last_updated": str(banana.get("remote_last_updated") or "未知"),
                                     "readonly": True}
@@ -161,7 +165,13 @@ class DrawerWebUI:
                 if search.casefold() in haystack.casefold():
                     rows.append(row)
             result = self._page(rows, page, data, keys)
-            if kind == "channels":
+            if kind == "prompts":
+                for row in result["rows"]:
+                    content = data["prompts"][row["id"]]
+                    row["minimum_reference_images"] = (
+                        minimum_reference_images(content) if isinstance(content, str) else None
+                    )
+            elif kind == "channels":
                 orphan_keys = [row for row in key_rows if row["channel"] not in data.get("channels", {})
                                and search.casefold() in json.dumps(row, ensure_ascii=False).casefold()]
                 result["unassigned"] = self._page(orphan_keys, 1, data, keys)
@@ -196,9 +206,12 @@ class DrawerWebUI:
                     raise ValueError("词条已更新或不存在，请刷新词库列表。")
                 entry = entries[record_id]
                 alias = self.data.get_banana_prompt_aliases(show_restricted=True)[record_id]
+                content = entry["content"]
+                minimum_images = minimum_reference_images(content)
+                prefix = "/多图+" if minimum_images > 1 else "/+"
                 result = {"id": record_id, "readonly": True,
-                          "payload": {"text": entry["content"], "source_title": entry.get("source_title") or record_id,
-                                      "command": f"/+{alias}",
+                          "payload": {"text": content, "source_title": entry.get("source_title") or record_id,
+                                      "command": f"{prefix}{alias}", "minimum_reference_images": minimum_images,
                                       "section_title": entry.get("section_title") or "未分类",
                                       "prompt_id": str(entry.get("prompt_id") or ""),
                                       "restricted": bool(entry.get("restricted", False))}}

@@ -73,6 +73,21 @@ def test_listing_is_paginated_searches_full_prompt_and_masks_keys(store):
     assert detail["payload"]["value"] == ""
 
 
+def test_local_prompt_list_updates_reference_count_after_edit(store):
+    web, _, _, _ = store
+    row, = web.list_records("prompts", search="头像")["rows"]
+    assert row["minimum_reference_images"] == 1
+
+    prefix = "保留构图。" * 40
+    web.change("prompts", "save", row["id"], row["version"], {
+        "text": prefix + "使用图一、图二和图三的角色合影。",
+    })
+
+    updated, = web.list_records("prompts", search="头像")["rows"]
+    assert updated["preview"] == prefix[:160]
+    assert updated["minimum_reference_images"] == 3
+
+
 def test_edit_conflict_does_not_overwrite_new_content(store):
     web, data, _, _ = store
     detail = web.detail("prompts", "头像")
@@ -292,6 +307,17 @@ def test_banana_page_shows_callable_numbered_names(store):
     assert detail["payload"]["command"] == "/+举猫猫2"
     assert data.get_prompt_matches(row["name"]) == {row["name"]: "second"}
     assert data.banana_file.read_bytes() == before
+
+
+def test_banana_page_classifies_old_entries_and_suggests_multi_command(store):
+    web, data, _, _ = store
+    key = "大香蕉/动漫 SFW/三人比心"
+    data.save_banana_data({"prompts": {key: "画出图一、图二、图三的角色一起比心"}})
+
+    assert web.list_records("banana")["rows"][0]["minimum_reference_images"] == 3
+    detail = web.detail("banana", key)["payload"]
+    assert detail["minimum_reference_images"] == 3
+    assert detail["command"] == "/多图+三人比心"
 
 
 @pytest.mark.parametrize("operation", ["save", "delete", "reset"])

@@ -798,8 +798,8 @@
         kind === "channels"
           ? ["渠道 / API 地址", "模型 / 协议", "状态", "操作"]
           : kind === "banana"
-            ? ["名称 / 分类", "内容预览", "标记 / 长度", "操作"]
-            : ["名称", "内容预览", "长度", "操作"];
+            ? ["名称 / 分类", "内容预览", "参考图 / 标记", "操作"]
+            : ["名称", "内容预览", "参考图 / 长度", "操作"];
       $("columns").replaceChildren(
         ...titles.map((title, i) => {
           const cell = text("th", title);
@@ -855,11 +855,14 @@
           if (kind === "banana")
             cells[0].append(text("div", record.section_title, "subline"));
           cells[1].append(text("div", record.preview));
-          cells[2].textContent = `${record.length} 字符`;
+          cells[2].append(
+            text("div", referenceLabel(record.minimum_reference_images)),
+          );
           if (kind === "banana")
             cells[2].append(
               text("div", record.restricted ? "限制级" : "普通", "subline"),
             );
+          cells[2].append(text("div", `${record.length} 字符`, "subline"));
         }
         const actions = document.createElement("div");
         actions.className = "row-actions";
@@ -1085,6 +1088,10 @@
       });
       $("fields").append(group);
     }
+    function referenceLabel(minimum) {
+      if (minimum == null) return "—";
+      return minimum > 1 ? `至少 ${minimum} 张参考图` : "单图候选";
+    }
     async function openEditor(
       record = null,
       editKind = kind,
@@ -1124,6 +1131,10 @@
             wide: true,
           });
           field("command", "调用指令", data.command, {
+            readonly: true,
+            wide: true,
+          });
+          field("minimum_reference_images", "参考图要求", referenceLabel(data.minimum_reference_images), {
             readonly: true,
             wide: true,
           });
