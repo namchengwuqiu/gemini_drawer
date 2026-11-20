@@ -123,6 +123,8 @@ class CompatMessage:
         # 1. Basic text and ID properties
         self.message_id = str(_get_val(["message_id", "id", "session_id"], ""))
         self.session_id = str(_get_val(["session_id", "stream_id", "message_id"], ""))
+        self.account_id = _get_val(["account_id"])
+        self.reply_to = _get_val(["reply_to"])
         self.processed_plain_text = _get_val(["processed_plain_text", "plain_text", "display_message"], "")
         self.platform = _get_val(["platform"], "qq")
 

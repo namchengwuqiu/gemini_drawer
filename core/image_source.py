@@ -5,18 +5,20 @@ Gemini Drawer 取图模块
 
     回复的消息 > 当前消息 > @提及用户的头像
 
-每一层都有多条获取路径（消息段内联 base64 / hash 缓存 / 消息段 URL / SDK message capability /
-宿主数据库回查），任一层失败都不影响后续层继续尝试。
+每一层都有多条获取路径，包括消息段、图片缓存、宿主历史和 QQ 原始消息回查。
+任一层失败都不影响后续层继续尝试。
 
 宿主数据库相关的依赖统一走 host_bridge，本模块不直接 import src.*。
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import re
 from typing import Any, List, Optional, Tuple
 
 from . import host_bridge
+from .guards import message_user_id
 from ..utils import download_image, safe_json_dumps
 from ..utils.limits import MAX_INLINE_BASE64_CHARS, MAX_MESSAGE_IMAGES
 
@@ -226,7 +228,7 @@ async def resolve_reply_images(
 ) -> List[bytes]:
     """取回**被回复消息**里的所有图片（多图绘图用）。
 
-    和 extract_source_image 走同样的三条路径（消息段 → 官方消息能力 → 数据库），
+    和 extract_source_image 一样，依次查消息段、宿主历史和 QQ 原始消息，
     但返回全部图片而非第一张，且永不退化为取头像。
 
     没有回复、或回复里没有图片时返回空列表。
@@ -316,10 +318,17 @@ class _SourceImageFinder:
 
         # C. 宿主数据库兜底
         try:
-            return await self._image_from_db(reply_to_id, "数据库引用的消息")
+            img = await self._image_from_db(reply_to_id, "数据库引用的消息")
+            if img:
+                return img
         except Exception as e:
             self._log("warning", f"Failed to fetch reply message from DB: {e}")
-        return None
+
+        segments = await self._fetch_qq_reply_segments(reply_to_id)
+        img = await extract_first_image_from_segments(segments, self.proxy, self.logger)
+        if img:
+            self._log("info", "从 QQ 适配器返回的原始引用消息中提取到图片")
+        return img
 
     async def _from_current(self) -> Optional[bytes]:
         if hasattr(self.message, 'message_segment'):
@@ -404,12 +413,16 @@ class _SourceImageFinder:
 
     def _reply_target_id(self) -> Optional[Any]:
         """被回复消息的 message_id。"""
-        reply_to_id = getattr(self.message, 'reply_to', None)
-        if not reply_to_id:
-            reply = getattr(self.message, 'reply', None)
-            if reply is not None:
-                reply_to_id = getattr(reply, 'message_id', None)
-        return reply_to_id or None
+        reply = getattr(self.message, 'reply', None)
+        reply_to_id = getattr(self.message, 'reply_to', None) or getattr(reply, 'message_id', None)
+        if reply_to_id:
+            return reply_to_id
+
+        for segment in normalize_segments(getattr(self.message, 'message_segment', None)):
+            kind, data, _ = _seg_fields(segment)
+            if kind == 'reply' and isinstance(data, dict) and data.get('target_message_id'):
+                return data['target_message_id']
+        return None
 
     async def all_reply_images(self) -> List[bytes]:
         """被回复消息里的全部图片，路径同 _from_reply 但不取第一张就停。"""
@@ -447,7 +460,62 @@ class _SourceImageFinder:
         except Exception as e:
             self._log("warning", f"Failed to fetch reply message from DB: {e}")
 
-        return []
+        segments = await self._fetch_qq_reply_segments(reply_to_id)
+        images = await extract_images_from_segments(segments, self.proxy, self.logger)
+        if images:
+            self._log("info", f"从 QQ 适配器返回的原始引用消息中提取到 {len(images)} 张图片")
+        return images
+
+    async def _fetch_qq_reply_segments(self, message_id: Any) -> List[dict]:
+        """宿主历史按原 ID 查不到时，从 QQ 适配器补取引用消息的图片段。"""
+        api = getattr(self.ctx, 'api', None)
+        message_id = str(message_id).strip()
+        if not api or getattr(self.message, 'platform', None) != 'qq':
+            return []
+        if not re.fullmatch(r'-?[0-9]{1,32}', message_id) or int(message_id) == 0:
+            return []
+
+        try:
+            original = await asyncio.wait_for(
+                api.call('adapter.napcat.message.get_msg', version='1', message_id=int(message_id)),
+                timeout=8,
+            )
+        except Exception as exc:
+            self._log("warning", f"QQ 适配器回查引用消息失败: {type(exc).__name__}")
+            return []
+
+        if not isinstance(original, dict) or str(original.get('message_id')) != message_id:
+            return []
+        if not self._is_current_qq_chat(original):
+            return []
+
+        segments = original.get('message')
+        if not isinstance(segments, list):
+            return []
+        images = []
+        for segment in segments:
+            kind, data, _ = _seg_fields(segment)
+            url = data.get('url') if isinstance(data, dict) else None
+            if kind in ('image', 'emoji') and isinstance(url, str) and url.strip():
+                images.append({'type': kind, 'data': {'url': url.strip()}})
+        return images
+
+    def _is_current_qq_chat(self, original: dict) -> bool:
+        """适配器是按全局消息 ID 查询的，下载前确认消息属于当前会话。"""
+        info = getattr(self.message, 'message_info', None)
+        group_id = getattr(getattr(info, 'group_info', None), 'group_id', None)
+        if group_id:
+            return original.get('message_type') == 'group' and str(original.get('group_id')) == str(group_id)
+
+        peer_id = message_user_id(self.message)
+        if not peer_id or original.get('message_type') != 'private':
+            return False
+        sender = original.get('sender')
+        sender_id = str(original.get('user_id') or (sender.get('user_id') if isinstance(sender, dict) else '') or '')
+        account_id = getattr(self.message, 'account_id', None)
+        return sender_id == peer_id or bool(
+            account_id and sender_id == str(account_id) and str(original.get('target_id')) == peer_id
+        )
 
     def _debug_dump_segments(self, segments: Any) -> None:
         if not self.logger:

@@ -388,6 +388,91 @@ async def test_reply_images_empty_without_reply(downloads):
     assert await src.resolve_reply_images(msg, ctx=CapabilityCtx({})) == []
 
 
+async def test_reply_target_is_read_from_message_segments_without_compat_reply(downloads):
+    msg = Msg(message_segment=[
+        {"type": "reply", "data": {"target_message_id": TARGET_MSG_ID}},
+        {"type": "at", "data": {"target_user_id": NANA_ID}},
+    ])
+    ctx = CapabilityCtx({TARGET_MSG_ID: {"raw_message": [{"type": "image", "data": PNG_B64}]}})
+
+    assert await src.extract_source_image(msg, ctx=ctx) == PNG
+    assert await src.resolve_reply_images(msg, ctx=ctx) == [PNG]
+    assert ctx.queried == [TARGET_MSG_ID, TARGET_MSG_ID]
+    assert downloads["calls"] == []
+
+
+async def test_compat_message_preserves_top_level_reply_to(downloads):
+    from gemini_drawer.plugin import CompatMessage
+
+    msg = CompatMessage({"reply_to": TARGET_MSG_ID, "raw_message": [{"type": "text", "data": "/随机"}]})
+    ctx = CapabilityCtx({TARGET_MSG_ID: {"raw_message": [{"type": "image", "data": PNG_B64}]}})
+
+    assert await src.extract_source_image(msg, ctx=ctx) == PNG
+    assert ctx.queried == [TARGET_MSG_ID]
+    assert downloads["calls"] == []
+
+
+@pytest.fixture
+def qq_reply():
+    from gemini_drawer.plugin import CompatMessage
+
+    msg = CompatMessage({
+        "message_id": "456",
+        "session_id": "stream-1",
+        "platform": "qq",
+        "group_id": "9988",
+        "raw_message": [
+            {"type": "reply", "data": {"target_message_id": "-123", "target_message_content": "[image]"}},
+            {"type": "at", "data": {"target_user_id": NANA_ID}},
+            {"type": "text", "data": " /随机"},
+        ],
+    })
+    original = {
+        "message_id": -123,
+        "message_type": "group",
+        "group_id": 9988,
+        "message": [
+            {"type": "image", "data": {"url": "https://cdn/first.jpg"}},
+            {"type": "image", "data": {"url": "https://cdn/second.png"}},
+        ],
+    }
+    ctx = CapabilityCtx({})
+    ctx.api = SimpleNamespace(call=AsyncMock(return_value=original))
+    return msg, original, ctx
+
+
+@pytest.mark.parametrize("multiple", [False, True])
+async def test_reply_missing_from_host_history_is_recovered_from_qq(qq_reply, downloads, multiple):
+    msg, _, ctx = qq_reply
+    downloads["table"].update({
+        NANA_AVATAR: b"nana-avatar", "https://cdn/first.jpg": JPG, "https://cdn/second.png": PNG,
+    })
+
+    if multiple:
+        assert await src.resolve_reply_images(msg, ctx=ctx) == [JPG, PNG]
+        assert downloads["calls"] == ["https://cdn/first.jpg", "https://cdn/second.png"]
+    else:
+        assert await src.extract_source_image(msg, ctx=ctx) == JPG
+        assert downloads["calls"] == ["https://cdn/first.jpg"]
+    ctx.api.call.assert_awaited_once_with("adapter.napcat.message.get_msg", version="1", message_id=-123)
+
+
+@pytest.mark.parametrize("failure", ["other_group", "other_id", "adapter_error", "image_unavailable"])
+async def test_qq_reply_recovery_failure_still_uses_avatar(qq_reply, downloads, failure):
+    msg, original, ctx = qq_reply
+    downloads["table"][NANA_AVATAR] = b"nana-avatar"
+    if failure == "other_group":
+        original["group_id"] = 1234
+    elif failure == "other_id":
+        original["message_id"] = 123
+    elif failure == "adapter_error":
+        ctx.api.call.side_effect = RuntimeError("adapter unavailable")
+
+    assert await src.extract_source_image(msg, ctx=ctx) == b"nana-avatar"
+    expected = ["https://cdn/first.jpg", "https://cdn/second.png"] if failure == "image_unavailable" else []
+    assert downloads["calls"] == [*expected, NANA_AVATAR]
+
+
 # ── 当前命令消息只携带图片引用（include_binary_data=False） ──
 
 

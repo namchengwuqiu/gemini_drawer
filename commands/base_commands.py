@@ -350,14 +350,9 @@ class BaseDrawCommand(_ChatContextMixin, CtxSendMixin, BaseCommand, ABC):
         images: List[bytes] = []
 
         # 1. 回复消息中的图片
-        #    走 resolve_reply_images 而不是直接读 reply 的消息段——被回复消息
-        #    往往只剩一句渲染后的纯文本，真正的图要靠官方消息能力按 id 回查。
-        if getattr(self.message, 'reply', None) is not None or getattr(self.message, 'reply_to', None):
-            logger.info("[多图] 尝试从回复消息中提取图片...")
-            reply_images = await resolve_reply_images(
-                self.message, proxy, logger, getattr(self, 'ctx', None)
-            )
-            images.extend(reply_images)
+        reply_images = await resolve_reply_images(self.message, proxy, logger, getattr(self, 'ctx', None))
+        images.extend(reply_images)
+        if reply_images:
             logger.info(f"[多图] 从回复消息中提取到 {len(reply_images)} 张图片")
 
         # 2. 当前消息中的图片；命令 RPC 可能仅携带 hash，需按消息 ID 补取原图。
